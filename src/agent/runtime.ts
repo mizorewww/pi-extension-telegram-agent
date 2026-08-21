@@ -824,7 +824,11 @@ export class BotRuntime {
 		};
 	}
 
-	/** Chat-oriented compaction summary via the aux model. Failure names provider error/abort apart from empty text. */
+	/**
+	 * Chat-oriented compaction summary via the aux model; on provider error retries once with the
+	 * main model so an unavailable compaction model cannot wedge an overflowed session forever.
+	 * Failure names provider error/abort apart from empty text.
+	 */
 	private async generateCompactionSummary(
 		prep: SessionBeforeCompactEvent["preparation"],
 	): Promise<
@@ -836,15 +840,23 @@ export class BotRuntime {
 			(prep.previousSummary
 				? `<previous-summary>\n${prep.previousSummary}\n</previous-summary>\n\n把上面的旧摘要与新内容合并成一份更新的摘要。`
 				: "请输出摘要。");
-		const result = await this.modelRuntime.completeSimple(
-			this.compactionModel,
-			{
-				systemPrompt: COMPACTION_SUMMARY_PROMPT,
-				messages: [{ role: "user", content: userText, timestamp: Date.now() }],
-			},
-			{ cacheRetention: "none", maxTokens: 4096, reasoning: this.compactionReasoning },
-		);
-		this.recordCompactionUsage(result.usage, Date.now());
+		const request = {
+			systemPrompt: COMPACTION_SUMMARY_PROMPT,
+			messages: [{ role: "user" as const, content: userText, timestamp: Date.now() }],
+		};
+		const options = { cacheRetention: "none" as const, maxTokens: 4096, reasoning: this.compactionReasoning };
+		let model = this.compactionModel;
+		let result = await this.modelRuntime.completeSimple(model, request, options);
+		if (result.stopReason === "error") {
+			// aborted is intentional (shutdown/abort signal), never retried.
+			log.warn("agent_runtime", "compaction_fallback", {
+				bot_id: this.bot.id,
+				category: classifyPiProviderFailure(result.errorMessage ?? "compaction model failed"),
+			});
+			model = this.model;
+			result = await this.modelRuntime.completeSimple(model, request, options);
+		}
+		this.recordCompactionUsage(result.usage, Date.now(), model);
 		if (result.stopReason === "error" || result.stopReason === "aborted") {
 			return { failure: `summary generation ${result.stopReason}` };
 		}
@@ -1690,8 +1702,8 @@ export class BotRuntime {
 			cost: { total: number };
 		},
 		now: number,
+		model: NonNullable<ReturnType<ModelRuntime["getModel"]>>,
 	): void {
-		if (!this.compactionModel) return;
 		const contextTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 		const result = this.db
 			.query(`
@@ -1704,7 +1716,7 @@ export class BotRuntime {
 			.run(
 				this.bot.id,
 				now,
-				this.compactionModel.id,
+				model.id,
 				this.epoch,
 				contextTokens,
 				usage.cacheRead,
@@ -1715,14 +1727,14 @@ export class BotRuntime {
 				usage.cost.total,
 				sha256Short(COMPACTION_SUMMARY_PROMPT),
 				sha256Short("[]"),
-				this.compactionModel.provider,
-				this.compactionModel.api,
+				model.provider,
+				model.api,
 			);
 		this.usageSink?.({
 			id: Number(result.lastInsertRowid),
 			botId: this.bot.id,
 			ts: now,
-			model: this.compactionModel.id,
+			model: model.id,
 			epoch: this.epoch,
 			contextTokens,
 			cacheRead: usage.cacheRead,

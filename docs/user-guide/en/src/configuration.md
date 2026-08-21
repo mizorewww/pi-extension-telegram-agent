@@ -83,6 +83,8 @@ The public example pins an explicit cost-first profile: Luna, reasoning off, sho
 
 `reasoning_effort` must be both a valid Pi-wide enum and a level supported by the selected model. Pi's SDK silently clamps unsupported values to a nearby level; to prevent cost, behavior, and status from disagreeing, Telegram agent refuses to start before any Telegram/provider call and reports the requested and supported values. The same check covers main bots, `compaction_model`, and an enabled vision model. Use Pi `/model` to inspect selectable levels; for example, `deepseek-v4-flash` accepts only `off`, `high`, and `max`.
 
+If the `compaction_model` request fails with a provider error, compaction retries once with the bot's main model and logs `compaction_fallback`, so an unavailable compaction model cannot permanently wedge an overflowed session; intentional aborts (e.g. daemon shutdown) are not retried.
+
 These controls are bounded by default:
 
 - `max_suffix_tokens: 12000` and `max_message_tokens: 4096` cap new provider-visible Telegram context;

@@ -83,6 +83,8 @@ export default defineConfig({
 
 `reasoning_effort`不仅必须是Pi全局枚举，还必须是所选模型实际支持的档位。Pi SDK本身会把不支持的值静默夹到最近档位；Telegram agent为避免费用、行为与状态显示不一致，会在任何Telegram/provider调用前拒绝启动，并列出requested与supported值。main bot、`compaction_model`及启用的vision模型执行同一检查。请在Pi `/model`查看可选档位；例如`deepseek-v4-flash`只接受`off`、`high`、`max`。
 
+`compaction_model`的请求失败（provider error）时会自动用该bot的主模型重试一次并记录`compaction_fallback`日志，避免压缩模型不可用导致overflow的session永久卡死；主动abort（如daemon关停）不会重试。
+
 以下边界都有默认上限：
 
 - `max_suffix_tokens: 12000`和`max_message_tokens: 4096`限制每轮新增的Telegram provider context；
