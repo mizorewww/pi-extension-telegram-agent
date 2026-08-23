@@ -19,6 +19,8 @@ import {
 	sha256Short,
 	CACHE_SCHEMA_VERSION,
 	COMPACTION_SUMMARY_PROMPT,
+	SHARED_PROTOCOL,
+	TOOL_CAPABILITY_DECLARATION,
 } from "../src/agent/prompt.ts";
 import { toolsHash } from "../src/agent/tools.ts";
 import {
@@ -35,9 +37,9 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 14,
-	systemZhTemplate: "0dadcaf37061",
-	systemEnTemplate: "fabd0ba82eab",
+	schemaVersion: 15,
+	systemZhTemplate: "3879a9204276",
+	systemEnTemplate: "dd8b0d03cef0",
 	serialize: "68a17d6e5c05",
 	eventSerialize: "4a57de738bf9",
 	tools: "b16b54cf6564",
@@ -55,6 +57,12 @@ test("system prompts stable (persona + protocol)", () => {
 	const b = buildSystemPrompt(readFileSync("personas/template.en.md", "utf8"));
 	expect(sha256Short(a)).toBe(GOLDEN.systemZhTemplate);
 	expect(sha256Short(b)).toBe(GOLDEN.systemEnTemplate);
+});
+
+test("shared protocol declares available tools (semantic lock)", () => {
+	// Guard against the capability declaration being deleted: a golden-only regen would
+	// otherwise mask the regression, so lock the declaration into the protocol directly.
+	expect(SHARED_PROTOCOL.includes(TOOL_CAPABILITY_DECLARATION)).toBe(true);
 });
 
 test("message serialization grammar stable", () => {

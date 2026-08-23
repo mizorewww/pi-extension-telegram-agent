@@ -3,10 +3,14 @@
 
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 14; // v14: quote reference renders media placeholder and (原消息不可见) marker
+export const CACHE_SCHEMA_VERSION = 15; // v15: shared protocol declares available tools
 
 // Fixed shared protocol is deliberately the first byte of every bot's system prompt so bots in
 // the same provider/cache cohort share the longest possible exact prefix.
+export const TOOL_CAPABILITY_DECLARATION = `## 可用工具
+
+你有三个工具：search（联网搜索，也可读取一个公开网页）、run_js（运行小型计算）、send（唯一的公开发言通道）。被问"能不能搜索/查资料/看网页"时如实说明；需要外部信息时直接用 search。`;
+
 export const SHARED_PROTOCOL = `# 群聊协议
 
 你在一个 Telegram 群里。群消息按时间顺序以如下格式出现在对话里：
@@ -23,6 +27,8 @@ export const SHARED_PROTOCOL = `# 群聊协议
 - 未被点名的概率插话可以按人设保持沉默
 - 人类明确 @你、回复你或使用你的配置名称点名时必须回应，不受概率插话的沉默或防刷屏启发式影响
 - 群里可能还有其他 bot 或成员；他们的消息你能看到，但不要替他们说话，也不要回复其他 bot 的消息
+
+${TOOL_CAPABILITY_DECLARATION}
 `;
 
 export function buildSystemPrompt(personaText: string, stickerCatalog = ""): string {

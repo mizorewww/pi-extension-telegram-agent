@@ -14,7 +14,9 @@
 
 ## CACHE_SCHEMA_VERSION
 
-当前：**14**。
+当前：**15**。
+
+v15 在共享协议末尾增加「可用工具」声明（search / run_js / send 三个工具及被问能力时的如实回答规则），修复模型对自身工具能力不自知、被问"能不能搜索/查资料/看网页"时误答的问题。trade-off：声明是双 bot 共享 prefix 的一部分，若某 bot 关闭工具开关（如 `tools.search: false`），需同步评估此声明是否仍成立——它假设三个工具都可用，与 per-bot 开关配置存在潜在不一致，会破坏共享 prefix 假设。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
 
 v14 修复引用历史消息的可见性：可见集 walker 不再信任 compaction entry 携带的 `visibleMessageIds`（那是同一 walker 算出的累积并集，clear 永远清不干净），只从 compaction 边界后的活跃窗口内 custom_message 并集恢复可见集；引用渲染对纯媒体父消息输出媒体占位（`[图片]`/`[sticker 😺]`/`[video]` 等，事件日志路径 `resolveVision:false` 不触发 vision 表 live lookup），父消息缺失时追加 `(原消息不可见)` 标记。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
 
@@ -60,6 +62,7 @@ cache-visible protocol 包括：
 - v12：compaction 先用 Pi `convertToLlm` 投影 custom Telegram messages，再序列化 summary 输入。
 - v13：recent sticker candidates只投影在最后一个Telegram batch；主模型有效窗口固定64K并在Pi估算32K时压缩到摘要+最后turn。
 - v14：引用渲染对纯媒体父消息输出媒体占位、父消息缺失追加 `(原消息不可见)`；可见集 walker 不再从 compaction entry 的 `visibleMessageIds` 重灌（详见上文）。
+- v15：共享协议末尾增加可用工具声明（search / run_js / send 及被问能力时的如实回答规则），修复模型能力自知缺失；trade-off 见上文（per-bot 工具开关与共享 prefix 假设的潜在不一致）。
 
 ## Provider payload 结构
 
@@ -141,9 +144,9 @@ Vision 默认关闭；只有显式 `vision.enabled: true` 才会执行。`auxili
 
 | 项目 | 值 |
 | --- | --- |
-| schema | `14` |
-| zh system | `0dadcaf37061` |
-| en system | `fabd0ba82eab` |
+| schema | `15` |
+| zh system | `3879a9204276` |
+| en system | `dd8b0d03cef0` |
 | legacy message serializer | `68a17d6e5c05` |
 | immutable event serializer | `4a57de738bf9` |
 | tools | `b16b54cf6564` |
