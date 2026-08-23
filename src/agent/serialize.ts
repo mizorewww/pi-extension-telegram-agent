@@ -90,15 +90,22 @@ function fmtDate(dateSec: number): string {
 	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-function shortQuote(db: Database, chatId: number, messageId: number): string | null {
+function shortQuote(db: Database, chatId: number, messageId: number, resolveVision = true): string | null {
 	const parent = db
-		.query("SELECT text, caption, display_name, username, sender_id FROM messages WHERE chat_id = ? AND message_id = ?")
+		.query(
+			"SELECT text, caption, media, display_name, username, sender_id FROM messages WHERE chat_id = ? AND message_id = ?",
+		)
 		.get(chatId, messageId) as MessageRow | null;
 	if (!parent) return null;
 	const body = (parent.text ?? parent.caption ?? "").replace(/\s+/g, " ").trim();
 	const snippet = body.length > 40 ? `${body.slice(0, 40)}…` : body;
 	const who = parent.username ? `@${parent.username}` : (parent.display_name ?? "?");
-	return snippet ? `${who} "${snippet}"` : who;
+	if (snippet) return `${who} "${snippet}"`;
+	// Pure-media parent: render the same placeholder as the body path so the model sees
+	// the media kind instead of a bare sender name (RC2). Text+media parents keep quoting
+	// only the text to bound tokens.
+	if (parent.media) return `${who} ${mediaPlaceholder(db, parent.media, resolveVision)}`;
+	return who;
 }
 
 export interface SerializeOptions {
@@ -125,8 +132,9 @@ export function serializeMessages(db: Database, rows: MessageRow[], opts: Serial
 		if (m.reply_to_message_id != null) {
 			line += ` ↪ #${m.reply_to_message_id}`;
 			if (!opts.visibleIds.has(m.reply_to_message_id)) {
-				const ref = shortQuote(db, m.chat_id, m.reply_to_message_id);
+				const ref = shortQuote(db, m.chat_id, m.reply_to_message_id, opts.resolveVision);
 				if (ref) line += ` ${ref}`;
+				else line += ` (原消息不可见)`;
 			}
 		}
 		if (m.quote) {

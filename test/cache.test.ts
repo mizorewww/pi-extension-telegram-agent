@@ -35,7 +35,7 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 13,
+	schemaVersion: 14,
 	systemZhTemplate: "0dadcaf37061",
 	systemEnTemplate: "fabd0ba82eab",
 	serialize: "68a17d6e5c05",
@@ -129,6 +129,185 @@ test("message serialization grammar stable", () => {
 	const rows = db.query("SELECT * FROM messages ORDER BY date").all() as MessageRow[];
 	const out = serializeMessages(db, rows, { visibleIds: new Set([100]) });
 	expect(sha256Short(out)).toBe(GOLDEN.serialize);
+});
+
+test("quote reference renders media placeholder and missing-parent marker (v14)", () => {
+	const db = new Database(":memory:");
+	db.exec(readFileSync("src/db/schema.sql", "utf8"));
+	const ins = db.prepare(
+		`INSERT INTO messages (chat_id, message_id, date, thread_id, sender_id, display_name, username, sender_tag, sender_chat, is_bot, text, caption, entities, reply_to_message_id, quote, forward_origin, edit_date, media, first_seen_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	);
+	// parents: photo (with vision text), sticker, plain text
+	ins.run(
+		-1004402809405,
+		300,
+		1754612345,
+		null,
+		111,
+		"Alice",
+		"alice",
+		null,
+		null,
+		0,
+		null,
+		null,
+		null,
+		null,
+		null,
+		null,
+		null,
+		JSON.stringify({ kind: "photo", file_unique_id: "uq-photo-1" }),
+		"A",
+	);
+	ins.run(
+		-1004402809405,
+		301,
+		1754612346,
+		null,
+		111,
+		"Alice",
+		"alice",
+		null,
+		null,
+		0,
+		null,
+		null,
+		null,
+		null,
+		null,
+		null,
+		null,
+		JSON.stringify({ kind: "sticker", file_unique_id: "uq-sticker-1", sticker_emoji: "😺" }),
+		"A",
+	);
+	ins.run(
+		-1004402809405,
+		302,
+		1754612347,
+		null,
+		111,
+		"Alice",
+		"alice",
+		null,
+		null,
+		0,
+		"父消息文本",
+		null,
+		null,
+		null,
+		null,
+		null,
+		null,
+		null,
+		"A",
+	);
+	// children replying to each parent
+	ins.run(
+		-1004402809405,
+		310,
+		1754612350,
+		null,
+		222,
+		"Bob",
+		null,
+		null,
+		null,
+		0,
+		"看这个",
+		null,
+		null,
+		300,
+		null,
+		null,
+		null,
+		null,
+		"A",
+	);
+	ins.run(
+		-1004402809405,
+		311,
+		1754612351,
+		null,
+		222,
+		"Bob",
+		null,
+		null,
+		null,
+		0,
+		"还有这个",
+		null,
+		null,
+		301,
+		null,
+		null,
+		null,
+		null,
+		"A",
+	);
+	ins.run(
+		-1004402809405,
+		312,
+		1754612352,
+		null,
+		222,
+		"Bob",
+		null,
+		null,
+		null,
+		0,
+		"这个看不到",
+		null,
+		null,
+		999999,
+		null,
+		null,
+		null,
+		null,
+		"A",
+	);
+	ins.run(
+		-1004402809405,
+		313,
+		1754612353,
+		null,
+		222,
+		"Bob",
+		null,
+		null,
+		null,
+		0,
+		"可见的",
+		null,
+		null,
+		302,
+		null,
+		null,
+		null,
+		null,
+		"A",
+	);
+	// vision text for the photo parent (shared media identity cache)
+	db.query("INSERT INTO media (file_unique_id, kind, mime, vision) VALUES (?, 'photo', 'image/jpeg', ?)").run(
+		"uq-photo-1",
+		JSON.stringify({ model: "m", kind: "photo", text: "一只猫", at: 1 }),
+	);
+	const serializeOne = (messageId: number, visible: Set<number>, resolveVision = true): string => {
+		const row = db
+			.query("SELECT * FROM messages WHERE chat_id = ? AND message_id = ?")
+			.get(-1004402809405, messageId) as MessageRow;
+		return serializeMessages(db, [row], { visibleIds: visible, resolveVision });
+	};
+	// media parent not in the visible set: media placeholder (vision resolved on the fresh-batch path)
+	expect(serializeOne(310, new Set())).toContain("#310 Bob (u1) ↪ #300 @alice [图片: 一只猫]: 看这个");
+	expect(serializeOne(311, new Set())).toContain("#311 Bob (u1) ↪ #301 @alice [sticker 😺]: 还有这个");
+	// event-log path: resolveVision false must not leak vision text
+	expect(serializeOne(310, new Set(), false)).toContain("↪ #300 @alice [图片]: 看这个");
+	expect(serializeOne(310, new Set(), false)).not.toContain("一只猫");
+	// missing parent: explicit marker instead of a bare id the model would hallucinate around
+	expect(serializeOne(312, new Set())).toContain("#312 Bob (u1) ↪ #999999 (原消息不可见): 这个看不到");
+	// visible parent: still a bare ref, no snippet
+	expect(serializeOne(313, new Set([302]))).toContain("#313 Bob (u1) ↪ #302: 可见的");
+	expect(serializeOne(313, new Set([302]))).not.toContain("父消息文本");
 });
 
 test("immutable event and extension protocol grammar stable", () => {

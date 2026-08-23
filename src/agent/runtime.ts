@@ -102,11 +102,11 @@ import {
 	TELEGRAM_CONTEXT_TYPE,
 	TELEGRAM_CONTEXT_VERSION,
 	TELEGRAM_EXTENSION_ORDER,
-	isTelegramContextDetails,
 	type ProviderPayloadObservation,
 	type TelegramContextDetails,
 } from "./extensions/index.ts";
 import { buildContextFingerprint, canResumeContextSession, sha256 } from "./context-fingerprint.ts";
+import { contextStateFromEntries } from "./context-state.ts";
 import { parsePiModelReference, type PiRequestThinkingLevel } from "./model-ref.ts";
 import type { VisionScheduler } from "../media/vision-scheduler.ts";
 import type { VideoTranscoderAvailability } from "../media/video-frames.ts";
@@ -491,7 +491,7 @@ export class BotRuntime {
 	private reconcileContextStateFromSession(): void {
 		if (!this.session) return;
 		const chatId = Number(`-100${this.config.groupPeerId}`);
-		const state = this.contextStateFromEntries(
+		const state = contextStateFromEntries(
 			this.session.sessionManager.buildContextEntries(),
 			getConsumedSeq(this.db, this.bot.id, chatId),
 		);
@@ -507,49 +507,6 @@ export class BotRuntime {
 	}
 
 	/** Structured context ownership; provider-rendered strings are never parsed for identities. */
-	private contextStateFromEntries(
-		entries: readonly SessionEntry[],
-		initialConsumedSeq = 0,
-	): { consumedSeq: number; visible: Set<number> } {
-		let consumedSeq = initialConsumedSeq;
-		const visible = new Set<number>();
-		for (const entry of entries) {
-			if (entry.type === "custom_message" && isTelegramContextDetails(entry.details)) {
-				consumedSeq = Math.max(consumedSeq, entry.details.consumedSeq);
-				for (const messageId of entry.details.visibleMessageIds) visible.add(messageId);
-				continue;
-			}
-			if (entry.type === "compaction") {
-				// Compaction is a replacement boundary. Entries summarized away may remain in the
-				// session tree, but their message ids are no longer provider-visible.
-				visible.clear();
-				const details = entry.details as
-					| {
-							consumedSeq?: unknown;
-							visibleMessageIds?: unknown;
-					  }
-					| undefined;
-				if (Number.isSafeInteger(details?.consumedSeq))
-					consumedSeq = Math.max(consumedSeq, details!.consumedSeq as number);
-				if (Array.isArray(details?.visibleMessageIds)) {
-					for (const messageId of details.visibleMessageIds) {
-						if (Number.isSafeInteger(messageId) && (messageId as number) > 0) visible.add(messageId as number);
-					}
-				}
-				continue;
-			}
-			if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "send") {
-				const sent = (entry.message.details as { sent?: unknown } | undefined)?.sent;
-				if (Array.isArray(sent)) {
-					for (const messageId of sent) {
-						if (Number.isSafeInteger(messageId) && (messageId as number) > 0) visible.add(messageId as number);
-					}
-				}
-			}
-		}
-		return { consumedSeq, visible };
-	}
-
 	private deliveredCommitIdsFromEntries(entries: readonly SessionEntry[]): Set<number> {
 		const delivered = new Set<number>();
 		for (const entry of entries) {
@@ -804,7 +761,7 @@ export class BotRuntime {
 		const keptIndex = branchEntries.findIndex((entry) => entry.id === prep.firstKeptEntryId);
 		const keptEntries = keptIndex >= 0 ? branchEntries.slice(keptIndex) : [];
 		const chatId = Number(`-100${this.config.groupPeerId}`);
-		const state = this.contextStateFromEntries(keptEntries, getConsumedSeq(this.db, this.bot.id, chatId));
+		const state = contextStateFromEntries(keptEntries, getConsumedSeq(this.db, this.bot.id, chatId));
 		const unresolvedReplyMessageIds = listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN).map(
 			(obligation) => obligation.messageId,
 		);

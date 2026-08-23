@@ -14,7 +14,9 @@
 
 ## CACHE_SCHEMA_VERSION
 
-当前：**13**。
+当前：**14**。
+
+v14 修复引用历史消息的可见性：可见集 walker 不再信任 compaction entry 携带的 `visibleMessageIds`（那是同一 walker 算出的累积并集，clear 永远清不干净），只从 compaction 边界后的活跃窗口内 custom_message 并集恢复可见集；引用渲染对纯媒体父消息输出媒体占位（`[图片]`/`[sticker 😺]`/`[video]` 等，事件日志路径 `resolveVision:false` 不触发 vision 表 live lookup），父消息缺失时追加 `(原消息不可见)` 标记。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
 
 v13 把最近 sticker 候选从每个历史 Telegram entry 的永久正文拆为结构化字段；context 投影只在最后一个 Telegram batch 后追加一次候选，因此历史形态从 `msg1+candidates, msg2+candidates, msg3+candidates` 变为 `msg1, msg2, msg3+candidates`。这会让相邻请求从上一轮候选位置分叉，但把候选总量从随turn线性增长降为恒定最多8条；对当前缺少provider cache usage的deployment，选择显著更小的64K输入。主模型有效窗口同时固定为64K，Pi估算32K时触发compaction，压缩后按 `compaction_keep_recent` token 预算保留近期原文。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
 
@@ -57,6 +59,7 @@ cache-visible protocol 包括：
 - v11：固定 catalog、最近候选与 send tool description 显式标注 static / animated / video sticker。
 - v12：compaction 先用 Pi `convertToLlm` 投影 custom Telegram messages，再序列化 summary 输入。
 - v13：recent sticker candidates只投影在最后一个Telegram batch；主模型有效窗口固定64K并在Pi估算32K时压缩到摘要+最后turn。
+- v14：引用渲染对纯媒体父消息输出媒体占位、父消息缺失追加 `(原消息不可见)`；可见集 walker 不再从 compaction entry 的 `visibleMessageIds` 重灌（详见上文）。
 
 ## Provider payload 结构
 
@@ -78,12 +81,15 @@ tools: [{ name, description, parameters }] in fixed order
 --- 2026-08-07 ---
 [17:31:42] #18452 Alice (@alice · tag:admin): 文本
 [17:31:55] #18453 Bob (u17) ↪ #18452: 文本
+[17:31:56] #18454 Bob (u17) ↪ #18455 @alice [图片]: 看这个
+[17:31:57] #18456 Bob (u17) ↪ #999999 (原消息不可见): 这个看不到
 [message_edit #18453] 修改后的文本
 [message_metadata #18453] ↪ #18452
 [media_update #18453] [图片: 新的视觉描述]
 ```
 
 - message event 保留原有日期、时间、sender、reply、quote、forward 与媒体占位符语义。
+- 引用父消息不在可见集时渲染短引用：文字父消息引 `@who "snippet"`（≤40 字）；纯媒体父消息引媒体占位（`[图片]`/`[sticker 😺]`/`[video]` 等，事件日志路径 `resolveVision:false` 不触发 vision 表 live lookup）；父消息缺失（含 external_reply 跨群引用）追加 `(原消息不可见)`。父消息在可见集时保持裸 `↪ #id`。
 - message/event bytes 一旦写入 session 就不重算；后续变化使用 `edit`、`metadata`、`media_update` delta。
 - `telegram_context_v2.details` 同时保存 `consumedSeq`、本 entry 的 event refs、`visibleMessageIds`、固定消息 projection 与独立 sticker candidates。
 - session 写入成功或启动 reconcile 能从 structured details 证明写入后，SQLite cursor 才前进。provider 失败不会靠文本猜测状态。
@@ -135,7 +141,7 @@ Vision 默认关闭；只有显式 `vision.enabled: true` 才会执行。`auxili
 
 | 项目 | 值 |
 | --- | --- |
-| schema | `13` |
+| schema | `14` |
 | zh system | `0dadcaf37061` |
 | en system | `fabd0ba82eab` |
 | legacy message serializer | `68a17d6e5c05` |
@@ -146,5 +152,6 @@ Vision 默认关闭；只有显式 `vision.enabled: true` 才会执行。`auxili
 | context protocol | `c810cd1e5ab3` |
 | sticker catalog block | exact-string lock（identity + format grammar） |
 | recent-context sticker suffix | exact-string lock（最近、去重、user-only、bot-sendable、最终尾部） |
+| quote reference | exact-string lock（媒体占位 / `resolveVision:false` 无 vision / 缺失标记 / 可见裸引用） |
 
 测试必须 pin `TZ=Asia/Singapore`；`bun test` 自身强制 UTC。若 hash 有意变化，先解释 cache impact，再更新 version 与 golden；不要只改 expected value。
