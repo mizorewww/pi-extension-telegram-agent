@@ -90,9 +90,9 @@ tools: [{ name, description, parameters }] in fixed order
 
 ## 有界 suffix 与 sticker catalog
 
-- runtime 每轮最多索引读取 256 条近期 event，并额外读取最多 64 条 direct-reply obligation event；不扫描整张 `messages` 表。
-- reply obligation 优先打包；普通 event 从最新端选择后恢复时间顺序。默认 suffix 上限 12,000 tokens，单 event 上限 4,096 tokens，并为输出、reasoning 与 tool follow-up 预留空间。
-- 普通溢出 event 可以被 cursor 消费但不标 visible；reply obligation 只有在结构化 commit marker 证明交付后才删除。
+- runtime 每轮最多索引读取 256 条近期 event，并额外读取最多 64 条 direct-address obligation event；不扫描整张 `messages` 表。
+- direct-address obligation 优先打包；普通 event 从最新端选择后恢复时间顺序。默认 suffix 上限 12,000 tokens，单 event 上限 4,096 tokens，并为输出、reasoning 与 tool follow-up 预留空间。
+- 普通溢出 event 可以被 cursor 消费但不标 visible；direct-address obligation 只有在结构化 commit marker 证明交付后才删除。
 - sticker catalog 在启动时同步进 DB 后以 identity + format block（每行 set + format + emoji + short_id，按 set 名 + rowid 排序）固化在 system prompt 尾部；prefix 由配置 + DB catalog 唯一决定，重启间稳定。catalog identity/format 变化通过 fingerprint snapshot 开新 epoch。
 - runtime 另从 `bot_visible_messages` 与本轮新打包消息的并集取最近 8 个不同的用户 sticker；只保留当前 bot 有 mapping 的项。候选独立存储，provider projection会从所有旧 Telegram entry 移除候选，只在当前最后一批消息后追加一次；预算不足时不追加。
 - page fetch 先受 8,000 字符本地护栏约束，再受 2,048 provider tokens 上限约束；query 与工具失败输出同样有界。

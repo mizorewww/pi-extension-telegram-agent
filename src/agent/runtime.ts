@@ -1124,7 +1124,11 @@ export class BotRuntime {
 
 	/** Called by the scheduler when this bot gets a response opportunity. */
 	trigger(source: TriggerSource = "explicit", routingTrigger?: RoutingTrigger): TriggerResult {
-		const isDirectReply = routingTrigger?.reason === "reply";
+		// SHARED_PROTOCOL: explicit @mention, reply-to-bot, and configured-name keyword are all
+		// direct addresses that must reach the provider even when this trigger only coalesces.
+		const isDirectReply =
+			routingTrigger != null &&
+			(routingTrigger.reason === "explicit" || routingTrigger.reason === "reply" || routingTrigger.reason === "name");
 		let directReplyPending = false;
 		let directReplyMessageId: number | null = null;
 		if (routingTrigger) this.currentTriggerMessageId = routingTrigger.messageId;
@@ -1190,6 +1194,13 @@ export class BotRuntime {
 				if (this.cooldownAfterFlush) {
 					this.cooldownUntil = this.monotonicNow() + this.bot.samplingCooldownMs;
 					this.cooldownAfterFlush = false;
+				}
+				// A trigger that arrived between the flushLoop do-while exit and this finally saw
+				// `flushing === true` and only set pendingTrigger, but the loop is already gone.
+				// Re-arm it here once the flag is cleared (same pattern as compactForControl).
+				if (this.pendingTrigger && !this.stopping) {
+					this.pendingTrigger = false;
+					this.trigger("explicit");
 				}
 			});
 		return "started";

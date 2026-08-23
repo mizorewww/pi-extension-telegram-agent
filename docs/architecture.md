@@ -33,7 +33,7 @@
 ## Telegram ingestion
 
 - 每个 bot token 一个 getUpdates long-polling 循环（offset 持久化在 SQLite）
-- 每条 update：raw update→canonical message/revision→immutable `message_events` delta→direct-reply obligation在一个SQLite transaction提交，之后poller才推进offset；任一步失败整体回滚并重放。canonical以(chat_id,message_id)去重，second-bot副本可只补齐null `reply_to_sender_id`并追加metadata delta。`rich_message` 也走同一 normalize：canonical列只保存≤256 KiB source（超限为有界JSON诊断），`text`保存确定性plain projection；projector上限为16层、500 blocks、4096 nodes、32768 code points，未知metadata不泄露URL/file id。revision保留旧source/projection，provider只读取不可变event projection。
+- 每条 update：raw update→canonical message/revision→immutable `message_events` delta→reply obligation（ingest 只对 reply-to-bot 建）在一个SQLite transaction提交，之后poller才推进offset；任一步失败整体回滚并重放。canonical以(chat_id,message_id)去重，second-bot副本可只补齐null `reply_to_sender_id`并追加metadata delta。`rich_message` 也走同一 normalize：canonical列只保存≤256 KiB source（超限为有界JSON诊断），`text`保存确定性plain projection；projector上限为16层、500 blocks、4096 nodes、32768 code points，未知metadata不泄露URL/file id。revision保留旧source/projection，provider只读取不可变event projection。
 - Telegram create 是不可回滚的 commit boundary。Bot API 返回 Message 后先按 25/100/250 ms 有界重试 canonical SQLite/event insert，再更新 context visibility、broadcast、agent event 与 typing cleanup；这些后置副作用任一失败都只能返回 terminal `committed/no_retry`并写脱敏`send_degraded`，绝不把整次tool call抛回模型。timeout、断线、非JSON、429/5xx等无法证明未创建的结果直接terminal `unknown/no_retry`；message已提交后sticker失败则是`partial/no_retry`。poller echo继续以canonical/event key完成本地幂等恢复。
 - agent `send.message` 先由Pi TUI公开的`Marked` lexer和本地有界renderer转换为classic `sendMessage {text,entities?}`；普通paragraph没有style entity，显式Markdown才产生格式。只有Telegram明确以确定性400拒绝entity/format且确认未创建消息时，才对同一生成text做一次无entities fallback。operator manual compose仍保持literal plain text，两条路径复用`src/telegram/send.ts`的send→canonical persistence primitive；incoming RichMessage normalize/raw persistence/projection继续保留。
 
@@ -48,7 +48,7 @@
 - Telegram control 只开放 `routing_p` 与 `cooldown_ms` 两个可变项：`/set` 经 `updateBotConfigField` 写穿 `telegram.config.ts`（配置文件是唯一权威，新值重启后仍生效），并同步更新内存中的同一 `BotConfig` 对象，router/runtime 下一次决策立即读取新值。任何 routing set 都先按全部配置 bot 原子校验 Σp≤1；校验失败不落盘、不改内存。
 - Telegram control service只接受offset 0的`bot_command` entity；命令固定为 `/help`、`/status`（human public read）与 `/compact`、`/set`（admin mutation），带 `@bot_username` 后缀时定向到对应 bot。未知命令、未知后缀不接管，参数严格按固定arity/type解析。daemon在normal route前同步分流，所有mutation共用一个串行队列；manual compact先占runtime control lock，只在idle时无instructions调用Pi `session.compact()`，期间explicit coalesce、probability fast-skip，绝不abort在途回复。`/status` 只展示实际接收/后缀定向的单个bot，并从其Pi session读取实时context usage；compact后Pi明确返回unknown，直到下一次主请求，绝不把旧epoch usage配给新epoch。状态由确定性代码同时生成有界的InputRichMessage Markdown与独立plain projection；正常只调用一次`sendRichMessage`，仅在Telegram以400/404明确证明方法/格式未创建消息时单次plain fallback。其余回复保持plain；所有回复都由suffix目标或实际接收bot走Telegram create→canonical DB→IPC broadcast，并用`reply_parameters`引用原命令。timeout/断线/429/5xx/非JSON等unknown outcome与local failure只脱敏记录、不远端重试。durable control claim/reply evidence跨restart/epoch永久排除这些message id；compact替换visibility也不会送入provider。每bot启动并行best-effort `setMyCommands`（help/status/compact/set 菜单），失败不阻塞polling。
 - route acceptance先取得`routing_claims` durable claim；insert/enrichment/replay只会让同一bot启动一次。pending/nonaccepted可重取，accepted started/coalesced永久抑制重复；probability bucket和explicit优先级本身不变。
-- human direct reply在provider前已持久化per-bot obligation。flush最多索引读取256条近期event与64条obligation event，先打包全部可容纳的pending reply，再从最新普通event向前选择并恢复Telegram顺序。普通overflow可以推进cursor但不标visible；pending reply不因普通预算被删除，并按后续flush继续交付。只有结构化custom message与commit marker持久化后才清obligation；失败/stop保留，startup从session details幂等reconcile。
+- human direct address（explicit @mention / reply / 配置名称点名）在provider前已持久化per-bot obligation；ingest 只对 reply 建，explicit/name 由 runtime trigger 在消息尚未可见时幂等创建。flush最多索引读取256条近期event与64条obligation event，先打包全部可容纳的pending direct-address消息，再从最新普通event向前选择并恢复Telegram顺序。普通overflow可以推进cursor但不标visible；pending direct-address消息不因普通预算被删除，并按后续flush继续交付。只有结构化custom message与commit marker持久化后才清obligation；失败/stop保留，startup从session details幂等reconcile。
 - accepted trigger 同步 acquire per-bot Telegram `typing` lease：当前目标是 supergroup，只调用 `sendChatAction`，不调用 private-only message/rich draft。单个递归 timer每4秒续约且最多一个in-flight；release同时abort在途action，避免短回复已发送后迟到的action重新点亮5秒状态。沉默/异常/abort/flush settle/shutdown由finally兜底，coalesced pending在下一轮flush重新acquire。side channel失败按streak脱敏告警，不写DB/IPC/provider context，也不改变cursor、visibility、routing、cooldown或send结果。
 
 ## Agent
@@ -136,7 +136,7 @@
 ## Provider context flow
 
 - 稳定prefix：共享群聊protocol先于persona，末尾是 identity + format sticker catalog block，之后是固定顺序tool name/description/parameter schema。
-- 动态suffix：有界immutable event batch、reply obligation、media delta与tool outputs只追加；最近上下文 sticker 候选是本轮 event projection 后的最终有界块。
+- 动态suffix：有界immutable event batch、direct-address obligation、media delta与tool outputs只追加；最近上下文 sticker 候选是本轮 event projection 后的最终有界块。
 - `bot_cursors`保证业务消费单调；`bot_visible_messages`只表示当前generation真实可见的完整消息。两者不混用。
 - 成功compaction替换visible refs并开启新epoch但不改cursor；完整fingerprint不匹配则在restore前建立新session/epoch。
 - payload observer只持久化deployment-local HMAC和首个差异位置；不保存provider plaintext。

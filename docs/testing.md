@@ -11,7 +11,7 @@
 
 ## 当前测试集
 
-`test/` 只保留长期 invariant 与安全边界的守卫，共 9 个测试文件：
+`test/` 只保留长期 invariant 与安全边界的守卫，共 10 个测试文件：
 
 - `cache.test.ts` — cache golden：锁定 cache-visible protocol 的 hash（system prompt、tool schema 与顺序、消息/compaction 序列化 grammar、extension 顺序、sticker catalog block）。任何 provider-visible 变化都会在这里报警。
 - `context-protocol.test.ts` — context fingerprint / extension / model capability 契约：恢复 session 的 cache-identity 判断、structured context 协议、相邻 raw payload 严格前缀的本地 cache estimate、用户级已安装provider extension进入daemon shared runtime，以及不允许 Pi 静默 clamp 不支持的 reasoning 档位。
@@ -22,6 +22,7 @@
 - `media.test.ts` — 跨bot Telegram media source配对、static/animated/video sticker metadata与原始file_id发送、TGS不进入vision、图片/视频vision singleflight/persistent cache、缺FFmpeg时下载前no-op、跨bot全视频流水线并发门、固定代表帧、multi-image单调用、部署路径迁移、static sticker展示缓存、compaction后跨bot引用保护/失败重试/启动不复活回收文件，以及Pi attach filter握手、activity单卡/原生thinking/完整正文、username与视觉描述乱序合并。
 - `telegram-control.test.ts` — `/status` 的 InputRichMessage Markdown、统计数字千位分隔与缓存命中率、独立 plain projection、create→canonical persistence，以及仅在确定性rich拒绝时单次fallback的exactly-once边界。
 - `telemetry.test.ts` — Pi/Telegram status共享读模型：latest排除compaction、lifetime/live totals包含compaction、切换provider/model后的immutable per-run cost累计、本地 estimate 的 `≈` 标记、统一费用精度、runtime snapshot、统一字段顺序、context/window与`CH = R/(↑+R+W)`派生口径。
+- `runtime-obligation.test.ts` — direct address（explicit @mention / reply / 配置名称点名）在 coalesced trigger 下仍建 durable obligation 并交付、已可见不重复建、普通 overflow 静默消费设计锁定，以及 flushLoop teardown 窗口 trigger 不滞留。
 
 ## 测试选择规则
 

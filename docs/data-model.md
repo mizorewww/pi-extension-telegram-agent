@@ -51,8 +51,8 @@
 
 ### reply_obligations
 
-- `(bot_id, chat_id, message_id)` 主键，只保存必须交给目标 bot 的 direct human reply identity，不保存正文。
-- canonical ingest/enrichment 与 obligation 在同一 transaction 提交。
+- `(bot_id, chat_id, message_id)` 主键，只保存必须交给目标 bot 的 direct human address identity（explicit @mention / reply / 配置名称点名），不保存正文。
+- canonical ingest/enrichment 与 reply obligation 在同一 transaction 提交；explicit/name obligation 由 runtime trigger 在消息尚未可见时幂等创建（INSERT OR IGNORE）。
 - runtime 每次有界读取最多 64 条；只有 session 中的结构化 context commit marker 证明 delivery 后才删除。crash/restart reconcile 幂等。
 
 ### routing_claims

@@ -30,7 +30,7 @@ bun run debug -- --bot A --show-provider-content  # 敏感：显式读取完整�
 | `unsupported_reasoning_effort` | 配置requested档位不在该模型supported levels中，Pi会静默clamp为effective档位 | 将main/compaction/vision配置改为supported值；daemon启动也会fail fast |
 | `video_transcoder_unavailable` | vision已启用，但PATH缺少`ffmpeg`或`ffprobe`；finding同时给出`impact=video_recognition_disabled`与`action=install_ffmpeg_and_restart` | 安装FFmpeg发行包并restart；它只用于视频抽帧，daemon、聊天、图片vision与sticker发送不受影响 |
 | `cursor_backlog` | 该bot尚未消费全部immutable events | 看最近claim与runtime state；没有trigger时可正常 |
-| `pending_reply_obligation` | direct reply尚未被structured commit确认交付 | 查flush/provider失败；restart后应自动recover |
+| `pending_reply_obligation` | direct address（explicit @mention / reply / 配置名称点名）尚未被structured commit确认交付 | 查flush/provider失败；restart后应自动recover |
 | `route_without_run` | started claim超过120秒仍无匹配`llm_runs.trigger_message_id` | 查`agent_runtime.flush_failed`与provider readiness |
 | `model_silence` | run完成、公开send为0，且附近有`assistant_text` | 模型主动沉默，不是Telegram传输失败 |
 | `tool_preflight_failed` | send在Telegram create前被本地确定性拒绝 | 按category修输入/visibility/catalog，不查Telegram |

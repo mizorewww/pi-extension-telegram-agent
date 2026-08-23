@@ -18,7 +18,7 @@ A fingerprint covers the Pi/provider/model/cache policy, protocol, persona, seri
 
 ## 3. Bounded context carries only necessary facts
 
-SQLite retains canonical Telegram history and an immutable event stream. Each bot consumes that stream with a monotonic cursor, while separate visible references describe only full messages still present in the current context. The model receives a token-bounded event batch with direct replies first; logs, raw rich JSON, UI state, and unbounded tool output never enter provider context.
+SQLite retains canonical Telegram history and an immutable event stream. Each bot consumes that stream with a monotonic cursor, while separate visible references describe only full messages still present in the current context. The model receives a token-bounded event batch with direct addresses (@mention / reply / configured-name keyword) first; logs, raw rich JSON, UI state, and unbounded tool output never enter provider context.
 
 The default new-suffix cap is 12,000 tokens and the per-event cap is 4,096. This separates the complete local source of truth from the context necessary for one run. See [Architecture](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/architecture.md) and the [data model](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/data-model.md).
 

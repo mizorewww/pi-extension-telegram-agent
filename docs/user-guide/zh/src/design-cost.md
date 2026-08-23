@@ -18,7 +18,7 @@ fingerprint覆盖Pi/provider/model/cache policy、protocol、persona、serialize
 
 ## 3. 有界 context 只携带需要的信息
 
-Telegram canonical history与immutable event stream保存在SQLite。每只bot用单调cursor消费event，另一组visible refs只描述当前context仍真正包含完整内容的消息。模型每轮只收到token有界、direct reply优先的event batch；日志、raw rich JSON、UI状态和无界工具输出不会进入provider context。
+Telegram canonical history与immutable event stream保存在SQLite。每只bot用单调cursor消费event，另一组visible refs只描述当前context仍真正包含完整内容的消息。模型每轮只收到token有界、direct address（@mention / reply / 配置名称点名）优先的event batch；日志、raw rich JSON、UI状态和无界工具输出不会进入provider context。
 
 默认新增suffix上限是12,000 tokens，单event上限4,096。这把本地“完整事实来源”和模型“本轮必要上下文”分开。权威数据流见[架构](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/architecture.md)与[数据模型](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/data-model.md)。
 
