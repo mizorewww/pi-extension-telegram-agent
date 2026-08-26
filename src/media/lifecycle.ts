@@ -136,8 +136,9 @@ export function pruneUnreferencedMediaCache(
 		const derived = parseContextFileNames(row.contextFiles);
 		const path = row.localPath ? resolveMediaSourcePath(mediaDir, row.localPath) : null;
 		if (row.localPath && !path) {
-			clear.run(row.fileUniqueId, row.localPath);
-			removeDerived(mediaDir, derived, remove, result);
+			// Clear the DB refs only after every derived file is actually gone; otherwise keep
+			// context_files so a later compaction retries the removal instead of orphaning files.
+			if (removeDerived(mediaDir, derived, remove, result)) clear.run(row.fileUniqueId, row.localPath);
 			result.stale++;
 			continue;
 		}
@@ -147,8 +148,7 @@ export function pruneUnreferencedMediaCache(
 				if (outcome === "deleted") result.deleted++;
 				else result.stale++;
 			}
-			clear.run(row.fileUniqueId, row.localPath);
-			removeDerived(mediaDir, derived, remove, result);
+			if (removeDerived(mediaDir, derived, remove, result)) clear.run(row.fileUniqueId, row.localPath);
 		} catch {
 			result.failed++;
 		}
@@ -169,17 +169,21 @@ function parseContextFileNames(value: string | null): string[] {
 	}
 }
 
+/** Returns true only when every derived file is gone (missing files count as gone). */
 function removeDerived(
 	mediaDir: string,
 	names: readonly string[],
 	remove: NonNullable<MediaPruneOptions["remove"]>,
 	result: MediaPruneResult,
-): void {
+): boolean {
+	let allGone = true;
 	for (const name of names) {
 		try {
 			remove(join(mediaDir, name));
 		} catch {
 			result.failed++;
+			allGone = false;
 		}
 	}
+	return allGone;
 }
