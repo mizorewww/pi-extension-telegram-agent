@@ -57,6 +57,7 @@ function migrate(db: Database): void {
 		["first_divergent_byte_offset", "INTEGER"],
 		["trigger_message_id", "INTEGER"],
 		["public_send_count", "INTEGER NOT NULL DEFAULT 0"],
+		["vision_calls", "INTEGER NOT NULL DEFAULT 0"],
 		["images_attached", "INTEGER NOT NULL DEFAULT 0"],
 		["tool_followup_rounds", "INTEGER NOT NULL DEFAULT 0"],
 		["input_events", "INTEGER NOT NULL DEFAULT 0"],
