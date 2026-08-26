@@ -30,7 +30,7 @@
 
 ## 3. 硬约束
 
-- **Cache invariant**：永不改写已存在的 provider prefix；动态内容只以新 suffix 追加。cache-visible 协议（system prompt shape、persona 序列化、tool schema 与顺序、消息 / 摘要序列化 grammar、sticker catalog block）任一变化：bump `CACHE_SCHEMA_VERSION`、更新 `test/cache.test.ts` golden、同步 `docs/cache.md`。
+- **Cache invariant**：永不改写已存在的 provider prefix；动态内容只以新 suffix 追加。sticker 候选等动态尾部只经 `context` 事件投影注入 provider payload（每请求重建、只挂最后一条），永不写入持久化 custom message content——compaction 直接读持久化字节。cache-visible 协议（system prompt shape、persona 序列化、tool schema 与顺序、消息 / 摘要序列化 grammar、sticker catalog block）任一变化：bump `CACHE_SCHEMA_VERSION`、更新 `test/cache.test.ts` golden、同步 `docs/cache.md`。
 - Secret 不进日志、测试 fixture、commit；`.env` 不入库。
 - daemon 生产模块只用 `src/observability/log.ts` 结构化日志；不记正文 / prompt / response / tool args / 完整 URL 与 path；业务正确性不得依赖日志。
 - 不得为通过验证而削弱测试、类型检查或安全控制（如 run_js sandbox）。

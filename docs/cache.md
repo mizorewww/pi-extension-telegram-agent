@@ -5,12 +5,12 @@
 ## Invariants
 
 1. 稳定 prefix 的首字节始终来自共享群聊协议，之后才是 persona；固定顺序的 tool name、description 与 parameter schema 属于同一 cache cohort。
-2. Telegram 消息正文只能以新的结构化 session entry 追加，不得改写；recent sticker candidates是唯一例外，它不属于正文，投影时会从旧entry移除并只放在当前最后一批消息后。context 模式下媒体的图片块随消息事件一同首次写入，此后同样不可变。
+2. Telegram 消息正文只能以新的结构化 session entry 追加，不得改写；recent sticker candidates是唯一例外，它不属于正文——持久化 content 永不携带候选，候选只存于 structured details，由 context 投影在每请求时挂到当前最后一批消息后（compaction 直接读持久化字节，因此永远看不到候选）。context 模式下媒体的图片块随消息事件一同首次写入，此后同样不可变。
 3. `messages` 是 UI/canonical 最新读模型；provider 只消费不可变 `message_events`。edit、metadata enrichment 与 vision 模式的 vision completion（`media_update`）都追加 delta；context 模式的媒体没有事后 delta——图片在事件首次打包时就位或永远缺席。
 4. 已消费位置与当前可见性分离：`bot_cursors.consumed_seq` 只单调前进，`bot_visible_messages` 可在成功 compaction 或 session 轮换时替换。
 5. 只有完整 context fingerprint 相同且 manifest 指向的 session 文件存在时才恢复 session。cache-visible 身份改变必须在 restore 前创建新 session/context epoch。
 6. UI、IPC、日志、operator command 与本地媒体准备不得改变 provider payload。
-7. provider 输入和工具输出必须有界；不能把 raw update、Rich Message JSON 或无界历史塞入 context。sticker catalog 以 ≤`STICKER_CATALOG_MAX` 条 `s<id>: <emoji> <描述>` 行固定进 prefix；最近上下文候选最多 8 条，只能追加在本轮动态 suffix 最后。
+7. provider 输入和工具输出必须有界；不能把 raw update、Rich Message JSON 或无界历史塞入 context。sticker catalog 以 ≤`STICKER_CATALOG_MAX` 条 `s<id>: <emoji> <描述>` 行固定进 prefix；最近上下文候选最多 8 条，只经 context 投影追加在当前最后一批消息后，每请求重建、只出现一次。
 
 ## CACHE_SCHEMA_VERSION
 
@@ -68,7 +68,7 @@ cache-visible protocol 包括：
 - v14：引用渲染对纯媒体父消息输出媒体占位、父消息缺失追加 `(原消息不可见)`；可见集 walker 不再从 compaction entry 的 `visibleMessageIds` 重灌（详见上文）。
 - v15：共享协议末尾增加可用工具声明（search / run_js / send 及被问能力时的如实回答规则），修复模型能力自知缺失；trade-off 见上文（per-bot 工具开关与共享 prefix 假设的潜在不一致）。
 - v16：双媒体模式——共享协议占位符行同时覆盖 vision 描述与 context 内联图片，fingerprint 新增 `mediaMode`，details v4 新增 `blocks`；vision 模式 grammar 不变（详见上文）。
-- v17：sticker 占位删 ` set:` 元数据（serializer v4）；目录/候选统一 `s<id>: <emoji> <描述>` 行，set 名与 format 退出模型可见文本，描述纳入 catalog fingerprint；context 模式不再产生 `media_update`（详见上文）。
+- v17：sticker 占位删 ` set:` 元数据（serializer v4）；目录/候选统一 `s<id>: <emoji> <描述>` 行，set 名与 format 退出模型可见文本，描述纳入 catalog fingerprint；context 模式不再产生 `media_update`（详见上文）。同期修复（非 schema 变更，provider payload 字节不变）：候选块不再焊入持久化 content——v13 把候选移进投影层后，`sendCustomMessage` 的 content 仍携带候选副本，每轮一块累计驻留并被 compaction 原样读入；现持久化 content 为纯消息字节，候选只经投影到达 provider。
 
 ## Provider payload 结构
 
@@ -112,7 +112,7 @@ tools: [{ name, description, parameters }] in fixed order
 - direct-address obligation 优先打包；普通 event 从最新端选择后恢复时间顺序。默认 suffix 上限 12,000 tokens，单 event 上限 4,096 tokens，并为输出、reasoning 与 tool follow-up 预留空间。
 - 普通溢出 event 可以被 cursor 消费但不标 visible；direct-address obligation 只有在结构化 commit marker 证明交付后才删除。
 - sticker catalog 在启动时同步进 DB 后以 `s<id>: <emoji> <描述>` 行（描述为持久化 vision 文本，缺失时逐级降级为 `s<id>: <emoji>`、`s<id>`；按 set 名 + rowid 排序，set 名本身不渲染）固化在 system prompt 尾部；prefix 由配置 + DB catalog 唯一决定，重启间稳定。catalog identity 或描述变化通过 fingerprint snapshot 开新 epoch。
-- runtime 另从 `bot_visible_messages` 与本轮新打包消息的并集取最近 8 个不同的用户 sticker；只保留当前 bot 有 mapping 的项。候选独立存储，provider projection会从所有旧 Telegram entry 移除候选，只在当前最后一批消息后追加一次；预算不足时不追加。
+- runtime 另从 `bot_visible_messages` 与本轮新打包消息的并集取最近 8 个不同的用户 sticker；只保留当前 bot 有 mapping 的项。候选只存于 structured details，持久化 content 是纯消息字节；provider projection 从所有旧 Telegram entry 移除候选，只在当前最后一批消息后追加一次；预算不足时不追加。
 - page fetch 先受 8,000 字符本地护栏约束，再受 2,048 provider tokens 上限约束；query 与工具失败输出同样有界。
 
 ## 媒体模式与 provider boundary

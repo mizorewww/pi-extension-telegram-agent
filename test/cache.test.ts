@@ -29,11 +29,7 @@ import {
 	TOOL_CAPABILITY_DECLARATION,
 } from "../src/agent/prompt.ts";
 import { toolsHash } from "../src/agent/tools.ts";
-import {
-	appendStickerCandidateSuffix,
-	recentContextStickerCandidates,
-	stickerCatalogPromptBlock,
-} from "../src/media/sticker-catalog.ts";
+import { recentContextStickerCandidates, stickerCatalogPromptBlock } from "../src/media/sticker-catalog.ts";
 import {
 	NO_SEND_MARKER,
 	serializeCompactionMessages,
@@ -616,11 +612,6 @@ s4: 😺 emotion-4
 s3: 😺 emotion-3`);
 	expect(block).not.toContain("bot");
 	expect(block).not.toContain("B only");
-	const providerText = appendStickerCandidateSuffix("serialized messages", block);
-	expect(providerText).toBe(`serialized messages
-
-${block}`);
-	expect(providerText.endsWith(block)).toBe(true);
 });
 
 test("sticker placeholder drops set metadata (serializer v4)", () => {

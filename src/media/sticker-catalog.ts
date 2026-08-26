@@ -6,7 +6,9 @@
 // ≤60 chars). Set names never appear in model-visible text (cache schema v17). The catalog block
 // sits in the stable system prompt, so the prefix is determined by config + DB catalog, and the
 // snapshot hash covers description text so a landing description starts a new epoch. Recent
-// visible user stickers are a separate bounded dynamic tail (cache schema v11).
+// visible user stickers are a separate bounded dynamic tail (cache schema v11) that lives only
+// in the context-event projection (extensions/context.ts appends it to the last context message
+// at request time); persisted custom message content never carries it.
 
 import type { Database } from "bun:sqlite";
 import { errorCategory, log } from "../observability/log.ts";
@@ -282,12 +284,6 @@ export function recentContextStickerCandidates(
 		if (lines.length >= boundedLimit) break;
 	}
 	return lines.length > 0 ? `可发 sticker（近期上下文）：\n${lines.join("\n")}` : "";
-}
-
-/** Keep dynamic candidates after every serialized message/delta so the preceding cache prefix is untouched. */
-export function appendStickerCandidateSuffix(providerText: string, candidateBlock: string): string {
-	const block = candidateBlock.trim();
-	return block ? `${providerText}\n\n${block}` : providerText;
 }
 
 /** Fingerprint the exact state that shapes the prompt block: identity plus description text. */

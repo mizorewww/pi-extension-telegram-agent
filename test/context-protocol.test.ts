@@ -388,6 +388,10 @@ describe("Pi context protocol", () => {
 		] as never);
 
 		expect((projected[0] as { content: string }).content).toBe("canonical-provider-text");
+		// Regression lock: the candidate tail is projection-only and only ever rides the LAST
+		// context message. Older messages must not carry it, and persisted content stays clean
+		// (runtime persists packed.text; compaction reads persisted bytes directly).
+		expect((projected[0] as { content: string }).content).not.toContain("candidate");
 		expect((projected[1] as { content: string }).content).toBe("newest-provider-text\n\nnewest-candidate");
 		expect(JSON.stringify(projected[2])).toContain("sent_message_ids=#100,#101");
 	});

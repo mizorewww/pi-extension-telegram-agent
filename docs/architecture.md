@@ -143,7 +143,7 @@ daemon启动只读检查`ffmpeg`与`ffprobe`；缺失任一工具且当前模式
 
 - `media.file_unique_id` / `short_id` 是共享身份；`media_file_ids(bot_id,file_id,file_unique_id)` 才是 bot-specific 可发送能力。
 - catalog block 只用当前 bot mapping 过滤后的可发送 sticker 构建；set name 不能证明可发送。固定 catalog 每行为 `s<short_id>: <emoji> <描述>`（描述为持久化 vision 文本，缺失时逐级降级为 `s<short_id>: <emoji>`、`s<short_id>`），按 set 名 + rowid 排序，set 名与 format 不进入模型可见文本；上限 `STICKER_CATALOG_MAX` 条，完整进入 stable prefix。catalog snapshot hash 覆盖 short_id + emoji + 描述文本，任一变化开新 epoch。
-- runtime 不恢复旧的全库语义 top-K；它只从当前 generation 真正 visible 的消息与本轮新 visible 消息中选最近 8 个不同的用户 sticker，再按当前 bot mapping 过滤，行格式与固定 catalog 一致（`s<id>: <emoji> <描述>`）。候选块严格追加在本轮消息 suffix 最后，预算不足整体省略；历史 sticker 的 short id 按 `s<media.rowid>` 惰性补齐。
+- runtime 不恢复旧的全库语义 top-K；它只从当前 generation 真正 visible 的消息与本轮新 visible 消息中选最近 8 个不同的用户 sticker，再按当前 bot mapping 过滤，行格式与固定 catalog 一致（`s<id>: <emoji> <描述>`）。候选块不写入持久化字节，只在 context 投影时追加到当前最后一批消息之后（每请求重建、只出现一次），预算不足整体省略；历史 sticker 的 short id 按 `s<media.rowid>` 惰性补齐。
 - `sendSticker` 直接使用当前 bot mapping 的 Telegram `file_id`，同一路径支持 `.WEBP` static、`.TGS` animated 与 `.WEBM` video sticker；不下载重传，也不跨 bot 混用 file id。
 - `send` tool 在任何 network call 前再次用同一 mapping 做 preflight；若已提交的 short id 缺 mapping，记录 `candidate_invariant`，不会先发文字再失败。
 - catalog 启动日志给出fetched/catalog/sendable/missing_file_id；缺mapping行不进入 catalog block。short id仍可由本地send preflight解析。

@@ -57,7 +57,6 @@ import { fileIdForBot, isVisionMedia, type MediaDownloadApi } from "../media/loc
 import { createPiVisionExecutor, ensureVision, type VisionExecutor, type VisionUpdateSink } from "../media/vision.ts";
 import type { VisionScheduler } from "../media/vision-scheduler.ts";
 import {
-	appendStickerCandidateSuffix,
 	ensureStickerCatalog,
 	recentContextStickerCandidates,
 	stickerCatalogPromptBlock,
@@ -1312,8 +1311,12 @@ export class BotRuntime {
 		const boundedStickerCandidateTokens = boundedStickerCandidates
 			? estimateProviderTokensUpperBound(`\n\n${boundedStickerCandidates}`)
 			: 0;
-		const providerText = appendStickerCandidateSuffix(packed.text, boundedStickerCandidates);
 
+		// Persisted content is pure message bytes. The sticker candidate tail lives only in
+		// details.stickerCandidates and reaches the provider through the context-event
+		// projection (extensions/context.ts), which appends it to the last context message at
+		// request time. Never bake it into persisted bytes: compaction reads persisted content
+		// directly, and baked tails would accumulate one stale block per turn.
 		const selectedIds = new Set(packed.visibleMessageIds);
 		const delivered = obligations.filter((obligation) => selectedIds.has(obligation.messageId));
 		const details: TelegramContextDetails = {
@@ -1345,7 +1348,7 @@ export class BotRuntime {
 		for (const messageId of packed.visibleMessageIds) this.visibleMessageIds.add(messageId);
 		try {
 			await this.session.sendCustomMessage(
-				{ customType: TELEGRAM_CONTEXT_TYPE, content: providerText, display: false, details },
+				{ customType: TELEGRAM_CONTEXT_TYPE, content: packed.text, display: false, details },
 				{ triggerTurn: true },
 			);
 		} catch (error) {
