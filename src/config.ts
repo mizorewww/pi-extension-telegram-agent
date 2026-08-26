@@ -16,21 +16,40 @@ import { homedir } from "node:os";
 import { createJiti } from "jiti";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { isPiThinkingLevel, loadPiModelDefaults, type PiModelDefaults } from "./agent/model-settings.ts";
-import { canonicalPiModelReference, DEFAULT_AUXILIARY_VISUAL_MODEL } from "./agent/model-ref.ts";
+import {
+	canonicalPiModelReference,
+	DEFAULT_AUXILIARY_VISUAL_MODEL,
+	DEFAULT_COMPACTION_MODEL,
+} from "./agent/model-ref.ts";
 
-// Effective main-model context window passed to Pi, and the minimum reserve Pi keeps for the
-// next response + compaction output. Together they cap the highest meaningful compaction
-// threshold: any value above MAX_COMPACTION_THRESHOLD behaves identically to it (silently
-// clamped by max() in BotRuntime). Config must reject values above the cap instead of letting
-// a requested/effective fork go unnoticed (same stance as model-runtime.ts on reasoning).
-export const EFFECTIVE_CONTEXT_WINDOW = 65_536;
+// Minimum reserve Pi keeps for the next response + compaction output. The highest meaningful
+// compaction threshold is contextWindow - MIN_COMPACTION_RESERVE: any value above it behaves
+// identically (silently clamped by max() in BotRuntime). Config must reject values above the
+// cap instead of letting a requested/effective fork go unnoticed (same stance as
+// model-runtime.ts on reasoning).
 export const MIN_COMPACTION_RESERVE = 16_384;
-export const MAX_COMPACTION_THRESHOLD = EFFECTIVE_CONTEXT_WINDOW - MIN_COMPACTION_RESERVE;
+export const DEFAULT_CONTEXT_WINDOW = 65_536;
+export const DEFAULT_MAX_IMAGES_PER_TURN = 4;
+export const DEFAULT_MEDIA_DOWNLOAD_CONCURRENCY = 2;
 
 export interface TelegramToolsConfigInput {
 	send?: boolean;
 	search?: boolean;
 	run_js?: boolean;
+}
+
+/** How media reaches the model: "vision" = auxiliary model describes media as text (default,
+ *  historical behavior, still gated by `vision.enabled`); "context" = images/frames are attached
+ *  directly to the main-model context and requires a chat model with image input. */
+export type MediaMode = "vision" | "context";
+
+export interface TelegramMediaConfigInput {
+	/** Media pipeline mode; defaults to "vision" (the auxiliary-model pipeline). */
+	mode?: MediaMode;
+	/** Context mode only: max images (incl. video frames) attached to the main-model context per turn. */
+	max_images_per_turn?: number;
+	/** Context mode only: parallel Telegram downloads/transcodes while preparing context media. */
+	download_concurrency?: number;
 }
 
 export interface TelegramVisionConfigInput {
@@ -74,11 +93,13 @@ export interface TelegramConfigInput {
 	router_secret_env?: string;
 	db_path?: string;
 	tinyfish_key_env?: string;
-	/** Pi task model reference for photo/sticker/video vision: provider/model:effort. */
+	/** Pi task model reference for photo/sticker/video vision mode: provider/model:effort. */
 	auxiliary_visual_model?: string;
 	provider?: string;
 	model?: string;
 	reasoning_effort?: ThinkingLevel;
+	/** Cap on the main model's effective context window; also caps compaction_threshold. */
+	context_window?: number;
 	compaction_threshold?: number;
 	compaction_keep_recent?: number;
 	compaction_model?: string;
@@ -87,6 +108,7 @@ export interface TelegramConfigInput {
 	max_message_tokens?: number;
 	sampling_cooldown_ms?: number;
 	vision?: TelegramVisionConfigInput;
+	media?: TelegramMediaConfigInput;
 	telemetry_retention_days?: number;
 	raw_update_retention_days?: number;
 	message_event_retention_days?: number;
@@ -144,6 +166,12 @@ export interface VisionConfig {
 	concurrency: number;
 }
 
+export interface MediaConfig {
+	mode: MediaMode;
+	maxImagesPerTurn: number;
+	downloadConcurrency: number;
+}
+
 export interface RetentionConfig {
 	telemetryDays: number;
 	rawUpdateDays: number;
@@ -158,6 +186,8 @@ export interface AppConfig {
 	tinyfishApiKey: string;
 	auxiliaryVisualModel: string;
 	vision: VisionConfig;
+	contextWindow: number;
+	media: MediaConfig;
 	retention: RetentionConfig;
 	routerSecret: string | null; // generated+persisted by daemon if absent
 	telegramAdmins: TelegramAdmin[]; // deny-by-default deterministic control allowlist
@@ -224,6 +254,7 @@ export interface RawConfig {
 	provider?: unknown;
 	model?: unknown;
 	reasoning_effort?: unknown;
+	context_window?: unknown;
 	compaction_threshold?: unknown;
 	compaction_keep_recent?: unknown;
 	compaction_model?: unknown;
@@ -232,6 +263,7 @@ export interface RawConfig {
 	max_message_tokens?: unknown;
 	sampling_cooldown_ms?: unknown;
 	vision?: unknown;
+	media?: unknown;
 	telemetry_retention_days?: unknown;
 	raw_update_retention_days?: unknown;
 	message_event_retention_days?: unknown;
@@ -286,19 +318,19 @@ export function loadBotConfig(rootDir: string, env: Record<string, string>, conf
 		}
 	}
 	if (
-		raw.auxiliary_visual_model !== undefined &&
-		(typeof raw.auxiliary_visual_model !== "string" || !canonicalPiModelReference(raw.auxiliary_visual_model))
-	) {
-		errors.push(
-			`[config] auxiliary_visual_model: expected provider/model:effort, got ${JSON.stringify(raw.auxiliary_visual_model)}`,
-		);
-	}
-	if (
 		raw.compaction_model !== undefined &&
 		(typeof raw.compaction_model !== "string" || !canonicalPiModelReference(raw.compaction_model))
 	) {
 		errors.push(
 			`[config] compaction_model: expected provider/model:effort, got ${JSON.stringify(raw.compaction_model)}`,
+		);
+	}
+	if (
+		raw.auxiliary_visual_model !== undefined &&
+		(typeof raw.auxiliary_visual_model !== "string" || !canonicalPiModelReference(raw.auxiliary_visual_model))
+	) {
+		errors.push(
+			`[config] auxiliary_visual_model: expected provider/model:effort, got ${JSON.stringify(raw.auxiliary_visual_model)}`,
 		);
 	}
 	if (raw.cache_retention !== undefined && !["none", "short", "long"].includes(String(raw.cache_retention))) {
@@ -430,6 +462,29 @@ export function loadBotConfig(rootDir: string, env: Record<string, string>, conf
 			errors.push(`[config] ${key}: expected positive finite number, got ${JSON.stringify(v)}`);
 		}
 	}
+	if (raw.media !== undefined) {
+		if (raw.media == null || typeof raw.media !== "object" || Array.isArray(raw.media)) {
+			errors.push(`[config] media: expected object`);
+		} else {
+			const media = raw.media as Record<string, unknown>;
+			if (media.mode !== undefined && media.mode !== "vision" && media.mode !== "context") {
+				errors.push(`[config] media.mode: expected "vision" or "context", got ${JSON.stringify(media.mode)}`);
+			}
+			const limits: Record<string, [number, number]> = {
+				max_images_per_turn: [0, 16],
+				download_concurrency: [1, 16],
+			};
+			for (const [key, [min, max]] of Object.entries(limits)) {
+				const value = media[key];
+				if (
+					value !== undefined &&
+					(!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max)
+				) {
+					errors.push(`[config] media.${key}: expected integer in [${min}, ${max}], got ${JSON.stringify(value)}`);
+				}
+			}
+		}
+	}
 	if (raw.vision !== undefined) {
 		if (raw.vision == null || typeof raw.vision !== "object" || Array.isArray(raw.vision)) {
 			errors.push(`[config] vision: expected object`);
@@ -449,6 +504,16 @@ export function loadBotConfig(rootDir: string, env: Record<string, string>, conf
 				}
 			}
 		}
+	}
+	if (
+		raw.context_window !== undefined &&
+		(!Number.isSafeInteger(raw.context_window) ||
+			(raw.context_window as number) < MIN_COMPACTION_RESERVE * 2 ||
+			(raw.context_window as number) > 10_000_000)
+	) {
+		errors.push(
+			`[config] context_window: expected integer in [${MIN_COMPACTION_RESERVE * 2}, 10000000], got ${JSON.stringify(raw.context_window)}`,
+		);
 	}
 	if (
 		raw.sampling_cooldown_ms !== undefined &&
@@ -508,6 +573,10 @@ export interface DebugDeploymentIdentity {
 	dataDir: string;
 	dbPath: string;
 	groupPeerId: number;
+	visionEnabled: boolean;
+	auxiliaryVisualModel: string;
+	contextWindow: number;
+	media: MediaConfig;
 	botIds: string[];
 	bots: Array<{
 		id: string;
@@ -521,8 +590,6 @@ export interface DebugDeploymentIdentity {
 		tools: BotToolsConfig;
 		stickerSets: string[];
 	}>;
-	auxiliaryVisualModel: string;
-	visionEnabled: boolean;
 }
 
 /** Read only non-secret deployment identity for offline diagnostics; never resolves Pi auth/model defaults or token env values. */
@@ -535,7 +602,7 @@ export function loadDebugDeploymentIdentity(rootDir: string): DebugDeploymentIde
 	const defaultCompactionModel =
 		typeof raw.compaction_model === "string"
 			? canonicalPiModelReference(raw.compaction_model)!
-			: DEFAULT_AUXILIARY_VISUAL_MODEL;
+			: DEFAULT_COMPACTION_MODEL;
 	const bots = rawBots.map((bot) => {
 		const id = typeof bot.id === "string" ? bot.id.trim() : "";
 		const tools = (bot.tools ?? {}) as Record<string, unknown>;
@@ -577,18 +644,31 @@ export function loadDebugDeploymentIdentity(rootDir: string): DebugDeploymentIde
 		throw new ConfigError(["[debug] deployment identity is invalid"]);
 	}
 	const dataDir = join(rootDir, "data");
+	const rawMedia = raw.media as
+		| { mode?: unknown; max_images_per_turn?: unknown; download_concurrency?: unknown }
+		| undefined;
 	const rawVision = raw.vision as { enabled?: unknown } | undefined;
 	return {
 		dataDir,
 		dbPath: typeof raw.db_path === "string" ? resolvePath(rootDir, raw.db_path) : join(dataDir, "agent.db"),
 		groupPeerId,
-		botIds: [...new Set(botIds)],
-		bots,
+		visionEnabled: rawVision?.enabled === true,
 		auxiliaryVisualModel:
 			typeof raw.auxiliary_visual_model === "string"
 				? canonicalPiModelReference(raw.auxiliary_visual_model)!
 				: DEFAULT_AUXILIARY_VISUAL_MODEL,
-		visionEnabled: rawVision?.enabled === true,
+		contextWindow: typeof raw.context_window === "number" ? raw.context_window : DEFAULT_CONTEXT_WINDOW,
+		media: {
+			mode: rawMedia?.mode === "context" ? "context" : "vision",
+			maxImagesPerTurn:
+				typeof rawMedia?.max_images_per_turn === "number" ? rawMedia.max_images_per_turn : DEFAULT_MAX_IMAGES_PER_TURN,
+			downloadConcurrency:
+				typeof rawMedia?.download_concurrency === "number"
+					? rawMedia.download_concurrency
+					: DEFAULT_MEDIA_DOWNLOAD_CONCURRENCY,
+		},
+		botIds: [...new Set(botIds)],
+		bots,
 	};
 }
 
@@ -651,7 +731,7 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 	const defaultCompactionModel =
 		typeof raw.compaction_model === "string"
 			? canonicalPiModelReference(raw.compaction_model)!
-			: DEFAULT_AUXILIARY_VISUAL_MODEL;
+			: DEFAULT_COMPACTION_MODEL;
 	const defaultCacheRetention = (["none", "short", "long"] as const).includes(raw.cache_retention as never)
 		? (raw.cache_retention as "none" | "short" | "long")
 		: "short";
@@ -667,6 +747,9 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 			"[config] Pi default provider/model is missing; run Pi /login and select both with /model, or set them explicitly in telegram.config.ts",
 		);
 	}
+
+	const contextWindow = num("context_window", DEFAULT_CONTEXT_WINDOW, MIN_COMPACTION_RESERVE * 2, 10_000_000);
+	const maxCompactionThreshold = contextWindow - MIN_COMPACTION_RESERVE;
 
 	const bots: BotConfig[] = botList.map((b) => {
 		const tokenEnv = b.token_env as string;
@@ -688,9 +771,9 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 			);
 		}
 		const effectiveThreshold = typeof b.compaction_threshold === "number" ? b.compaction_threshold : defaultThreshold;
-		if (effectiveThreshold > MAX_COMPACTION_THRESHOLD) {
+		if (effectiveThreshold > maxCompactionThreshold) {
 			errors.push(
-				`[config] bot "${String(b.id)}" compaction_threshold ${effectiveThreshold}: effective trigger is capped at ${MAX_COMPACTION_THRESHOLD} (64K window minus ${MIN_COMPACTION_RESERVE} reserve); use a value <= ${MAX_COMPACTION_THRESHOLD}`,
+				`[config] bot "${String(b.id)}" compaction_threshold ${effectiveThreshold}: effective trigger is capped at ${maxCompactionThreshold} (context_window ${contextWindow} minus ${MIN_COMPACTION_RESERVE} reserve); use a value <= ${maxCompactionThreshold}`,
 			);
 		}
 		return {
@@ -726,8 +809,13 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 		? needEnv(tinyfishKeyEnv, `tinyfish_key_env "${tinyfishKeyEnv}"`)
 		: (env[tinyfishKeyEnv] ?? "");
 
-	const visionRaw = raw.vision && typeof raw.vision === "object" ? (raw.vision as Record<string, unknown>) : {};
+	const mediaRaw = raw.media && typeof raw.media === "object" ? (raw.media as Record<string, unknown>) : {};
 	// loadBotConfig already rejected out-of-range values; absent keys take defaults.
+	const mediaNumber = (key: string, fallback: number): number => {
+		const value = mediaRaw[key];
+		return typeof value === "number" ? value : fallback;
+	};
+	const visionRaw = raw.vision && typeof raw.vision === "object" ? (raw.vision as Record<string, unknown>) : {};
 	const visionNumber = (key: string, fallback: number): number => {
 		const value = visionRaw[key];
 		return typeof value === "number" ? value : fallback;
@@ -753,6 +841,12 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 			enabled: visionRaw.enabled === true,
 			foregroundMediaLimit: visionNumber("foreground_media_limit", 2),
 			concurrency: visionNumber("concurrency", 2),
+		},
+		contextWindow,
+		media: {
+			mode: mediaRaw.mode === "context" ? "context" : "vision",
+			maxImagesPerTurn: mediaNumber("max_images_per_turn", DEFAULT_MAX_IMAGES_PER_TURN),
+			downloadConcurrency: mediaNumber("download_concurrency", DEFAULT_MEDIA_DOWNLOAD_CONCURRENCY),
 		},
 		retention,
 		routerSecret: env[routerSecretEnv] || null,

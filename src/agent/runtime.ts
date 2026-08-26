@@ -19,7 +19,7 @@ import {
 	type SessionEntry,
 	type SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
-import { EFFECTIVE_CONTEXT_WINDOW, MIN_COMPACTION_RESERVE, type AppConfig, type BotConfig } from "../config.ts";
+import { MIN_COMPACTION_RESERVE, type AppConfig, type BotConfig } from "../config.ts";
 import { getBotState, setBotState } from "../db/db.ts";
 import { BotApi, TelegramApiError } from "../telegram/api.ts";
 import { TelegramTypingLease } from "../telegram/activity.ts";
@@ -52,14 +52,10 @@ import {
 } from "./tools.ts";
 import { runTinyFishTool } from "../tools/search.ts";
 import { runJs } from "../tools/run-js.ts";
-import {
-	createPiVisionExecutor,
-	ensureVision,
-	fileIdForBot,
-	type VisionExecutor,
-	type VisionUpdateSink,
-} from "../media/vision.ts";
-import { isVisionMedia, type MediaDownloadApi } from "../media/local-cache.ts";
+import { contextMediaRefs, createContextImageResolver, ensureContextMedia } from "../media/context-media.ts";
+import { fileIdForBot, isVisionMedia, type MediaDownloadApi } from "../media/local-cache.ts";
+import { createPiVisionExecutor, ensureVision, type VisionExecutor, type VisionUpdateSink } from "../media/vision.ts";
+import type { VisionScheduler } from "../media/vision-scheduler.ts";
 import {
 	appendStickerCandidateSuffix,
 	ensureStickerCatalog,
@@ -94,6 +90,7 @@ import {
 import { availableSuffixBudget, estimateProviderTokensUpperBound, packMessageEvents } from "./token-packer.ts";
 import {
 	estimateCacheReadFromPrefix,
+	buildTelegramContextBlocks,
 	makeAssistantPersistencePolicyExtension,
 	makeCachePayloadObserverExtension,
 	makeTelegramCompactionExtension,
@@ -108,7 +105,6 @@ import {
 import { buildContextFingerprint, canResumeContextSession, sha256 } from "./context-fingerprint.ts";
 import { contextStateFromEntries } from "./context-state.ts";
 import { parsePiModelReference, type PiRequestThinkingLevel } from "./model-ref.ts";
-import type { VisionScheduler } from "../media/vision-scheduler.ts";
 import type { VideoTranscoderAvailability } from "../media/video-frames.ts";
 import { log } from "../observability/log.ts";
 import { fitContextBreakdown } from "../observability/usage.ts";
@@ -217,7 +213,13 @@ export class BotRuntime {
 	private staticPrefixTokenEstimate = 0;
 	private pendingPayloadObservations: ProviderPayloadObservation[] = [];
 	private currentTriggerMessageId: number | null = null;
-	private pendingInputMetrics = { inputEvents: 0, estimatedTokens: 0, rowsScanned: 0, visionCalls: 0 };
+	private pendingInputMetrics = {
+		inputEvents: 0,
+		estimatedTokens: 0,
+		rowsScanned: 0,
+		visionCalls: 0,
+		imagesAttached: 0,
+	};
 	private providerCallsInRun = 0;
 	private lastLlmRunId: number | null = null;
 	private lastUsageRun: UsageRun | null = null;
@@ -346,7 +348,7 @@ export class BotRuntime {
 		};
 		const catalogModel = this.modelRuntime.getModel(this.bot.provider, this.bot.model);
 		if (!catalogModel) throw new Error(`model not found: ${this.bot.provider}/${this.bot.model}`);
-		const model = { ...catalogModel, contextWindow: Math.min(catalogModel.contextWindow, EFFECTIVE_CONTEXT_WINDOW) };
+		const model = { ...catalogModel, contextWindow: Math.min(catalogModel.contextWindow, this.config.contextWindow) };
 		this.model = model;
 		const compactionSelection = parsePiModelReference(this.bot.compactionModel);
 		if (!compactionSelection) throw new Error("invalid compaction_model; expected provider/model:effort");
@@ -386,6 +388,7 @@ export class BotRuntime {
 			compactionPromptSha256: sha256(COMPACTION_SUMMARY_PROMPT),
 			compactionModel: compactionSelection.canonical,
 			stickerCatalogSnapshotSha256: stickerCatalogSnapshotHash(this.db, this.bot.id, this.bot.stickerSets),
+			mediaMode: this.config.media.mode,
 			extensionOrder: TELEGRAM_EXTENSION_ORDER,
 			tools: activeTools.map((tool) => ({
 				name: tool.name,
@@ -418,7 +421,13 @@ export class BotRuntime {
 		);
 		this.telemetryHmacKey = payloadKey;
 		const extensions = [
-			makeTelegramContextExtension(),
+			// The image resolver is only wired in context mode; in vision mode the context is
+			// text-only (vision descriptions render inside the serialized placeholders).
+			makeTelegramContextExtension(
+				this.config.media.mode === "context"
+					? createContextImageResolver(join(this.config.dataDir, "media"))
+					: undefined,
+			),
 			makeTelegramCompactionExtension((event) => this.handleBeforeCompact(event)),
 			makeCachePayloadObserverExtension(payloadKey, (observation) => {
 				this.pendingPayloadObservations.push(observation);
@@ -1112,7 +1121,7 @@ export class BotRuntime {
 			return "coalesced";
 		}
 		if (this.flushing) {
-			// re-entrant trigger while a flush is in flight (e.g. slow vision await):
+			// re-entrant trigger while a flush is in flight (e.g. slow media download):
 			// coalesce into pendingTrigger; the loop picks it up (burst merge, R1)
 			this.pendingTrigger = true;
 			if (directReplyPending && directReplyMessageId != null) {
@@ -1210,16 +1219,28 @@ export class BotRuntime {
 		let mandatory = requiredEvents();
 		let normal = ordinaryEvents();
 
-		this.pendingInputMetrics = { inputEvents: 0, estimatedTokens: 0, rowsScanned: 0, visionCalls: 0 };
-		await this.ensureBatchVision([...mandatory, ...normal], obligationIds);
-		const postVisionHighWater = messageEventHighWater(this.db, chatId);
-		if (postVisionHighWater > highWater) {
-			highWater = postVisionHighWater;
-			recent = listRecentMessageEvents(this.db, chatId, consumedSeq, highWater, MAX_EVENT_SCAN);
-			obligationEvents = listReplyObligationEvents(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN);
-			rowsScanned += recent.length + obligationEvents.length;
-			mandatory = requiredEvents();
-			normal = ordinaryEvents();
+		this.pendingInputMetrics = {
+			inputEvents: 0,
+			estimatedTokens: 0,
+			rowsScanned: 0,
+			visionCalls: 0,
+			imagesAttached: 0,
+		};
+		if (this.config.media.mode === "context") {
+			await this.ensureBatchContextMedia([...mandatory, ...normal], obligationIds);
+		} else {
+			await this.ensureBatchVision([...mandatory, ...normal], obligationIds);
+			// Vision descriptions land as media_update events mid-scan: pick them up so the
+			// same flush already sees the fresh descriptions.
+			const postVisionHighWater = messageEventHighWater(this.db, chatId);
+			if (postVisionHighWater > highWater) {
+				highWater = postVisionHighWater;
+				recent = listRecentMessageEvents(this.db, chatId, consumedSeq, highWater, MAX_EVENT_SCAN);
+				obligationEvents = listReplyObligationEvents(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN);
+				rowsScanned += recent.length + obligationEvents.length;
+				mandatory = requiredEvents();
+				normal = ordinaryEvents();
+			}
 		}
 		const usage = this.session.getContextUsage();
 		const suffixBudget = availableSuffixBudget({
@@ -1238,6 +1259,12 @@ export class BotRuntime {
 			suffixBudget,
 			{ visibleIds: new Set(this.visibleMessageIds) },
 			this.bot.maxMessageTokens,
+			this.config.media.mode === "context"
+				? {
+						refs: (fileUniqueId) => contextMediaRefs(this.db, fileUniqueId),
+						maxImages: this.config.media.maxImagesPerTurn,
+					}
+				: undefined,
 		);
 		log.info("agent_runtime", "context_packed", {
 			bot_id: this.bot.id,
@@ -1249,6 +1276,7 @@ export class BotRuntime {
 			visible_count: packed.visibleMessageIds.length,
 			obligation_count: obligations.length,
 			estimated_tokens: packed.estimatedTokens,
+			images_attached: packed.imagesAttached,
 			suffix_budget: suffixBudget,
 		});
 		if (packed.deferredMandatory > 0) {
@@ -1283,6 +1311,7 @@ export class BotRuntime {
 			version: TELEGRAM_CONTEXT_VERSION,
 			consumedSeq: highWater,
 			providerText: packed.text,
+			blocks: buildTelegramContextBlocks(packed.segments),
 			stickerCandidates: boundedStickerCandidates,
 			visibleMessageIds: packed.visibleMessageIds,
 			events: packed.events.map((event) => ({
@@ -1296,9 +1325,10 @@ export class BotRuntime {
 		this.currentTriggerMessageId = packed.events.at(-1)?.messageId ?? this.currentTriggerMessageId;
 		this.pendingInputMetrics = {
 			inputEvents: packed.events.length,
-			estimatedTokens: estimateProviderTokensUpperBound(providerText),
+			estimatedTokens: packed.estimatedTokens + stickerCandidateTokens,
 			rowsScanned,
 			visionCalls: this.pendingInputMetrics.visionCalls,
+			imagesAttached: packed.imagesAttached,
 		};
 		// sendCustomMessage(triggerTurn) does not resolve until the provider turn, including
 		// tool execution, has finished. Make only the fully packed references addressable
@@ -1402,6 +1432,57 @@ export class BotRuntime {
 				this.trigger("explicit");
 			}
 		}
+	}
+
+	/**
+	 * Prepare context images for the batch: download + convert/sample only, never a provider
+	 * call. Bounded per turn, with direct-reply events ordered before ordinary catch-up.
+	 * Preparation failures are transient (retried on a later turn); packing falls back to the
+	 * text placeholder when no prepared refs exist.
+	 */
+	private async ensureBatchContextMedia(
+		batch: readonly MessageEvent[],
+		obligationIds: ReadonlySet<number>,
+	): Promise<void> {
+		if (this.config.media.maxImagesPerTurn <= 0) return;
+		const pending: string[] = [];
+		const seen = new Set<string>();
+		const prioritized = [...batch].sort(
+			(left, right) =>
+				Number(obligationIds.has(right.messageId)) - Number(obligationIds.has(left.messageId)) ||
+				right.ingestSeq - left.ingestSeq,
+		);
+		for (const event of prioritized) {
+			if (event.kind !== "message") continue;
+			const row = event.payload as MessageRow;
+			if (!row.media) continue;
+			const media = JSON.parse(row.media) as { kind: string; mime?: string; file_unique_id?: string };
+			if (!media.file_unique_id || !isVisionMedia(media.kind, media.mime)) continue;
+			if (seen.has(media.file_unique_id)) continue;
+			seen.add(media.file_unique_id);
+			if (contextMediaRefs(this.db, media.file_unique_id)) continue; // already prepared, shared by both bots
+			pending.push(media.file_unique_id);
+			if (pending.length >= this.config.media.maxImagesPerTurn) break;
+		}
+
+		let next = 0;
+		const workers = Math.min(this.config.media.downloadConcurrency, pending.length);
+		await Promise.all(
+			Array.from({ length: workers }, async () => {
+				while (next < pending.length) {
+					const fileUniqueId = pending[next++]!;
+					try {
+						await ensureContextMedia(this.db, this.api, this.bot.id, fileUniqueId, {
+							cacheDir: join(this.config.dataDir, "media"),
+							botApis: this.botApis,
+							videoTranscoder: this.videoTranscoder,
+						});
+					} catch {
+						this.recordEvent("error", { stage: "context_media", category: "request_failed" });
+					}
+				}
+			}),
+		);
 	}
 
 	/** Lazy vision: bounded per turn, with direct-reply events ordered before ordinary catch-up. */
@@ -1578,10 +1659,10 @@ export class BotRuntime {
 					system_hash, tools_hash, messages_hash, provider, api, session_id_hash,
 					cache_retention, full_payload_hash, first_divergent_segment,
 					first_divergent_message_index, first_divergent_byte_offset, trigger_message_id,
-					public_send_count, vision_calls, tool_followup_rounds, input_events,
+					public_send_count, vision_calls, images_attached, tool_followup_rounds, input_events,
 					input_tokens_estimated, rows_scanned, system_tokens, tools_tokens,
 					compacted_history_tokens, message_tokens, thinking_ms
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				this.bot.id,
@@ -1610,6 +1691,7 @@ export class BotRuntime {
 				observation?.firstDivergentByteOffset ?? null,
 				this.currentTriggerMessageId,
 				metrics.visionCalls,
+				metrics.imagesAttached,
 				this.providerCallsInRun > 1 ? 1 : 0,
 				metrics.inputEvents,
 				metrics.estimatedTokens,
@@ -1621,7 +1703,13 @@ export class BotRuntime {
 				this.thinkingMs,
 			);
 		this.lastLlmRunId = Number(res.lastInsertRowid);
-		this.pendingInputMetrics = { inputEvents: 0, estimatedTokens: 0, rowsScanned: 0, visionCalls: 0 };
+		this.pendingInputMetrics = {
+			inputEvents: 0,
+			estimatedTokens: 0,
+			rowsScanned: 0,
+			visionCalls: 0,
+			imagesAttached: 0,
+		};
 		const run: UsageRun = {
 			id: this.lastLlmRunId,
 			botId: this.bot.id,

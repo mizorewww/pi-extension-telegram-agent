@@ -28,7 +28,7 @@ bun run debug -- --bot A --show-provider-content  # 敏感：显式读取完整�
 | code | 已证明的事实 | 下一步 |
 |---|---|---|
 | `unsupported_reasoning_effort` | 配置requested档位不在该模型supported levels中，Pi会静默clamp为effective档位 | 将main/compaction/vision配置改为supported值；daemon启动也会fail fast |
-| `video_transcoder_unavailable` | vision已启用，但PATH缺少`ffmpeg`或`ffprobe`；finding同时给出`impact=video_recognition_disabled`与`action=install_ffmpeg_and_restart` | 安装FFmpeg发行包并restart；它只用于视频抽帧，daemon、聊天、图片vision与sticker发送不受影响 |
+| `video_transcoder_unavailable` | 当前模式需要视频抽帧（vision已启用或context模式），但PATH缺少`ffmpeg`或`ffprobe`；finding同时给出`impact=video_recognition_disabled`与`action=install_ffmpeg_and_restart` | 安装FFmpeg发行包并restart；它只用于视频抽帧，缺失时vision模式跳过视频识别、context模式视频降级为文本占位，daemon、聊天、图片链路与sticker发送不受影响 |
 | `cursor_backlog` | 该bot尚未消费全部immutable events | 看最近claim与runtime state；没有trigger时可正常 |
 | `pending_reply_obligation` | direct address（explicit @mention / reply / 配置名称点名）尚未被structured commit确认交付 | 查flush/provider失败；restart后应自动recover |
 | `route_without_run` | started claim超过120秒仍无匹配`llm_runs.trigger_message_id` | 查`agent_runtime.flush_failed`与provider readiness |
@@ -55,13 +55,15 @@ bun run debug -- --bot A --show-provider-content  # 敏感：显式读取完整�
 
 ### 图片与视频理解证据梯
 
+媒体到达模型由`media.mode`决定：默认vision模式由辅助视觉模型生成文字描述，context模式把图片/抽帧直接交给主模型。按顺序停止在第一处缺失/失败：
+
 1. canonical `messages.media`与`media_file_ids`证明哪个bot拥有可用`file_id`；`file_id`只能交给同一bot的Bot API。
-2. `media.local_path`与`media_cache_ready/skip/error`证明本地媒体准备，不证明vision provider已经运行。视频path只是本地source，不会进入IPC。
+2. `media.local_path`与`media_cache_ready/skip/error`证明本地媒体source准备，不证明vision provider或上下文投影已经运行。视频path只是本地抽帧输入，不会进入IPC。
 3. 成功compaction后，`media_cache.post_compaction_pruned`只聚合`scanned/deleted/stale/failed`；`failed>0`保留DB path供下次重试，全部无候选时合法静默。`prune_observer_failed`表示observer自身失败，但compaction仍已提交。两者都不得加入media identity或path。
-4. 视频先检查`video_transcoder`；`video_transcoder_unavailable`在Telegram下载、FFmpeg与provider前立即no-op，可在安装并restart后重试。CLI只提醒operator，daemon log带`blocking=false`，不向群内发送告警。`video_probe_failed`/`video_frame_extraction_failed`证明失败发生在provider前。不得记录命令stderr或path。
-5. `agent_events.kind=vision`的固定`outcome`、`frames`与`providerCalled`证明foreground识别结果；deployment并发门会在视频下载前排队。跨bot路由时应使用任一已配置且有mapping的接收bot，`file_id_unavailable`只表示所有可用source均缺失。
-6. 非空`media.vision`与对应`message_events.kind=media_update`证明描述已持久化并进入append-only provider队列；主模型选择别的话题不等于没有识图。
-7. `/tg attach`的snapshot/history直接读`media.vision`，live路径读`vision_update`；全局、A、B等filter都应显示同一群消息描述，filter只限制LOCAL/usage。
+4. 视频先检查`video_transcoder`；`video_transcoder_unavailable`在Telegram下载与FFmpeg之前立即no-op（vision模式）或降级为文本占位（context模式），可在安装并restart后重试。CLI只提醒operator，daemon log带`blocking=false`，不向群内发送告警。`video_probe_failed`/`video_frame_extraction_failed`证明失败发生在provider前的本地抽帧。不得记录命令stderr或path。
+5. vision模式：`agent_events.kind=vision`的固定`outcome`、`frames`与`providerCalled`证明foreground识别结果；deployment并发门会在视频下载前排队。context模式：非空`media.context_files`证明派生图片已持久化并会随消息事件的文本段进入provider上下文；准备失败记`agent_events`的`error`（`stage=context_media`）。跨bot路由时应使用任一已配置且有mapping的接收bot，`file_id_unavailable`只表示所有可用source均缺失。
+6. vision模式：非空`media.vision`与对应`message_events.kind=media_update`证明描述已持久化并进入append-only provider队列；主模型选择别的话题不等于没有识图。context模式：图片就位与否以`llm_runs.images_attached`与本轮`context_packed`日志为证。
+7. `/tg attach`的snapshot/history直接读display cache path与`media.vision`（`mediaDesc`），live路径读`vision_update`；媒体inline展示与provider上下文图片是两条独立链路。全局、A、B等filter都应显示同一群消息描述，filter只限制LOCAL/usage。
 
 不得把私人图片、OCR正文、`file_unique_id`、`file_id`或本地path复制进daemon日志；内容取证只在明确授权的本机SQLite/provider-context检查中短暂查看。
 

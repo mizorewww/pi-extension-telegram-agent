@@ -139,7 +139,7 @@ export function buildDebugReport(db: Database, input: DebugReportInput) {
 			SELECT id, ts, epoch, trigger_message_id, public_send_count, tool_followup_rounds,
 			       input_events, input_tokens_estimated, rows_scanned, latency_ms,
 			       context_tokens, cache_read, cache_write, cache_read_estimated, cache_miss, output_tokens,
-			       reasoning_tokens, vision_calls, system_tokens, tools_tokens,
+			       reasoning_tokens, vision_calls, images_attached, system_tokens, tools_tokens,
 			       compacted_history_tokens, message_tokens, thinking_ms, send_ms, send_samples
 			  FROM llm_runs WHERE bot_id = ? AND ts >= ?
 			 ORDER BY id DESC LIMIT ?

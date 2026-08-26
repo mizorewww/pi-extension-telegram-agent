@@ -72,7 +72,7 @@ export function videoTranscoderAdvisory(required: boolean, availability: VideoTr
 	const missing = [!availability.ffmpeg ? "ffmpeg" : null, !availability.ffprobe ? "ffprobe" : null].filter(
 		(value): value is string => value != null,
 	);
-	return `warning: video recognition is disabled because ${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} unavailable; install the FFmpeg package and restart (it is used only to sample video frames; chat, image vision, and sticker sending continue normally)`;
+	return `warning: video frame sampling is disabled because ${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} unavailable; install the FFmpeg package and restart (it is used only to sample video frames for the model context; chat, images, and sticker sending continue normally)`;
 }
 
 /** Fixed representative positions keep extraction deterministic and explainable. */

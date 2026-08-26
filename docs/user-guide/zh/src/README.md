@@ -17,7 +17,7 @@
 - [在 Pi 中聊天和观察](using-pi.md)：attach、compose、history 与 telemetry。
 - [日常运维](operations.md)：daemon、配置变更、备份与多群隔离。
 - [故障排查](troubleshooting.md)：从可观察症状到安全的下一步。
-- [成本设计概览](design-cost.md)：为什么 routing/cache/context/vision/UI 不浪费调用和 token。
+- [成本设计概览](design-cost.md)：为什么 routing/cache/context/媒体/UI 不浪费调用和 token。
 
 ## 产品边界
 

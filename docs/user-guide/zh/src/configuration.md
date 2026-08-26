@@ -31,8 +31,14 @@ export default defineConfig({
   reasoning_effort: "off",
   cache_retention: "short",
   compaction_model: "openai-codex/gpt-5.6-luna:low",
+  context_window: 65_536,
   max_suffix_tokens: 12_000,
   max_message_tokens: 4_096,
+  media: {
+    mode: "vision", // 默认；改 "context" 时主模型必须支持图片输入
+    max_images_per_turn: 4,
+    download_concurrency: 2,
+  },
   vision: {
     enabled: false,
     foreground_media_limit: 2,
@@ -81,18 +87,21 @@ export default defineConfig({
 
 公开示例固定了一组成本优先profile：Luna、reasoning off、short cache retention，并用Luna low做compaction。向导会把已经通过Pi预检的provider/model固定进新配置，因此以后改变Pi默认值不会静默改变这个deployment。旧手写配置仍可省略这两个字段兼容继承Pi合并后的默认值；但省略`reasoning_effort`表示`off`，不再继承Pi的thinking level。daemon会通过Pi原生resource loader读取用户级已安装provider extension，因此插件提供的模型、能力与费用元数据和交互式Pi一致；项目extension不会进入bot session。单bot可以覆盖到另一个catalog entry；切换provider时必须同时填写provider和model。认证始终来自Pi，不来自本配置或`.env`。
 
-`reasoning_effort`不仅必须是Pi全局枚举，还必须是所选模型实际支持的档位。Pi SDK本身会把不支持的值静默夹到最近档位；Telegram agent为避免费用、行为与状态显示不一致，会在任何Telegram/provider调用前拒绝启动，并列出requested与supported值。main bot、`compaction_model`及启用的vision模型执行同一检查。请在Pi `/model`查看可选档位；例如`deepseek-v4-flash`只接受`off`、`high`、`max`。
+`reasoning_effort`不仅必须是Pi全局枚举，还必须是所选模型实际支持的档位。Pi SDK本身会把不支持的值静默夹到最近档位；Telegram agent为避免费用、行为与状态显示不一致，会在任何Telegram/provider调用前拒绝启动，并列出requested与supported值。main bot、`compaction_model`及vision模式下启用的辅助视觉模型执行同一检查。请在Pi `/model`查看可选档位；例如`deepseek-v4-flash`只接受`off`、`high`、`max`。
 
 `compaction_model`的请求失败（provider error）时会自动用该bot的主模型重试一次并记录`compaction_fallback`日志，避免压缩模型不可用导致overflow的session永久卡死；主动abort（如daemon关停）不会重试。
+
+自定义OpenAI兼容端点（自建网关、代理等）通过Pi原生的`~/.pi/agent/models.json`注册，不需要任何项目侧扩展：在`providers`里声明`baseUrl`、`api: "openai-completions"`、`apiKey`（可写成`"$ENV_VAR"`引用环境变量），并为每个模型显式声明`input`（如`["text","image"]`）、`contextWindow`、`maxTokens`。注册后在Pi `/model`确认可用，再把`provider`/`model`写进本配置；打算用`media.mode: "context"`时模型声明必须包含image输入，否则daemon启动时fail fast。
 
 以下边界都有默认上限：
 
 - `max_suffix_tokens: 12000`和`max_message_tokens: 4096`限制每轮新增的Telegram provider context；
 - 主聊天默认`cache_retention: "short"`，compaction使用配置的廉价task model且关闭provider cache retention；
-- `vision.enabled`默认false；开启后，每轮最多处理`foreground_media_limit`个未缓存媒体，所有bot共用一个最多`concurrency`个active job的FIFO门。视频从Telegram下载到抽帧、provider请求全程占同一个slot。视频识别要求daemon主机PATH中有`ffmpeg`和`ffprobe`；缺失时下载前直接跳过且不占provider token，只给operator安装提示，不影响daemon、聊天、图片或sticker发送；
+- `context_window`（默认65,536）限制主模型的有效上下文窗口，并把`compaction_threshold`的上限压到`context_window − 16,384`；
+- `media.mode`（默认`"vision"`）决定媒体如何到达模型。vision模式：`vision.enabled`开启后，辅助视觉模型（`auxiliary_visual_model`）为每个媒体生成文字描述；描述持久化在`media.vision`列、所有bot共享，以immutable media-update event追加进上下文，主模型读到的是`[图片: 描述]`占位，因此主模型不需要图片输入；每轮最多处理`foreground_media_limit`个未缓存媒体，所有bot共用一个最多`concurrency`个active job的FIFO门。context模式：完全不调用视觉模型，照片与静态sticker直接作为图片进入主模型上下文，视频（含视频sticker与GIF动图）本地抽取1-3张代表帧；主模型必须支持图片输入，否则启动直接报`image_input_unsupported`；每次模型调用最多附`media.max_images_per_turn`张图（默认4，每张约1.1K token），超出上限或上下文预算的媒体自动降级为文字占位，下载/抽帧并发由`media.download_concurrency`（默认2）控制。两种模式下voice/audio/非视频document/TGS动态贴纸都保持文字占位（当前模型API的硬限制），视频抽帧都要求daemon主机PATH中有`ffmpeg`和`ffprobe`；缺失时视频只保留文字占位且不占provider token，只给operator安装提示，不影响daemon、聊天、图片或sticker发送；
 - telemetry、raw update、immutable message event默认分别保留90、30、365天。旧event只有在所有已知bot cursor都消费且没有reply obligation引用时才删除。
 
-model、reasoning、cache policy、persona、tools、serializer等cache-visible字段变化都会得到新context fingerprint。受控restart会保留旧session文件，但在restore前创建新session，绝不会用新identity恢复旧context。
+model、reasoning、cache policy、persona、tools、serializer、`media.mode`等cache-visible字段变化都会得到新context fingerprint。受控restart会保留旧session文件，但在restore前创建新session，绝不会用新identity恢复旧context。
 
 `tools`：
 

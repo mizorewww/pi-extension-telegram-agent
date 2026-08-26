@@ -30,11 +30,11 @@ bun run pi --version
 /tg restart
 ```
 
-再检查 `data/daemon.log`。常见原因是Telegram token错误、网络不可达、Pi login/default model已变化、model不在Pi catalog或bot未加入目标群。有效配置会保留；不需要重新粘贴token。
+再检查 `data/daemon.log`。常见原因是Telegram token错误、网络不可达、Pi login/default model已变化、model不在Pi catalog、`media.mode: "context"`下主模型不支持图片输入（`image_input_unsupported`，用Pi `/model`换一个支持的模型或回到默认vision模式）或bot未加入目标群。有效配置会保留；不需要重新粘贴token。
 
 ## `daemon starting` 很久
 
-配置了sticker sets时首次Telegram catalog拉取可能较慢。vision只有显式开启后才工作，不属于默认启动路径。运行`bun run status`并观察脱敏日志。如果child仍alive，controller不会把60秒等待上限误报成ready；只有socket真实可连接才算ready。
+配置了sticker sets时首次Telegram catalog拉取可能较慢。vision模式的描述生成只有`vision.enabled`显式开启后才工作，不属于默认启动路径。运行`bun run status`并观察脱敏日志。如果child仍alive，controller不会把60秒等待上限误报成ready；只有socket真实可连接才算ready。
 
 修改model、persona、cache policy、tools等cache-visible字段后，日志出现`session ready (new)`是预期行为。context fingerprint会阻止用新identity恢复旧session；旧文件仍保留用于恢复或审计。
 
@@ -57,15 +57,15 @@ bun run pi --version
 
 ## 图片没有内联显示
 
-用户或bot新发的static photo/sticker会先显示media label，再由daemon后台下载并在同一Pi卡片原位出现；它不依赖routing或vision。animated/video媒体保留文字placeholder。daemon启动时会把旧绝对cache path按文件名迁到当前`data/media`，不存在的记录先清空，再只回填仍被当前上下文、未消费event或待回复义务引用的最新100条static display缺口。
+用户或bot新发的static photo/sticker会先显示media label，再由daemon后台下载并在同一Pi卡片原位出现；它不依赖routing或任何模型调用。animated/video媒体保留文字placeholder。daemon启动时会把旧绝对cache path按文件名迁到当前`data/media`，不存在的记录先清空，再只回填仍被当前上下文、未消费event或待回复义务引用的最新100条static display缺口。
 
-成功compaction后，所有当前配置bot都不再引用的本地媒体cache会按有界批次自动删除；旧Pi卡片因此只剩label是预期行为，不代表消息、vision结果或Telegram file mapping丢失。restart不会为了历史展示把这些文件无条件下载回来。
+成功compaction后，所有当前配置bot都不再引用的本地媒体cache会按有界批次自动删除；旧Pi卡片因此只剩label是预期行为，不代表消息、vision描述或媒体派生文件记录、Telegram file mapping丢失。restart不会为了历史展示把这些文件无条件下载回来。
 
 若新媒体持续只有label，先在脱敏日志中查`media_cache_ready/skip/error`的固定category与queue数字，再检查文件是否超过1 MiB、是否为支持的静态图片格式、terminal图像能力和当前项目Pi版本。Pi根据当前capability选择Kitty/iTerm2/native fallback；不要手写terminal escape或绕过Pi组件。稳定复现时只记录terminal、tmux状态、媒体种类、固定outcome和“是否有本地path”，不要附带token、绝对path或私人图片本体。
 
-## 视频没有视觉描述
+## 视频没有视觉描述或代表帧
 
-先运行`bun run debug`。`video_transcoder_unavailable`表示主机缺少`ffmpeg`或`ffprobe`；`start`/`restart`/`status`也会说明它只用于视频抽帧并给出安装建议。这个告警不阻塞daemon，不会发到群里；视频会在Telegram下载和provider调用前跳过，因此不占provider token，聊天、图片vision和三种sticker发送保持正常。安装同一FFmpeg发行包后restart即可，之前的失败不会永久缓存。`video_probe_failed`或`video_frame_extraction_failed`表示文件无法由本机工具读取；检查是否超过20 MiB和格式支持。日志不会包含文件path、stderr或视频内容。
+先运行`bun run debug`。`video_transcoder_unavailable`表示主机缺少`ffmpeg`或`ffprobe`；`start`/`restart`/`status`也会说明它只用于视频抽帧并给出安装建议。两种媒体模式的视频抽帧都需要FFmpeg。这个告警不阻塞daemon，不会发到群里：vision模式下视频在Telegram下载和provider调用前跳过、不占provider token；context模式下视频（含视频sticker与GIF动图）只以文字占位进入上下文。聊天、图片处理和三种sticker发送保持正常。安装同一FFmpeg发行包后restart即可，之前的失败不会永久缓存。`video_probe_failed`或`video_frame_extraction_failed`表示文件无法由本机工具读取；检查是否超过20 MiB和格式支持。日志不会包含文件path、stderr或视频内容。
 
 ## 搜索或网页读取失败
 

@@ -136,6 +136,7 @@ export function isVideoMedia(kind: string, mime: string | null | undefined): boo
 	return kind === "sticker" && mime === "video/webm";
 }
 
+/** True when this media can produce image(s) for a model: photo, non-TGS sticker, any video. */
 export function isVisionMedia(kind: string, mime: string | null | undefined): boolean {
 	return kind === "photo" || (kind === "sticker" && mime !== "application/x-tgsticker") || isVideoMedia(kind, mime);
 }
@@ -312,7 +313,7 @@ export function dedupeInFlight<T>(
 
 const inFlightByDb = new WeakMap<Database, Map<string, Promise<LocalMediaResult>>>();
 
-/** Share Telegram download and atomic cache installation across UI precache and vision. */
+/** Share Telegram download and atomic cache installation across UI precache and context media. */
 export function ensureLocalMedia(
 	db: Database,
 	api: MediaDownloadApi,

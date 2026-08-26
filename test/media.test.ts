@@ -30,6 +30,7 @@ import {
 import { MediaCacheQueue } from "../src/media/media-cache.ts";
 import { pruneUnreferencedMediaCache } from "../src/media/lifecycle.ts";
 import { ensureStickerCatalog } from "../src/media/sticker-catalog.ts";
+import { ensureContextMedia } from "../src/media/context-media.ts";
 import {
 	createPiVisionExecutor,
 	ensureVision,
@@ -83,7 +84,6 @@ function message(overrides: Partial<MsgItem> = {}): MsgItem {
 		mediaKind: "photo",
 		stickerEmoji: null,
 		mediaPath: null,
-		mediaDesc: null,
 		fileUniqueId: "shared-photo",
 		replyTo: null,
 		edited: false,
@@ -173,6 +173,285 @@ describe("cross-bot media acquisition", () => {
 			video_note: { file_id: "note-file", file_unique_id: "note-unique", mime_type: "video/mp4" },
 		});
 		expect(note.media).toMatchObject({ kind: "video_note", mime: "video/mp4" });
+	});
+
+	test("coalesces concurrent context preparation across bots and reuses the persisted refs", async () => {
+		const directory = temporaryDirectory("tg-context-singleflight-");
+		const cacheDir = join(directory, "media");
+		const db = openDb(join(directory, "agent.db"));
+		const calls: string[] = [];
+		const api = (botId: string): MediaDownloadApi => ({
+			getFile: async (fileId) => {
+				calls.push(`${botId}:get:${fileId}`);
+				return { file_path: `${botId}.jpg` };
+			},
+			downloadFile: async (filePath) => {
+				calls.push(`${botId}:download:${filePath}`);
+				return new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+			},
+		});
+		const apiA = api("A");
+		const apiB = api("B");
+		const apis = new Map([
+			["A", apiA],
+			["B", apiB],
+		]);
+		let resizeCalls = 0;
+		const options = {
+			cacheDir,
+			botApis: apis,
+			resize: async (bytes: Uint8Array, mimeType: string) => {
+				resizeCalls++;
+				return {
+					data: Buffer.from(bytes).toString("base64"),
+					mimeType,
+					originalWidth: 1,
+					originalHeight: 1,
+					width: 1,
+					height: 1,
+					wasResized: false,
+				};
+			},
+		};
+
+		try {
+			db.query("INSERT INTO media (file_unique_id, kind, mime) VALUES ('shared-photo', 'photo', 'image/jpeg')").run();
+			db.query(
+				"INSERT INTO media_file_ids (bot_id, file_id, file_unique_id) VALUES ('A', 'file-a', 'shared-photo'), ('B', 'file-b', 'shared-photo')",
+			).run();
+			const first = ensureContextMedia(db, apiA, "A", "shared-photo", options);
+			const second = ensureContextMedia(db, apiB, "B", "shared-photo", options);
+			expect(first).toBe(second);
+			const refs = await first;
+			expect(await second).toEqual(refs);
+			expect(refs).toHaveLength(1);
+			expect(refs?.[0]?.mime).toBe("image/jpeg");
+			expect(refs?.[0]?.name.endsWith(".jpg")).toBe(true);
+			expect(existsSync(join(cacheDir, refs?.[0]?.name ?? ""))).toBe(true);
+			expect(calls).toEqual(["A:get:file-a", "A:download:A.jpg"]);
+			expect(resizeCalls).toBe(1);
+			expect(
+				JSON.parse(
+					(
+						db.query("SELECT context_files FROM media WHERE file_unique_id = 'shared-photo'").get() as {
+							context_files: string;
+						}
+					).context_files,
+				),
+			).toEqual(refs);
+
+			const bypassed: MediaDownloadApi = {
+				getFile: async () => {
+					throw new Error("persisted context refs were bypassed");
+				},
+				downloadFile: async () => {
+					throw new Error("persisted context refs were bypassed");
+				},
+			};
+			expect(await ensureContextMedia(db, bypassed, "B", "shared-photo", options)).toEqual(refs);
+			expect(calls).toEqual(["A:get:file-a", "A:download:A.jpg"]);
+			expect(resizeCalls).toBe(1);
+		} finally {
+			db.close();
+		}
+	});
+
+	test("coalesces video sampling across bots and persists every derived frame file", async () => {
+		const directory = temporaryDirectory("tg-context-video-");
+		const cacheDir = join(directory, "media");
+		const db = openDb(join(directory, "agent.db"));
+		const apiB: MediaDownloadApi = {
+			getFile: async (fileId) => {
+				expect(fileId).toBe("video-file-b");
+				return { file_path: "videos/clip.mp4" };
+			},
+			downloadFile: async () => new Uint8Array([0, 1, 2, 3]),
+		};
+		const apiA: MediaDownloadApi = {
+			getFile: async () => {
+				throw new Error("A has no mapping");
+			},
+			downloadFile: async () => new Uint8Array(),
+		};
+		const apis = new Map([
+			["A", apiA],
+			["B", apiB],
+		]);
+		let extractCalls = 0;
+		try {
+			db.query("INSERT INTO media (file_unique_id, kind, mime) VALUES ('shared-video', 'video', 'video/mp4')").run();
+			db.query(
+				"INSERT INTO media_file_ids (bot_id, file_id, file_unique_id) VALUES ('B', 'video-file-b', 'shared-video')",
+			).run();
+			const options = {
+				cacheDir,
+				botApis: apis,
+				extractFrames: async () => {
+					extractCalls++;
+					return {
+						ok: true as const,
+						durationSeconds: 12,
+						frames: [0.2, 0.5, 0.8].map((position, index) => ({
+							bytes: new Uint8Array([0xff, 0xd8, index, 0xff, 0xd9]),
+							mimeType: "image/jpeg" as const,
+							position,
+						})),
+					};
+				},
+			};
+			const first = ensureContextMedia(db, apiA, "A", "shared-video", options);
+			const second = ensureContextMedia(db, apiB, "B", "shared-video", options);
+			expect(first).toBe(second);
+			const refs = await first;
+			expect(await second).toEqual(refs);
+			expect(extractCalls).toBe(1);
+			expect(refs?.map((ref) => ref.mime)).toEqual(["image/jpeg", "image/jpeg", "image/jpeg"]);
+			expect(new Set(refs?.map((ref) => ref.name)).size).toBe(3);
+			for (const ref of refs ?? []) {
+				expect(ref.name.endsWith(".jpg")).toBe(true);
+				expect(existsSync(join(cacheDir, ref.name))).toBe(true);
+			}
+			expect(
+				JSON.parse(
+					(
+						db.query("SELECT context_files FROM media WHERE file_unique_id = 'shared-video'").get() as {
+							context_files: string;
+						}
+					).context_files,
+				),
+			).toEqual(refs);
+			const cached = db.query("SELECT local_path FROM media WHERE file_unique_id = 'shared-video'").get() as {
+				local_path: string;
+			};
+			expect(cached.local_path.endsWith(".mp4")).toBe(true);
+			expect(existsSync(join(cacheDir, cached.local_path))).toBe(true);
+		} finally {
+			db.close();
+		}
+	});
+
+	test("returns null for a video without a transcoder before any download", async () => {
+		const directory = temporaryDirectory("tg-context-transcoder-");
+		const db = openDb(join(directory, "agent.db"));
+		let telegramCalls = 0;
+		const api: MediaDownloadApi = {
+			getFile: async () => {
+				telegramCalls++;
+				return { file_path: "videos/clip.mp4" };
+			},
+			downloadFile: async () => {
+				telegramCalls++;
+				return new Uint8Array([0, 1, 2, 3]);
+			},
+		};
+		let extractionAttempts = 0;
+		const options = {
+			cacheDir: join(directory, "media"),
+			videoTranscoder: { ffmpeg: false, ffprobe: false },
+			extractFrames: async () => {
+				extractionAttempts++;
+				return { ok: false as const, outcome: "video_transcoder_unavailable" as const };
+			},
+		};
+		try {
+			db.query("INSERT INTO media (file_unique_id, kind, mime) VALUES ('gated-video', 'video', 'video/mp4')").run();
+			db.query(
+				"INSERT INTO media_file_ids (bot_id, file_id, file_unique_id) VALUES ('A', 'gated-file', 'gated-video')",
+			).run();
+			expect(await ensureContextMedia(db, api, "A", "gated-video", options)).toBeNull();
+			expect(await ensureContextMedia(db, api, "A", "gated-video", options)).toBeNull();
+			expect(telegramCalls).toBe(0);
+			expect(extractionAttempts).toBe(0);
+			expect(
+				(
+					db.query("SELECT context_files FROM media WHERE file_unique_id = 'gated-video'").get() as {
+						context_files: string | null;
+					}
+				).context_files,
+			).toBeNull();
+		} finally {
+			db.close();
+		}
+	});
+
+	test("does not persist a failed preparation and retries on the next call", async () => {
+		const directory = temporaryDirectory("tg-context-retry-");
+		const cacheDir = join(directory, "media");
+		const db = openDb(join(directory, "agent.db"));
+		let telegramCalls = 0;
+		const api: MediaDownloadApi = {
+			getFile: async () => {
+				telegramCalls++;
+				return { file_path: "videos/retry.mp4" };
+			},
+			downloadFile: async () => {
+				telegramCalls++;
+				return new Uint8Array([0, 1, 2, 3]);
+			},
+		};
+		let extractionAttempts = 0;
+		const options = {
+			cacheDir,
+			videoTranscoder: { ffmpeg: true, ffprobe: true },
+			extractFrames: async () => {
+				extractionAttempts++;
+				if (extractionAttempts === 1) return { ok: false as const, outcome: "video_frame_extraction_failed" as const };
+				return {
+					ok: true as const,
+					durationSeconds: 1,
+					frames: [{ bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), mimeType: "image/jpeg" as const, position: 0.5 }],
+				};
+			},
+		};
+		try {
+			db.query("INSERT INTO media (file_unique_id, kind, mime) VALUES ('retry-video', 'video', 'video/mp4')").run();
+			db.query(
+				"INSERT INTO media_file_ids (bot_id, file_id, file_unique_id) VALUES ('A', 'retry-file', 'retry-video')",
+			).run();
+			expect(await ensureContextMedia(db, api, "A", "retry-video", options)).toBeNull();
+			expect(
+				(
+					db.query("SELECT context_files FROM media WHERE file_unique_id = 'retry-video'").get() as {
+						context_files: string | null;
+					}
+				).context_files,
+			).toBeNull();
+			const refs = await ensureContextMedia(db, api, "A", "retry-video", options);
+			expect(refs).toHaveLength(1);
+			// The source download from the failed attempt is reused from the local cache.
+			expect(telegramCalls).toBe(2);
+			expect(extractionAttempts).toBe(2);
+		} finally {
+			db.close();
+		}
+	});
+
+	test("returns null for media that can never become context images", async () => {
+		const directory = temporaryDirectory("tg-context-unsupported-");
+		const db = openDb(join(directory, "agent.db"));
+		const api: MediaDownloadApi = {
+			getFile: async () => {
+				throw new Error("unsupported media must not be downloaded");
+			},
+			downloadFile: async () => {
+				throw new Error("unsupported media must not be downloaded");
+			},
+		};
+		try {
+			const insert = db.query("INSERT INTO media (file_unique_id, kind, mime) VALUES (?, ?, ?)");
+			insert.run("voice-note", "voice", "audio/ogg");
+			insert.run("audio-track", "audio", "audio/mpeg");
+			insert.run("tgs-sticker", "sticker", "application/x-tgsticker");
+			insert.run("pdf-document", "document", "application/pdf");
+			for (const id of ["voice-note", "audio-track", "tgs-sticker", "pdf-document"]) {
+				expect(await ensureContextMedia(db, api, "A", id, { cacheDir: join(directory, "media") })).toBeNull();
+			}
+			expect(db.query("SELECT COUNT(*) count FROM media WHERE context_files IS NOT NULL").get()).toEqual({
+				count: 0,
+			});
+		} finally {
+			db.close();
+		}
 	});
 
 	test("coalesces concurrent vision for two bots and reuses the persisted description", async () => {
@@ -757,12 +1036,14 @@ describe("post-compaction media cache pruning", () => {
 				if (id !== "stale" && id !== "visible-missing") {
 					writeFileSync(join(mediaDir, filename), new Uint8Array([index + 1]));
 				}
+				if (id === "unreferenced") writeFileSync(join(mediaDir, "unreferenced-ctx.jpg"), new Uint8Array([9]));
 				db.query(
-					"INSERT INTO media (file_unique_id, kind, mime, local_path, vision) VALUES (?, 'photo', 'image/jpeg', ?, ?)",
+					"INSERT INTO media (file_unique_id, kind, mime, local_path, vision, context_files) VALUES (?, 'photo', 'image/jpeg', ?, ?, ?)",
 				).run(
 					id,
 					id === "visible-missing" ? null : filename,
 					JSON.stringify({ model: "test", kind: "photo", text: `vision-${id}` }),
+					JSON.stringify([{ name: `${id}-ctx.jpg`, mime: "image/jpeg" }]),
 				);
 				db.query(
 					`INSERT INTO messages
@@ -808,16 +1089,49 @@ describe("post-compaction media cache pruning", () => {
 			});
 			expect(first).toEqual({ scanned: 3, deleted: 1, stale: 1, failed: 1 });
 			expect(existsSync(join(mediaDir, "unreferenced.jpg"))).toBe(false);
+			expect(existsSync(join(mediaDir, "unreferenced-ctx.jpg"))).toBe(false);
 			expect(existsSync(join(mediaDir, "failed.jpg"))).toBe(true);
-			expect(db.query("SELECT file_unique_id, local_path, vision FROM media ORDER BY rowid").all()).toEqual([
-				{ file_unique_id: "visible-a", local_path: "visible-a.jpg", vision: expect.any(String) },
-				{ file_unique_id: "visible-b", local_path: "visible-b.jpg", vision: expect.any(String) },
-				{ file_unique_id: "obligation", local_path: "obligation.jpg", vision: expect.any(String) },
-				{ file_unique_id: "unreferenced", local_path: null, vision: expect.any(String) },
-				{ file_unique_id: "stale", local_path: null, vision: expect.any(String) },
-				{ file_unique_id: "failed", local_path: "failed.jpg", vision: expect.any(String) },
-				{ file_unique_id: "pending", local_path: "pending.jpg", vision: expect.any(String) },
-				{ file_unique_id: "visible-missing", local_path: null, vision: expect.any(String) },
+			expect(
+				db.query("SELECT file_unique_id, local_path, vision, context_files FROM media ORDER BY rowid").all(),
+			).toEqual([
+				{
+					file_unique_id: "visible-a",
+					local_path: "visible-a.jpg",
+					vision: expect.any(String),
+					context_files: expect.any(String),
+				},
+				{
+					file_unique_id: "visible-b",
+					local_path: "visible-b.jpg",
+					vision: expect.any(String),
+					context_files: expect.any(String),
+				},
+				{
+					file_unique_id: "obligation",
+					local_path: "obligation.jpg",
+					vision: expect.any(String),
+					context_files: expect.any(String),
+				},
+				{ file_unique_id: "unreferenced", local_path: null, vision: expect.any(String), context_files: null },
+				{ file_unique_id: "stale", local_path: null, vision: expect.any(String), context_files: null },
+				{
+					file_unique_id: "failed",
+					local_path: "failed.jpg",
+					vision: expect.any(String),
+					context_files: expect.any(String),
+				},
+				{
+					file_unique_id: "pending",
+					local_path: "pending.jpg",
+					vision: expect.any(String),
+					context_files: expect.any(String),
+				},
+				{
+					file_unique_id: "visible-missing",
+					local_path: null,
+					vision: expect.any(String),
+					context_files: expect.any(String),
+				},
 			]);
 			expect(queue.scheduleBackfill()).toBe(1);
 			await queue.whenIdle();
@@ -848,6 +1162,9 @@ describe("post-compaction media cache pruning", () => {
 			expect(db.query("SELECT COUNT(*) count FROM media WHERE local_path IS NOT NULL").get()).toEqual({ count: 0 });
 			expect(db.query("SELECT COUNT(*) count FROM messages").get()).toEqual({ count: 8 });
 			expect(db.query("SELECT COUNT(*) count FROM media WHERE vision IS NOT NULL").get()).toEqual({ count: 8 });
+			expect(db.query("SELECT COUNT(*) count FROM media WHERE context_files IS NOT NULL").get()).toEqual({
+				count: 0,
+			});
 		} finally {
 			await queue.stop();
 			db.close();
@@ -962,6 +1279,47 @@ describe("Pi attach media presentation", () => {
 		expect(bot.join("\n")).toContain("#22662 · bot friend");
 	});
 
+	test("merges a media-ready update that arrives before a filtered feed message", async () => {
+		const directory = temporaryDirectory("tg-media-ready-order-");
+		const socketPath = join(directory, "timeline.sock");
+		const server = createServer((socket) => {
+			const decoder = new FrameDecoder();
+			socket.on("data", (chunk) => {
+				for (const frame of decoder.push(chunk) as Array<{ type?: string; filter?: string }>) {
+					if (frame.type !== "hello") continue;
+					expect(frame.filter).toBe("A");
+					socket.write(
+						encodeFrame({ type: "media_ready", fileUniqueId: "shared-photo", mediaPath: "/tmp/shared.png" }),
+					);
+					socket.write(encodeFrame({ type: "append", item: message() }));
+				}
+			});
+		});
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(socketPath, resolve);
+		});
+
+		let resolveItem!: (item: TimelineItem) => void;
+		const received = new Promise<TimelineItem>((resolve) => {
+			resolveItem = resolve;
+		});
+		const client = new TimelineClient(socketPath, "A", {
+			onEvent: (event: TimelineEvent) => {
+				if (event.type === "append" && event.items[0]) resolveItem(event.items[0]);
+			},
+		});
+		try {
+			expect(await client.connect()).toBe(true);
+			const item = await withTimeout(received, 1_000, "filtered media-ready update timed out");
+			expect(item.kind).toBe("msg");
+			if (item.kind === "msg") expect(item.mediaPath).toBe("/tmp/shared.png");
+		} finally {
+			client.dispose();
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
+	});
+
 	test("merges a shared vision update that arrives before a filtered feed message", async () => {
 		const directory = temporaryDirectory("tg-vision-order-");
 		const socketPath = join(directory, "timeline.sock");
@@ -1039,18 +1397,18 @@ describe("Pi attach media presentation", () => {
 		const decoder = new FrameDecoder();
 		const frames: ServerMessage[] = [];
 		let resolveSnapshot!: () => void;
-		let resolveVision!: () => void;
+		let resolveMediaReady!: () => void;
 		const snapshot = new Promise<void>((resolve) => {
 			resolveSnapshot = resolve;
 		});
-		const vision = new Promise<void>((resolve) => {
-			resolveVision = resolve;
+		const mediaReady = new Promise<void>((resolve) => {
+			resolveMediaReady = resolve;
 		});
 		socket.on("data", (chunk) => {
 			for (const frame of decoder.push(chunk) as ServerMessage[]) {
 				frames.push(frame);
 				if (frame.type === "snapshot") resolveSnapshot();
-				if (frame.type === "vision_update") resolveVision();
+				if (frame.type === "media_ready") resolveMediaReady();
 			}
 		});
 		await new Promise<void>((resolve, reject) => {
@@ -1086,7 +1444,6 @@ describe("Pi attach media presentation", () => {
 			ipc.broadcast(event);
 			ipc.broadcastUsage(usage);
 			ipc.broadcastMediaReady({ fileUniqueId: "shared-photo", mediaPath: "/tmp/shared.png" });
-			ipc.broadcastVision({ fileUniqueId: "shared-photo", text: "recognized" });
 			socket.write(encodeFrame({ type: "hello", filter: "A" }));
 			await withTimeout(snapshot, 1_000, "valid hello did not receive a snapshot");
 			expect(frames.map((frame) => frame.type)).toEqual(["snapshot"]);
@@ -1094,9 +1451,9 @@ describe("Pi attach media presentation", () => {
 			frames.length = 0;
 			ipc.broadcast(event);
 			ipc.broadcastUsage(usage);
-			ipc.broadcastVision({ fileUniqueId: "shared-photo", text: "recognized" });
-			await withTimeout(vision, 1_000, "shared vision was not broadcast after hello");
-			expect(frames.map((frame) => frame.type)).toEqual(["vision_update"]);
+			ipc.broadcastMediaReady({ fileUniqueId: "shared-photo", mediaPath: "/tmp/shared.png" });
+			await withTimeout(mediaReady, 1_000, "shared media-ready was not broadcast after hello");
+			expect(frames.map((frame) => frame.type)).toEqual(["media_ready"]);
 		} finally {
 			socket.destroy();
 			ipc.stop();

@@ -20,12 +20,16 @@ export default defineConfig({
 	// Model used for context compaction (provider/model:thinking). Runs rarely; pick a cheap one.
 	// If this model's request fails, compaction retries once with the bot's main model.
 	compaction_model: "openai-codex/gpt-5.6-luna:low",
-	// Vision model for understanding images and sampled video frames. Only called when vision.enabled is true.
+	// Vision model that describes images and sampled video frames for the chat model.
+	// Only used in the default media mode ("vision") when vision.enabled is true.
 	auxiliary_visual_model: "openai-codex/gpt-5.6-luna:low",
 
 	// ===== Local behavior (every field has a default; shown for visibility) =====
 
-	compaction_threshold: 32_768, // effective window is 64K; compact early for underestimated CJK text
+	// Cap on the main model's effective context window (clamps the Pi catalog value).
+	// compaction_threshold must stay <= context_window - 16_384 (Pi's response reserve).
+	context_window: 65_536,
+	compaction_threshold: 32_768, // compact early for underestimated CJK text and context images
 	compaction_keep_recent: 20_000, // token budget kept verbatim after compaction (1 token keeps nothing; ~20K ≈ 1-2 turns)
 	sampling_cooldown_ms: 2_000, // min interval between two unprompted replies per bot
 	max_suffix_tokens: 12_000, // cap on new-message tokens attached per provider call
@@ -40,7 +44,22 @@ export default defineConfig({
 	// .env key for the TinyFish search API key. Required only when a bot enables tools.search.
 	tinyfish_key_env: "tiny_fish_api_key",
 
-	// ===== Vision (off by default; bounded when on) =====
+	// ===== Media handling: how images/videos reach a model =====
+	// mode "vision" (default): the auxiliary visual model describes each media item and the chat
+	//   model reads the text description. Works with any chat model; costs one extra model call
+	//   per new media item (cached per file, shared by all bots).
+	// mode "context": photos and static stickers are attached to the chat model directly as
+	//   images (~1.1K tokens each); videos (incl. video stickers and GIF animations) are sampled
+	//   into 1-3 frames. No vision-model call is made. The chat model must accept image input
+	//   (checked at startup). voice / audio / document / TGS animated stickers stay text
+	//   placeholders in both modes.
+	media: {
+		mode: "vision", // "vision" (default) | "context" (main model must support image input)
+		max_images_per_turn: 4, // context mode: images attached per provider call
+		download_concurrency: 2, // context mode: parallel media downloads / frame extractions
+	},
+
+	// ===== Vision mode only (off by default; bounded when on) =====
 	vision: {
 		enabled: false,
 		foreground_media_limit: 2, // media understood inline per bot turn

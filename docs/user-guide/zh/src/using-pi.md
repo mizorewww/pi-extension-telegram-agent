@@ -57,9 +57,11 @@ Pi `/tg status` 与 Telegram `/status` 共用[统一 telemetry 口径](https://g
 
 - assistant thinking/text/tool partial 会在同一 Pi native card 原位更新，结束后由持久 LOCAL/Telegram event 接替；partial 不写 SQLite。
 - bot 没有调用 `send` 时的 local assistant text 只在 feed 可见，不会发群。
-- vision默认关闭。显式开启后，照片、sticker和视频的视觉描述只在真实bot run需要时生成；视频抽最多3张固定代表帧，并在一次vision调用中综合理解。UI本身不会额外触发provider。
-- 视觉描述属于共享群消息：全局与任一单bot feed都会把它显示在对应图片正下方；单bot filter只限制LOCAL事件与usage。
-- 用户和bot发出的static photo/sticker共用本地展示准备链路；video、animation、video note、video document与video sticker以媒体placeholder显示并可获得视觉描述。inline image是否可见仍取决于Pi terminal capability，文字、media label和视觉描述保持可读fallback。
+- vision模式（默认）下，`vision.enabled`开启后，辅助视觉模型为照片、sticker和视频生成文字描述，只在真实bot run需要时生成；视频抽最多3张固定代表帧，并在一次vision调用中综合理解；描述按媒体持久化并跨bot共享，以`[图片: 描述]`进入主模型上下文，UI本身不会额外触发provider。
+- context模式（opt-in）下，主模型直接看到上下文里的图片，没有辅助视觉模型和文字描述：照片、静态sticker作为图片进入上下文，视频（含视频sticker、GIF动图、video note）抽取1-3张代表帧；每次模型调用最多附`media.max_images_per_turn`张图，超出上限或上下文预算的媒体降级为文字占位。
+- 两种模式下语音/音频/非视频文件/TGS动态贴纸模型都看不到内容，只有文字占位——这是当前模型API的硬限制。
+- 媒体属于共享群消息：全局与任一单bot feed都会显示对应媒体（vision模式的描述显示在对应图片正下方）；单bot filter只限制LOCAL事件与usage。
+- 用户和bot发出的static photo/sticker共用本地展示准备链路；video、animation、video note、video document与video sticker以媒体placeholder显示，vision模式下可获得视觉描述，context模式下其代表帧只进入模型上下文。inline image是否可见仍取决于Pi terminal capability，文字、media label和视觉描述保持可读fallback。
 
 ## 网页搜索与链接读取
 

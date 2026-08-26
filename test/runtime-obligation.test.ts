@@ -45,6 +45,8 @@ function makeConfig(bot: BotConfig): AppConfig {
 		tinyfishApiKey: "",
 		auxiliaryVisualModel: "test/vision:off",
 		vision: { enabled: false, foregroundMediaLimit: 2, concurrency: 2 },
+		contextWindow: 65536,
+		media: { mode: "vision", maxImagesPerTurn: 4, downloadConcurrency: 2 },
 		retention: { telemetryDays: 90, rawUpdateDays: 30, messageEventDays: 365 },
 		routerSecret: null,
 		telegramAdmins: [],

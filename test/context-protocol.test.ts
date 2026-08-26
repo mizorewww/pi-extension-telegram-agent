@@ -40,6 +40,7 @@ function fingerprintInput(): ContextFingerprintInput {
 		compactionPromptSha256: "compact",
 		compactionModel: "openai-codex/gpt-5.6-luna:low",
 		stickerCatalogSnapshotSha256: "catalog",
+		mediaMode: "vision",
 		extensionOrder: TELEGRAM_EXTENSION_ORDER,
 		tools: [
 			{ name: "send", description: "send", parameters: { type: "object" } },
@@ -160,6 +161,13 @@ describe("Pi context protocol", () => {
 		expect(buildContextFingerprint({ ...input, extensionOrder: [...input.extensionOrder].reverse() })).not.toBe(
 			buildContextFingerprint(input),
 		);
+	});
+
+	test("media mode participates in the context fingerprint", () => {
+		// Switching media.mode changes placeholder semantics, so a resumed session must not
+		// inherit the other mode's context.
+		const input = fingerprintInput();
+		expect(buildContextFingerprint({ ...input, mediaMode: "context" })).not.toBe(buildContextFingerprint(input));
 	});
 
 	test("provider payload observations are deterministic and redact content", () => {
@@ -291,9 +299,10 @@ describe("Pi context protocol", () => {
 				content: "stale-display",
 				display: false,
 				details: {
-					version: 3,
+					version: 4,
 					consumedSeq: 9,
 					providerText: "canonical-provider-text",
+					blocks: [{ type: "text", text: "canonical-provider-text" }],
 					stickerCandidates: "candidate",
 					visibleMessageIds: [42],
 					events: [{ ingestSeq: 9, kind: "message", chatId: -1001, messageId: 42, fullMessageVisible: true }],
@@ -306,9 +315,10 @@ describe("Pi context protocol", () => {
 				content: "stale-display-2",
 				display: false,
 				details: {
-					version: 3,
+					version: 4,
 					consumedSeq: 10,
 					providerText: "newest-provider-text",
+					blocks: [{ type: "text", text: "newest-provider-text" }],
 					stickerCandidates: "newest-candidate",
 					visibleMessageIds: [43],
 					events: [{ ingestSeq: 10, kind: "message", chatId: -1001, messageId: 43, fullMessageVisible: true }],
@@ -329,6 +339,42 @@ describe("Pi context protocol", () => {
 		expect((projected[0] as { content: string }).content).toBe("canonical-provider-text");
 		expect((projected[1] as { content: string }).content).toBe("newest-provider-text\n\nnewest-candidate");
 		expect(JSON.stringify(projected[2])).toContain("sent_message_ids=#100,#101");
+	});
+
+	test("v4 details project interleaved image blocks through the resolver", () => {
+		const entry = {
+			role: "custom",
+			customType: "telegram_context_v2",
+			content: "stale-display",
+			display: false,
+			details: {
+				version: 4,
+				consumedSeq: 11,
+				providerText: "before\n[图片]\nafter",
+				blocks: [
+					{ type: "text", text: "before\n[图片]" },
+					{ type: "image", name: "abc.png", mime: "image/png" },
+					{ type: "image", name: "missing.jpg", mime: "image/jpeg" },
+					{ type: "text", text: "after" },
+				],
+				stickerCandidates: "cand",
+				visibleMessageIds: [44],
+				events: [{ ingestSeq: 11, kind: "message", chatId: -1001, messageId: 44, fullMessageVisible: true }],
+			},
+			timestamp: 1,
+		} as never;
+		// Without a resolver the projection stays the historical exact string.
+		const plain = projectTelegramContext([entry]);
+		expect((plain[0] as { content: string }).content).toBe("before\n[图片]\nafter\n\ncand");
+		// With a resolver, images materialize as content blocks; unresolvable refs drop out.
+		const projected = projectTelegramContext([entry], (ref) =>
+			ref.name === "abc.png" ? { type: "image", data: "Zm9v", mimeType: ref.mime } : null,
+		);
+		expect((projected[0] as { content: unknown[] }).content).toEqual([
+			{ type: "text", text: "before\n[图片]" },
+			{ type: "image", data: "Zm9v", mimeType: "image/png" },
+			{ type: "text", text: "after\n\ncand" },
+		]);
 	});
 
 	test("unpublished assistant prose is absent from the next context", () => {

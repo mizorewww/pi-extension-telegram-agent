@@ -3,8 +3,9 @@
 // identity + per-bot file_id persisted, and short_ids assigned from rowids. The catalog is
 // serialized as identity + format (set + format + emoji + short_id, no vision text) into the stable system
 // prompt, so the prefix is fully determined by config + DB catalog and stays stable across
-// restarts. Recent visible user stickers are a separate bounded dynamic tail (cache schema v11).
-// Photo/foreground vision is unrelated and lives in vision.ts.
+// restarts. Recent visible user stickers are a separate bounded dynamic tail (cache schema v11);
+// in vision mode the tail carries the persisted vision description, in context mode the sticker
+// image enters the context as a media block so the tail only needs identity + format.
 
 import type { Database } from "bun:sqlite";
 import { errorCategory, log } from "../observability/log.ts";
@@ -186,7 +187,7 @@ function catalogRows(db: Database, botId: string, sets: readonly string[]): Cata
 
 /**
  * Identity + format catalog block for the stable system prompt: one line per sticker
- * (set + format + emoji + short_id), no vision description text. Deterministic for a given
+ * (set + format + emoji + short_id), no description text. Deterministic for a given
  * config + DB catalog, so the prefix stays stable across restarts. Empty string when
  * the bot has no sendable catalog stickers.
  */

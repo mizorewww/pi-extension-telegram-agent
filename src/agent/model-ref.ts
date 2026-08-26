@@ -1,4 +1,5 @@
-export const DEFAULT_AUXILIARY_VISUAL_MODEL = "openai-codex/gpt-5.6-luna:low";
+export const DEFAULT_COMPACTION_MODEL = "openai-codex/gpt-5.6-luna:low";
+export const DEFAULT_AUXILIARY_VISUAL_MODEL = DEFAULT_COMPACTION_MODEL;
 
 const REQUEST_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 

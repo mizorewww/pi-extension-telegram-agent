@@ -1,10 +1,17 @@
 // Serialize immutable Telegram events into the fixed LLM grammar (docs/cache.md, schema v8).
 // Grammar stability is a cache invariant: never change existing output shape.
+//
+// Media renders as a text placeholder (`[图片]` / `[sticker 😄]` / `[video]` ...), optionally
+// carrying the persisted vision-mode description (`[图片: 描述]`). Event-log serialization pins
+// resolveVision:false so written bytes never change retroactively; a later description arrives as
+// a media_update delta. In context-media mode the actual image bytes additionally travel as
+// interleaved image content blocks anchored to the event's text segment (token-packer.ts,
+// extensions/context.ts).
 
 import type { Database } from "bun:sqlite";
 import type { MediaUpdatePayload, MessageEvent } from "../db/message-events.ts";
 
-export const TELEGRAM_SERIALIZER_VERSION = 2;
+export const TELEGRAM_SERIALIZER_VERSION = 3;
 
 export interface MessageRow {
 	chat_id: number;
@@ -54,7 +61,8 @@ function senderLabel(db: Database, m: MessageRow): string {
 	return parts.length > 0 ? `${name} (${parts.join(" · ")})` : name;
 }
 
-function mediaPlaceholder(db: Database, mediaJson: string, resolveVision = true): string {
+/** Fixed text anchor for media; carries the persisted vision description when one exists. */
+export function mediaPlaceholder(db: Database, mediaJson: string, resolveVision = true): string {
 	const media = JSON.parse(mediaJson) as {
 		kind: string;
 		sticker_emoji?: string;
@@ -115,6 +123,29 @@ export interface SerializeOptions {
 	resolveVision?: boolean;
 }
 
+/** Render one message row (no date separator). */
+function renderMessageLine(db: Database, m: MessageRow, opts: SerializeOptions): string {
+	let line = `[${fmtTime(m.date)}] #${m.message_id} ${senderLabel(db, m)}`;
+	if (m.reply_to_message_id != null) {
+		line += ` ↪ #${m.reply_to_message_id}`;
+		if (!opts.visibleIds.has(m.reply_to_message_id)) {
+			const ref = shortQuote(db, m.chat_id, m.reply_to_message_id, opts.resolveVision);
+			if (ref) line += ` ${ref}`;
+			else line += ` (原消息不可见)`;
+		}
+	}
+	if (m.quote) {
+		const q = JSON.parse(m.quote) as { text?: string };
+		if (q.text) line += ` quote="${q.text.replace(/\s+/g, " ").slice(0, 60)}"`;
+	}
+	line += ":";
+	const body = m.text ?? m.caption ?? (m.media ? mediaPlaceholder(db, m.media, opts.resolveVision) : "");
+	if (body) line += ` ${body}`;
+	if (m.media && (m.text || m.caption)) line += ` ${mediaPlaceholder(db, m.media, opts.resolveVision)}`;
+	if (m.edit_date) line += " (edited)";
+	return line;
+}
+
 /**
  * Serialize a batch of messages (must be same chat, ascending date order).
  * Inserts date separators when the local date changes between messages.
@@ -128,65 +159,65 @@ export function serializeMessages(db: Database, rows: MessageRow[], opts: Serial
 			lines.push(`--- ${day} ---`);
 			lastDate = day;
 		}
-		let line = `[${fmtTime(m.date)}] #${m.message_id} ${senderLabel(db, m)}`;
-		if (m.reply_to_message_id != null) {
-			line += ` ↪ #${m.reply_to_message_id}`;
-			if (!opts.visibleIds.has(m.reply_to_message_id)) {
-				const ref = shortQuote(db, m.chat_id, m.reply_to_message_id, opts.resolveVision);
-				if (ref) line += ` ${ref}`;
-				else line += ` (原消息不可见)`;
-			}
-		}
-		if (m.quote) {
-			const q = JSON.parse(m.quote) as { text?: string };
-			if (q.text) line += ` quote="${q.text.replace(/\s+/g, " ").slice(0, 60)}"`;
-		}
-		line += ":";
-		const body = m.text ?? m.caption ?? (m.media ? mediaPlaceholder(db, m.media, opts.resolveVision) : "");
-		if (body) line += ` ${body}`;
-		if (m.media && (m.text || m.caption)) line += ` ${mediaPlaceholder(db, m.media, opts.resolveVision)}`;
-		if (m.edit_date) line += " (edited)";
-		lines.push(line);
+		lines.push(renderMessageLine(db, m, opts));
 		opts.visibleIds.add(m.message_id);
 	}
 	return lines.join("\n");
 }
 
-function serializeMediaUpdate(event: MessageEvent): string {
-	const payload = event.payload as MediaUpdatePayload;
-	const label =
-		payload.media_kind === "photo" ? "图片" : payload.media_kind === "sticker" ? "sticker" : payload.media_kind;
-	return `[media_update #${event.messageId}] [${label}: ${payload.text}]`;
+export interface SerializedEventSegment {
+	event: MessageEvent;
+	/** Rendered text for this event, including a leading date separator when the day changes. */
+	text: string;
 }
 
-/** Delta events are always appended; no existing serialized message is rewritten. */
-export function serializeMessageEvents(db: Database, events: MessageEvent[], opts: SerializeOptions): string {
-	const blocks: string[] = [];
-	let pendingMessages: MessageRow[] = [];
-	const flushMessages = (): void => {
-		if (pendingMessages.length === 0) return;
-		blocks.push(serializeMessages(db, pendingMessages, { ...opts, resolveVision: false }));
-		pendingMessages = [];
-	};
+/**
+ * Serialize events one segment each so context-mode media image blocks can interleave at the
+ * exact message position. Joining segment texts with "\n" yields byte-identical output to the
+ * historical whole-batch rendering (date separators belong to the first segment of their day).
+ * Message segments pin resolveVision:false: written bytes never change when a vision description
+ * arrives later — the description is appended as its own media_update segment.
+ */
+export function serializeMessageEventSegments(
+	db: Database,
+	events: MessageEvent[],
+	opts: SerializeOptions,
+): SerializedEventSegment[] {
+	const segments: SerializedEventSegment[] = [];
+	let lastDate: string | null = null;
 	for (const event of events) {
 		if (event.kind === "message") {
-			pendingMessages.push(event.payload as MessageRow);
+			const row = event.payload as MessageRow;
+			const day = fmtDate(row.date);
+			const separator = day !== lastDate ? `--- ${day} ---\n` : "";
+			lastDate = day;
+			segments.push({ event, text: `${separator}${renderMessageLine(db, row, { ...opts, resolveVision: false })}` });
+			opts.visibleIds.add(row.message_id);
 			continue;
 		}
-		flushMessages();
 		if (event.kind === "media_update") {
-			blocks.push(serializeMediaUpdate(event));
+			const payload = event.payload as MediaUpdatePayload;
+			const label =
+				payload.media_kind === "photo" ? "图片" : payload.media_kind === "sticker" ? "sticker" : payload.media_kind;
+			segments.push({ event, text: `[media_update #${event.messageId}] [${label}: ${payload.text}]` });
 			continue;
 		}
 		const row = event.payload as MessageRow;
 		if (event.kind === "edit") {
 			const body = row.text ?? row.caption ?? "";
-			blocks.push(`[message_edit #${event.messageId}]${body ? ` ${body}` : " [empty]"}`);
+			segments.push({ event, text: `[message_edit #${event.messageId}]${body ? ` ${body}` : " [empty]"}` });
 		} else {
 			const reply = row.reply_to_message_id == null ? "reply metadata updated" : `↪ #${row.reply_to_message_id}`;
-			blocks.push(`[message_metadata #${event.messageId}] ${reply}`);
+			segments.push({ event, text: `[message_metadata #${event.messageId}] ${reply}` });
 		}
 	}
-	flushMessages();
-	return blocks.filter(Boolean).join("\n");
+	return segments;
+}
+
+/** Delta events are always appended; no existing serialized message is rewritten. */
+export function serializeMessageEvents(db: Database, events: MessageEvent[], opts: SerializeOptions): string {
+	return serializeMessageEventSegments(db, events, opts)
+		.map((segment) => segment.text)
+		.filter(Boolean)
+		.join("\n");
 }

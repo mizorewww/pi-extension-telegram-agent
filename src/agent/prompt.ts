@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 15; // v15: shared protocol declares available tools
+export const CACHE_SCHEMA_VERSION = 16; // v16: media placeholder line covers both media modes (vision description / inline image)
 
 // Fixed shared protocol is deliberately the first byte of every bot's system prompt so bots in
 // the same provider/cache cohort share the longest possible exact prefix.
@@ -20,7 +20,7 @@ export const SHARED_PROTOCOL = `# 群聊协议
 - ↪ #<id> 表示该消息回复了某条消息；后面可能带一小段被引用消息的参考文字
 - quote="..." 表示发送者明确引用的原文片段
 - 日期变化时会插入 --- YYYY-MM-DD --- 分隔行
-- [图片]、[sticker ...] 等是媒体占位符
+- [图片]、[sticker ...] 等是媒体占位符：占位符内可能直接带该媒体的文字描述，或占位符之后紧跟该媒体的实际图片（图片、静态 sticker、video 抽帧），两种情况你都能知道媒体内容
 
 规则：
 

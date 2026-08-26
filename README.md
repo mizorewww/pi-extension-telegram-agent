@@ -12,7 +12,7 @@
 
 ## 快速开始
 
-需要：[Bun](https://bun.sh/)、一个 Telegram supergroup、至少一个 [BotFather](https://t.me/BotFather) token（bot 已加入群并关闭 privacy mode，否则看不到普通群消息）。视频识别还需要主机安装 `ffmpeg`（同时提供 `ffprobe`）；不安装时其余功能和图片识别仍可用。
+需要：[Bun](https://bun.sh/)、一个 Telegram supergroup、至少一个 [BotFather](https://t.me/BotFather) token（bot 已加入群并关闭 privacy mode，否则看不到普通群消息）。默认 vision 模式对主模型没有图片输入要求（可选的辅助视觉模型把媒体转成文字描述）；只有改用 `media.mode: "context"` 让主模型直接看图时，所选模型才必须支持图片输入（用 Pi `/model` 确认）。视频抽帧在两种模式下都需要主机安装 `ffmpeg`（同时提供 `ffprobe`）；不安装时视频只有文字占位，其余功能不受影响。
 
 ```bash
 git clone https://github.com/mizorewww/pi-extension-telegram-agent.git

@@ -32,7 +32,7 @@ Never paste a token into the group, an issue, logs, or Git. Give every bot a dis
 In the project Pi session:
 
 1. Run `/login` and complete Pi's native provider authentication.
-2. Run `/model` and select the default provider and chat model. The Telegram runtime uses reasoning `off` unless `telegram.config.ts` explicitly overrides it, even if the interactive Pi session uses another thinking level.
+2. Run `/model` and select the default provider and chat model. The default media mode (`vision`) works with any chat model; image input is required only if you later opt into `media.mode: "context"`, which attaches photos, static stickers, and sampled video frames to the chat model's context directly and refuses to start with a text-only model (`image_input_unsupported`). The Telegram runtime uses reasoning `off` unless `telegram.config.ts` explicitly overrides it, even if the interactive Pi session uses another thinking level.
 
 The Telegram project reads Pi's merged global/project model settings and Pi auth store. It does not copy model credentials into this repository. First setup uses `tools.search: false`, so a TinyFish key is not required.
 
@@ -52,7 +52,7 @@ Pi's current native `input` dialog does not mask passwords. The BotFather token 
 Pressing Esc at any step leaves no partial deployment. After confirmation, the wizard atomically creates:
 
 - `.env`: the Telegram token, mode 0600, ignored by Git;
-- `telegram.config.ts`: Telegram deployment fields; the wizard pins the Pi provider/model it just preflighted and explicitly keeps reasoning/search/`run_js`/vision off with bounded context/cache/retention defaults, mode 0600, ignored by Git;
+- `telegram.config.ts`: Telegram deployment fields; the wizard pins the Pi provider/model it just preflighted and inherits the defaults — reasoning/search/`run_js`/vision off, media mode `vision`, bounded context/cache/retention — mode 0600, ignored by Git;
 - `personas/<bot-id>.local.md`: local persona, mode 0600, ignored by Git.
 
 ## 5. Confirm readiness

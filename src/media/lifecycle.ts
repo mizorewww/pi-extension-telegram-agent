@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { unlinkSync } from "node:fs";
+import { join } from "node:path";
 import { resolveMediaSourcePath } from "./local-cache.ts";
 
 export const MEDIA_PRUNE_BATCH_LIMIT = 256;
@@ -103,6 +104,7 @@ export function listReferencedMissingDisplayMediaIds(
 
 /**
  * Delete a bounded batch of reproducible local media after compaction visibility is committed.
+ * Derived context images (media.context_files) are removed together with their source file.
  * Canonical messages, file-id mappings, short ids and vision results remain untouched.
  */
 export function pruneUnreferencedMediaCache(
@@ -116,32 +118,68 @@ export function pruneUnreferencedMediaCache(
 	const limit = Math.min(MEDIA_PRUNE_BATCH_LIMIT, Math.max(1, Math.floor(options.limit ?? MEDIA_PRUNE_BATCH_LIMIT)));
 	const rows = db
 		.query(`
-			SELECT media.file_unique_id AS fileUniqueId, media.local_path AS localPath
+			SELECT media.file_unique_id AS fileUniqueId, media.local_path AS localPath,
+			       media.context_files AS contextFiles
 			  FROM media
-			 WHERE media.local_path IS NOT NULL
+			 WHERE (media.local_path IS NOT NULL OR media.context_files IS NOT NULL)
 			   AND NOT ${ACTIVE_MEDIA_REFERENCE_SQL}
 			 ORDER BY media.rowid
 			 LIMIT ?2
 		`)
-		.all(botIdsJson, limit) as Array<{ fileUniqueId: string; localPath: string }>;
+		.all(botIdsJson, limit) as Array<{ fileUniqueId: string; localPath: string | null; contextFiles: string | null }>;
 	const result: MediaPruneResult = { scanned: rows.length, deleted: 0, stale: 0, failed: 0 };
-	const clear = db.query("UPDATE media SET local_path = NULL WHERE file_unique_id = ? AND local_path = ?");
+	const clear = db.query(
+		"UPDATE media SET local_path = NULL, context_files = NULL WHERE file_unique_id = ? AND local_path IS ?",
+	);
 	const remove = options.remove ?? defaultRemove;
 	for (const row of rows) {
-		const path = resolveMediaSourcePath(mediaDir, row.localPath);
-		if (!path) {
+		const derived = parseContextFileNames(row.contextFiles);
+		const path = row.localPath ? resolveMediaSourcePath(mediaDir, row.localPath) : null;
+		if (row.localPath && !path) {
 			clear.run(row.fileUniqueId, row.localPath);
+			removeDerived(mediaDir, derived, remove, result);
 			result.stale++;
 			continue;
 		}
 		try {
-			const outcome = remove(path);
+			if (path) {
+				const outcome = remove(path);
+				if (outcome === "deleted") result.deleted++;
+				else result.stale++;
+			}
 			clear.run(row.fileUniqueId, row.localPath);
-			if (outcome === "deleted") result.deleted++;
-			else result.stale++;
+			removeDerived(mediaDir, derived, remove, result);
 		} catch {
 			result.failed++;
 		}
 	}
 	return result;
+}
+
+function parseContextFileNames(value: string | null): string[] {
+	if (!value) return [];
+	try {
+		const parsed = JSON.parse(value) as unknown;
+		if (!Array.isArray(parsed)) return [];
+		return parsed
+			.map((entry) => (entry && typeof entry === "object" ? (entry as { name?: unknown }).name : null))
+			.filter((name): name is string => typeof name === "string" && name.length > 0 && !name.includes("/"));
+	} catch {
+		return [];
+	}
+}
+
+function removeDerived(
+	mediaDir: string,
+	names: readonly string[],
+	remove: NonNullable<MediaPruneOptions["remove"]>,
+	result: MediaPruneResult,
+): void {
+	for (const name of names) {
+		try {
+			remove(join(mediaDir, name));
+		} catch {
+			result.failed++;
+		}
+	}
 }

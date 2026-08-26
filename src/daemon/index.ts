@@ -15,7 +15,7 @@ import { CACHE_SCHEMA_VERSION } from "../agent/prompt.ts";
 import { ManualSendService } from "./manual-send.ts";
 import { parseTelegramControlCommand, TelegramControlCommandService } from "../telegram/control-command.ts";
 import { publishTelegramControlMenus, TelegramControlCoordinator } from "../telegram/control-integration.ts";
-import { createSharedModelRuntime, piAuthSource } from "../agent/model-runtime.ts";
+import { createSharedModelRuntime, PiModelConfigurationError, piAuthSource } from "../agent/model-runtime.ts";
 import { parsePiModelReference } from "../agent/model-ref.ts";
 import { assertPiVisionExecutorReady, createPiVisionExecutor } from "../media/vision.ts";
 import { VisionScheduler } from "../media/vision-scheduler.ts";
@@ -36,18 +36,23 @@ const config = loadConfig(rootDir);
 // (REQ-OPS-0001 R4). Released on shutdown; stale pid files are taken over.
 const pidFd = acquirePidLock(config.dataDir);
 const videoTranscoder = inspectVideoTranscoder();
-if (config.vision.enabled && (!videoTranscoder.ffmpeg || !videoTranscoder.ffprobe)) {
+// Frame sampling matters in both media modes: vision descriptions and context-mode image blocks.
+const mediaNeedsFrames = config.vision.enabled || config.media.mode === "context";
+if (mediaNeedsFrames && (!videoTranscoder.ffmpeg || !videoTranscoder.ffprobe)) {
 	log.warn("media_transcoder", "tools_unavailable", {
 		ffmpeg: videoTranscoder.ffmpeg,
 		ffprobe: videoTranscoder.ffprobe,
 		category: "video_transcoder_unavailable",
-		impact: "video_recognition_disabled",
+		impact: "video_frame_sampling_disabled",
 		action: "install_ffmpeg_and_restart",
 		blocking: false,
 	});
 }
 // loadConfig already canonicalizes model references (config.ts), so values from config always parse.
-const visualModel = config.vision.enabled ? parsePiModelReference(config.auxiliaryVisualModel)! : null;
+// The auxiliary visual model is only used in vision mode (the default); context mode feeds
+// images to the chat model directly.
+const visionMode = config.media.mode === "vision";
+const visualModel = visionMode && config.vision.enabled ? parsePiModelReference(config.auxiliaryVisualModel)! : null;
 const chatModels = config.bots.map((bot) => ({
 	provider: bot.provider,
 	model: bot.model,
@@ -65,6 +70,22 @@ const { sharedModelRuntime, sharedVisionExecutor } = await (async () => {
 			...compactionModels,
 			...(visualModel ? [{ ...visualModel, purpose: "vision" }] : []),
 		]);
+		if (!visionMode) {
+			// Context media is attached as image blocks; a chat model without image input would
+			// silently degrade every photo/sticker/video to a bare placeholder, so fail fast.
+			for (const bot of chatModels) {
+				const model = runtime.getModel(bot.provider, bot.model);
+				if (model && !model.input.includes("image")) {
+					throw new PiModelConfigurationError(
+						"image_input_unsupported",
+						bot.provider,
+						bot.model,
+						undefined,
+						bot.purpose,
+					);
+				}
+			}
+		}
 		const executor = visualModel ? createPiVisionExecutor(runtime, visualModel.canonical) : null;
 		if (executor) assertPiVisionExecutorReady(executor);
 		return { sharedModelRuntime: runtime, sharedVisionExecutor: executor };
@@ -73,7 +94,7 @@ const { sharedModelRuntime, sharedVisionExecutor } = await (async () => {
 		throw error;
 	}
 })();
-const visionScheduler = config.vision.enabled ? new VisionScheduler(config.vision.concurrency) : null;
+const visionScheduler = visualModel ? new VisionScheduler(config.vision.concurrency) : null;
 const db = openDb(config.dbPath);
 const mediaDir = join(config.dataDir, "media");
 const mediaPathReconciliation = reconcileMediaCachePaths(db, mediaDir);

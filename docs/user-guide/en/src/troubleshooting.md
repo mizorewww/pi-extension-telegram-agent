@@ -30,11 +30,11 @@ Confirm you started `bun run pi` from the repository root and package discovery 
 /tg restart
 ```
 
-Then inspect `data/daemon.log`. Typical causes include an invalid Telegram token, unreachable network, changed Pi login/default-model settings, a model absent from Pi's catalog, or a bot missing from the target group. Valid files remain, so you do not need to paste the token again.
+Then inspect `data/daemon.log`. Typical causes include an invalid Telegram token, unreachable network, changed Pi login/default-model settings, a model absent from Pi's catalog, a context-mode main model without image input (`image_input_unsupported` — only when `media.mode: "context"`; check capabilities with Pi `/model`), or a bot missing from the target group. Valid files remain, so you do not need to paste the token again.
 
 ## `daemon starting` persists
 
-Configured sticker sets may make the first Telegram catalog fetch slower. Vision work occurs only when explicitly enabled; it is not part of the default startup path. Run `bun run status` and inspect redacted logs. A live child after the 60-second wait is reported only as starting; readiness requires a real socket connection.
+Configured sticker sets may make the first Telegram catalog fetch slower. Vision work occurs only when explicitly enabled, and context-mode media preparation (downloads and frame sampling) runs lazily for real turns; neither is part of the startup path. Run `bun run status` and inspect redacted logs. A live child after the 60-second wait is reported only as starting; readiness requires a real socket connection.
 
 After changing a model, persona, cache policy, tools, or another cache-visible field, a `session ready (new)` line is expected. The context fingerprint deliberately prevents restoring the old session under the new identity; the old file is retained for recovery/audit.
 
@@ -57,15 +57,15 @@ Another process is long-polling with the same token. Run `bun run restart`; the 
 
 ## Images do not render inline
 
-A new user- or bot-sent static photo/sticker first shows its media label, then the daemon downloads it in the background and updates the same Pi card. This does not depend on routing or vision; animated/video media retains a text placeholder. On startup, legacy absolute cache paths are rebased by filename when the file exists in the current `data/media`; missing entries are cleared before at most 100 recent static display gaps still referenced by current context, an unconsumed event, or a pending reply are backfilled.
+A new user- or bot-sent static photo/sticker first shows its media label, then the daemon downloads it in the background and updates the same Pi card. This does not depend on routing or the media pipeline; animated/video media retains a text placeholder in the feed. On startup, legacy absolute cache paths are rebased by filename when the file exists in the current `data/media`; missing entries are cleared before at most 100 recent static display gaps still referenced by current context, an unconsumed event, or a pending reply are backfilled.
 
-After successful compaction, a bounded batch of local media files no longer referenced by any configured bot is removed automatically. An old Pi card falling back to its label is therefore expected and does not mean that the message, vision result, or Telegram file mapping was lost. Restart does not unconditionally download those files again just for historical display.
+After successful compaction, a bounded batch of local media files no longer referenced by any configured bot is removed automatically. An old Pi card falling back to its label is therefore expected and does not mean that the message, vision description, or Telegram file mapping was lost; a future turn can reacquire the source — reusing a persisted vision result or preparing context images again. Restart does not unconditionally download those files again just for historical display.
 
 If new media remains label-only, inspect only the fixed `media_cache_ready/skip/error` category and queue number in redacted logs, then check the 1 MiB limit, static-image format, terminal image capability, and project Pi version. Pi still selects Kitty, iTerm2, or native text fallback. Do not add terminal escapes or bypass Pi components. Record terminal type, tmux state, media kind, fixed outcome, and whether a local path exists—never a token, absolute path, or private image contents.
 
-## A video has no vision description
+## A video has no description or stays a text placeholder
 
-Run `bun run debug` first. `video_transcoder_unavailable` means the host lacks `ffmpeg` or `ffprobe`; `start`, `restart`, and `status` also explain that the package is used only for frame sampling and suggest installation. The warning never blocks daemon readiness or posts into the group. Video skips before Telegram download or a provider call, so it consumes no provider tokens while chat, image vision, and all sticker formats continue. Install the FFmpeg distribution package and restart; this failure is not cached permanently. `video_probe_failed` or `video_frame_extraction_failed` means the local tools could not read the file; check the 20 MiB bound and format support. Logs never contain its path, stderr, or video contents.
+Videos (including video stickers, GIF animations, and video notes) reach a model only through sampled frames: 1-3 frames attached to the main model in context mode, or one vision call over at most three frames in vision mode. A persistent placeholder — or, in vision mode, a missing description — therefore means frame sampling or the vision call is unavailable or failed. Run `bun run debug` first. `video_transcoder_unavailable` means the host lacks `ffmpeg` or `ffprobe`; `start`, `restart`, and `status` also explain that the package is used only for frame sampling and suggest installation. The warning never blocks daemon readiness or posts into the group: the video skips before Telegram download or a provider call, so it consumes no provider tokens while chat, static images, and all sticker formats continue. Install the FFmpeg distribution package and restart; this failure is not cached permanently. `video_probe_failed` or `video_frame_extraction_failed` means the local tools could not read the file; check the 20 MiB bound and format support. Logs never contain its path, stderr, or video contents.
 
 ## Search or page retrieval fails
 

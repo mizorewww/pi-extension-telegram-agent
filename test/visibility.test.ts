@@ -21,6 +21,7 @@ function customMessage(id: string, visible: number[], consumedSeq: number): Sess
 			version: TELEGRAM_CONTEXT_VERSION,
 			consumedSeq,
 			providerText: "provider text",
+			blocks: [],
 			stickerCandidates: "",
 			visibleMessageIds: visible,
 			events: visible.map((messageId, index) => ({

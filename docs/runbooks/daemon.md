@@ -8,7 +8,7 @@
 - `telegram.config.ts`（项目根，唯一配置文件）：复制 `telegram.config.example.ts` 后编辑，`defineConfig()` 提供类型与逐字段注释。它会作为受信本机代码执行，不要粘贴来源不明的配置。
   - `group_peer_id`：群的裸正数 peer id（`-100...` 形式会被自动归一化）
   - deployment 默认模型：canonical example显式选择`openai-codex/gpt-5.6-luna`、reasoning `off`与short cache retention。旧配置省略provider/model时仍继承Pi合并后的选择，但省略reasoning始终是`off`；切换provider必须同时给model，认证始终来自Pi。
-  - 每 bot：`id`（`[A-Za-z0-9_-]+`，唯一）、`name`、`token_env`（指向 `.env` 里的 token key）、`persona_path`（绝对路径 / `~` / 相对项目根，可放仓库外）、`routing_p`（Σ≤1），可选覆盖 provider/model/reasoning/cache retention、compaction、12k suffix/4096 message预算、cooldown、`tools`与`sticker_sets`。顶层另有vision scheduler和90/30/365天telemetry/raw/event retention。模型覆盖只是选择，不承载credential。
+  - 每 bot：`id`（`[A-Za-z0-9_-]+`，唯一）、`name`、`token_env`（指向 `.env` 里的 token key）、`persona_path`（绝对路径 / `~` / 相对项目根，可放仓库外）、`routing_p`（Σ≤1），可选覆盖 provider/model/reasoning/cache retention、compaction、12k suffix/4096 message预算、cooldown、`tools`与`sticker_sets`。顶层另有`context_window`（主模型有效上下文上限，同时把`compaction_threshold`压到`context_window − 16384`以内）、`media`（`mode`选`"vision"`默认或`"context"` opt-in；context模式下每次模型调用的图片上限`max_images_per_turn`与下载/抽帧并发`download_concurrency`）、`vision`段（`enabled`默认false、`foreground_media_limit`、`concurrency`，仅vision模式生效）和90/30/365天telemetry/raw/event retention。模型覆盖只是选择，不承载credential。
   - `sampling_cooldown_ms` 默认 2000，可全局设置并由单 bot 覆盖；必须有限且 `>=0`，0 关闭概率冷却。它只影响 probability routing，mention/reply/name 不会被静默吞掉。
   - `telegram_admins`：Telegram群内控制白名单，接受正整数user id或规范化`@username`；推荐固定numeric id。缺省/空数组会拒绝所有`compact`/`set`，但不影响公开`help`/`status`。
 - `.env`（`key: value` 冒号格式）：只放项目拥有的secret——bot tokens、`tiny_fish_api_key`、`router_secret`、`gpg_key_passphrase`（仅签名用）。LLM credential由Pi auth store独占。只有至少一个bot启用`tools.search`时才强制要求对应TinyFish key；首配默认关闭search，可在补key后编辑配置开启。
@@ -36,9 +36,9 @@ sudo loginctl enable-linger <user>             # 不登录也随开机启动
 - 与 CLI 不冲突：`bun run stop` 是 SIGTERM 干净退出，不会触发 Restart；日常 `status`/`restart`/`stop` 照旧用 CLI。
 
 
-- 配置了sticker sets时，首次Telegram catalog拉取可能延长启动；以后复用本地DB。vision默认关闭，只有显式`vision.enabled: true`才会产生视觉工作。`start`会在60秒内等socket；超时但child仍存活时只报告starting，并提示用`status` / `daemon.log`确认。
+- 配置了sticker sets时，首次Telegram catalog拉取可能延长启动；以后复用本地DB。默认`media.mode: "vision"`下媒体理解由`vision.enabled`（默认false）与`auxiliary_visual_model`控制；选择`"context"`时主模型必须支持图片输入（用Pi `/model`确认catalog input含image），不支持时启动直接以`image_input_unsupported`失败。`start`会在60秒内等socket；超时但child仍存活时只报告starting，并提示用`status` / `daemon.log`确认。
 - daemon启动会把历史`media.local_path`按basename迁到当前deployment的`data/media`；static photo/sticker恢复可显示状态，video source恢复为lazy抽帧输入，缺失项清空。启动backfill最多恢复100个仍被当前配置bot上下文、未消费event或reply obligation引用的static缺口，不会重新下载compaction已回收的无引用历史。该过程不调用vision或聊天provider。
-- 视频识别要求PATH中同时存在`ffmpeg`与`ffprobe`。macOS可用`brew install ffmpeg`，Arch Linux可用`sudo pacman -S ffmpeg`，Debian/Ubuntu可用`sudo apt install ffmpeg`。缺失时`start`/`restart`/`status`会说明它只用于视频抽帧并建议安装，但命令与daemon readiness不因此失败；聊天、图片vision和static/animated/video sticker发送都继续工作。视频识别在Telegram下载前直接跳过，不消耗provider token，也不向群里告警；`bun run debug`会输出带固定impact/action的`video_transcoder_unavailable`。安装后restart即可启用。
+- 视频抽帧要求PATH中同时存在`ffmpeg`与`ffprobe`——两种媒体模式都靠它处理视频。macOS可用`brew install ffmpeg`，Arch Linux可用`sudo pacman -S ffmpeg`，Debian/Ubuntu可用`sudo apt install ffmpeg`。缺失时`start`/`restart`/`status`会说明它只用于视频抽帧并建议安装，但命令与daemon readiness不因此失败；聊天、图片vision/图片上下文和static/animated/video sticker发送都继续工作，视频（含视频sticker与GIF动图）在vision模式跳过识别、在context模式只以文字占位进入上下文。视频在Telegram下载前直接跳过，不消耗provider token，也不向群里告警；当前模式需要抽帧时`bun run debug`会输出带固定impact/action的`video_transcoder_unavailable`。安装后restart即可启用。
 - 每 bot 启动日志的 `sticker-catalog` 行会报告 `catalog/sendable/missing_file_id`；`missing_file_id>0` 的条目不会暴露给该 bot。检查 set 名/token 权限或 Telegram `getStickerSet` 失败，不要复制另一个 bot 的 file_id。
 - 配置错误会在启动期逐条列出（stderr / daemon.log），不会静默跑坏配置。
 - 双 start 竞态由排他pid锁挡住；并发restart由`data/daemon.control.lock`串行，第二个立即报`restart already in progress`。
@@ -83,7 +83,7 @@ bun run pi                          # 从项目依赖启动 Pi，自动加载 Te
 - attach 会自动进入 Telegram scope compose：单 bot filter或全局唯一bot直接发送；全局多bot每次提交复用Pi原生`select`选择身份。editor上方的feed header在`attached`后显示`send as <id/name>`或`choose bot on send`，选择与发送时原位更新。`compose <bot-id>`固定身份，`compose off`把输入交还Pi，bare `compose`恢复scope。
 - compose 仅支持纯文本。附件会被阻止；明确失败会把原文放回 editor。若 ACK 超时或 daemon 在发送中断线，结果可能未知：先检查群聊，不要直接重发；插件不会自动重试，并会安全关闭 compose。
 - selector取消会恢复原文且不发送；选择/发送期间拒绝第二次提交。RPC/extension source不受compose影响。attach切换会建立新scope；detach、daemon断线、restart/config变更或Pi退出会关闭compose并让迟到选择失效；bot token始终只在daemon内。
-- 显式启用vision后，photo/sticker/video被有界lazy流程识别时，同一native media card或媒体placeholder会在下方原位出现`Vision · ...`；无需重新attach。视频最多抽3帧并合成一次vision调用，且所有bot的下载→抽帧→识别共用deployment的`vision.concurrency`上限。UI本身不调用模型；vision关闭、未选中、缺少FFmpeg或识别失败时仍保留图片/fallback。
+- 媒体如何到达模型由`media.mode`决定，媒体本身都仍inline显示，UI不调用模型。默认vision模式：显式开启`vision.enabled`后，photo/sticker/video被有界lazy流程识别，同一native media card或placeholder下方原位出现`Vision · ...`描述；视频最多抽3帧并合成一次vision调用，所有bot的下载→抽帧→识别共用deployment的`vision.concurrency`上限。context模式：照片与静态sticker作为图片直接进入主模型上下文，视频抽1-3张代表帧；每次模型调用最多附`media.max_images_per_turn`张图，下载/抽帧共用`media.download_concurrency`并发，超出上限或上下文预算的媒体降级为文字占位。两种模式下voice/audio/非视频document/TGS动态贴纸都只有文字占位；缺少FFmpeg时视频保留文字占位与fallback。
 - attached feed 的footer与Pi原生信息顺序一致：cwd/branch/session name；Telegram lifetime `↑/↓/R/W/CH/$`、latest context与右对齐的provider/model/reasoning；其他临时extension status仅在存在时追加。compose status位于feed header。无关的Pi operator usage行在attached期间隐藏，detach后恢复。`/tg status [bot]`列出runs/since/epoch、latest cache/output/reasoning/latency/cost与lifetime totals/平均latency。
 - 在editor输入`/tg `后按Tab/选择使用Pi原生分级菜单；`attach/status/compose`的下一层会从配置动态列出bot id/name，`compose`另有`off`，bare `compose`也可直接执行。
 - 关闭 Pi 或 `/tg detach` 不影响 daemon。
@@ -102,7 +102,7 @@ bun run pi                          # 从项目依赖启动 Pi，自动加载 Te
 
 - 命令默认作用于接收消息的 bot；`/<command>@<bot_username>` 由该 suffix bot 定向回复/执行；未知 deployment suffix 不接管。
 - `set` 写穿 `telegram.config.ts`（原子写入 + 全量 loadConfig 校验，任何一步失败回滚文件），成功后立即更新内存 effective 值；重启后仍然生效。routing_p 总和超过 1 时校验失败、整次拒绝。
-- `compact` 只作用于接收/定向的单个 bot，不接受自定义 instructions。busy/stopping bot 不会被 abort。它会调用既有辅助摘要模型并产生相应费用；成功提交新visibility后，还会按全部当前配置bot的引用回收最多256个本地媒体cache文件。该observer不删历史/vision/file mapping，失败不回滚compact；有候选时日志记录`post_compaction_pruned`聚合数。
+- `compact` 只作用于接收/定向的单个 bot，不接受自定义 instructions。busy/stopping bot 不会被 abort。它会调用配置的compaction模型并产生相应费用；成功提交新visibility后，还会按全部当前配置bot的引用回收最多256个本地媒体cache文件（source与context模式派生图片）。该observer不删历史/vision结果/file mapping，失败不回滚compact；有候选时日志记录`post_compaction_pruned`聚合数。
 - 回复始终引用原命令。命令 edit 只消费、不执行；replay/second-bot 副本不会重复 mutation 或回复。发送结果未知时 daemon 不自动重试。
 
 ## 新增一个 bot

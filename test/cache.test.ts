@@ -37,15 +37,15 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 15,
-	systemZhTemplate: "3879a9204276",
-	systemEnTemplate: "dd8b0d03cef0",
+	schemaVersion: 16,
+	systemZhTemplate: "b2f0432b9b7b",
+	systemEnTemplate: "231c26fbb95b",
 	serialize: "68a17d6e5c05",
 	eventSerialize: "4a57de738bf9",
 	tools: "b16b54cf6564",
 	compactionPrompt: "045a5241fdd7",
 	extensionOrder: "e04f7032d531",
-	contextProtocol: "c810cd1e5ab3",
+	contextProtocol: "2e1c7762b239",
 };
 
 test("CACHE_SCHEMA_VERSION unchanged", () => {
@@ -139,7 +139,7 @@ test("message serialization grammar stable", () => {
 	expect(sha256Short(out)).toBe(GOLDEN.serialize);
 });
 
-test("quote reference renders media placeholder and missing-parent marker (v14)", () => {
+test("quote reference renders media placeholder and missing-parent marker (v16)", () => {
 	const db = new Database(":memory:");
 	db.exec(readFileSync("src/db/schema.sql", "utf8"));
 	const ins = db.prepare(
@@ -305,7 +305,8 @@ test("quote reference renders media placeholder and missing-parent marker (v14)"
 			.get(-1004402809405, messageId) as MessageRow;
 		return serializeMessages(db, [row], { visibleIds: visible, resolveVision });
 	};
-	// media parent not in the visible set: media placeholder (vision resolved on the fresh-batch path)
+	// media parent not in the visible set: media placeholder (vision resolved on the fresh-batch path);
+	// in context mode media.vision stays null and the placeholder renders without a description
 	expect(serializeOne(310, new Set())).toContain("#310 Bob (u1) ↪ #300 @alice [图片: 一只猫]: 看这个");
 	expect(serializeOne(311, new Set())).toContain("#311 Bob (u1) ↪ #301 @alice [sticker 😺]: 还有这个");
 	// event-log path: resolveVision false must not leak vision text
@@ -533,6 +534,8 @@ test("recent visible user stickers form a bounded final suffix", () => {
 		JSON.stringify({ kind: "sticker", file_unique_id: "other-bot-only", sticker_emoji: "🅱️" }),
 	);
 
+	// vision mode: the persisted description rides along; context mode (vision column null)
+	// renders the same identity + format lines without a description
 	const block = recentContextStickerCandidates(db, "A", chatId, 1, [6, 7, 8, 9, 10, 11, 12]);
 	expect(block).toBe(`Available stickers (recent context):
 s10 [video] = 😺 emotion-10

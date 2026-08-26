@@ -137,8 +137,9 @@ CREATE TABLE IF NOT EXISTS media (
 	mime TEXT,
 	width INTEGER,
 	height INTEGER,
-	local_path TEXT, -- cache-relative filename; resolved inside configured data/media
-	vision TEXT, -- JSON: {model, kind, text, at} — shared by both bots
+	local_path TEXT, -- cache-relative source filename; resolved inside configured data/media
+	vision TEXT, -- JSON: {model, kind, text, at} — vision-mode description shared by all bots
+	context_files TEXT, -- JSON: [{name, mime}] context-mode derived images/frames in data/media
 	sticker_set TEXT,
 	sticker_emoji TEXT,
 	semantic TEXT, -- sticker semantic description
@@ -192,6 +193,7 @@ CREATE TABLE IF NOT EXISTS llm_runs (
 	trigger_message_id INTEGER,
 	public_send_count INTEGER NOT NULL DEFAULT 0,
 	vision_calls INTEGER NOT NULL DEFAULT 0,
+	images_attached INTEGER NOT NULL DEFAULT 0,
 	tool_followup_rounds INTEGER NOT NULL DEFAULT 0,
 	input_events INTEGER NOT NULL DEFAULT 0,
 	input_tokens_estimated INTEGER NOT NULL DEFAULT 0,

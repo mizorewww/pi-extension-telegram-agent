@@ -28,7 +28,7 @@
 - `ingest_seq INTEGER PRIMARY KEY AUTOINCREMENT` 是全局单调位置；`event_key` 唯一保证 replay 幂等。
 - `(chat_id, ingest_seq)` 索引是 agent 增量读取主路径；另有 message/时间索引用于 obligation 与 retention。
 - kind 为 `message | edit | metadata | media_update`。payload 是该事件发生时的 bounded snapshot；旧 event 不因 canonical row、vision 或 edit 改写。
-- message insert、edit 和 reply metadata enrichment 由事务内 trigger 追加；非空 vision completion 追加独立 `media_update`。
+- message insert、edit 和 reply metadata enrichment 由事务内 trigger 追加；vision 模式下非空 vision completion 追加独立 `media_update`，context 模式不追加媒体 event——图片以 image 内容块随所属 message event 一起进入 provider context。schema v16 migration 是纯 additive（只增列），不删除或改写任何历史 event。
 - 旧库 migration 从 canonical `messages` backfill baseline event，并把已知 bot cursor 初始化到 backfill high-water，避免把历史当 fresh context 重放。
 
 ## 每 bot context 与 routing 状态
@@ -72,12 +72,12 @@
 
 - `media.file_unique_id` 是共享身份；`media_file_ids(bot_id,file_id,file_unique_id)` 是 bot-specific 可发送能力。
 - short id 由 rowid 单调分配；不能用 `COUNT+1`。
-- vision 按 identity 持久化并跨 bot 复用。Sticker 的 `mime` 规范化为 `image/webp`、`application/x-tgsticker` 或 `video/webm`，供 catalog 标注格式；可发送性仍以 bot-specific mapping 为准。≤1 MiB static display image与≤20 MiB video source先写0600临时文件再同目录rename；bytes与绝对path不进SQLite，`local_path`只保存当前`data/media`内的cache-relative basename。daemon启动按basename迁移旧绝对值，缺失或不支持的目标清空；video path只供本地抽帧，不进入IPC。
-- `local_path` 是可再生cache指针，不是媒体事实。任一当前配置bot的visible message、pending reply obligation或未消费非`media_update` event构成活跃引用；成功compaction提交visibility后最多清理256个无引用文件。unlink成功/文件已缺失才置空path，其他失败保留以便重试；启动backfill也只恢复仍有活跃引用的static display缺口。回收不删除media row、vision、short id、format、file mapping、canonical history或session。
+- `vision`（JSON `{model,kind,text,at}`）保存 vision 模式的文字描述，`context_files`（JSON `[{name,mime}]`）保存 context 模式派生图片引用；两者都按 identity 持久化并跨 bot 复用，同一 identity 只识别/准备一次。Sticker 的 `mime` 规范化为 `image/webp`、`application/x-tgsticker` 或 `video/webm`，供 catalog 标注格式；可发送性仍以 bot-specific mapping 为准。≤1 MiB static display image与≤20 MiB video source先写0600临时文件再同目录rename；bytes与绝对path不进SQLite，`local_path`只保存当前`data/media`内的cache-relative basename。daemon启动按basename迁移旧绝对值，缺失或不支持的目标清空；video path与`context_files`派生图片只供本地抽帧/投影读盘，不进入IPC。
+- `local_path` 与 `context_files` 都是可再生cache指针，不是媒体事实。任一当前配置bot的visible message、pending reply obligation或未消费非`media_update` event构成活跃引用；成功compaction提交visibility后最多清理256个无引用identity：source与派生图片一起unlink，两列同时置空，其他失败保留以便重试；启动backfill也只恢复仍有活跃引用的static display缺口。回收不删除media row、vision结果、short id、format、file mapping、canonical history或session；重新需要时可下载source且不重付已有vision结果，或重新准备派生图片。
 
 ### agent_events
 
-- append-only 本地行为流：assistant/tool/vision/usage/compaction/error/send/control/context commit 等。
+- append-only 本地行为流：assistant/tool/vision/usage/compaction/error/send/control/context commit 等；context 模式媒体准备失败记 error（`stage=context_media`），不阻断打包，消息仍以纯文本占位进上下文。
 - unpublished assistant prose 可以留在本地审计，但 provider session 仅保留 `[no_send]`。
 - 一次agent run的原始assistant/tool/send事件用payload内的`activity_id`关联；settle时另追加一条有界`agent_activity`作为TUI单卡投影。原始行仍是debug authority，timeline只隐藏带`activity_id`的新式原始行，不重写旧历史。
 - error/send/vision telemetry 使用固定 category 与 bounded fields，不保存 token、正文、prompt、response、完整 URL、path 或 stack。
@@ -85,7 +85,7 @@
 ### llm_runs
 
 - 每次 provider response 记录 usage/cost/latency/epoch、thinking/send耗时，以及 provider/api、session id hash、cache retention、system/tools/messages/full payload HMAC 与首次 divergence 位置。`system/tools/compacted_history/message_tokens`保存按payload形状归一到实际provider总token的分段估算；`cache_read/cache_write/cache_miss` 保留 provider 原值。
-- 同时记录 trigger message、public send count、vision calls、tool follow-up rounds、input event 数、保守 token estimate 与 rows scanned。
+- 同时记录 trigger message、public send count、vision calls（vision 模式）、本轮附加进上下文的图片数 `images_attached`（context 模式）、tool follow-up rounds、input event 数、保守 token estimate 与 rows scanned。schema v16 migration 只新增 `images_attached` 列（additive），旧 `vision_calls` 列保留。
 - status 的 lifetime totals 聚合**当前保留行**（含 compaction）；current context 只取最新 `compaction = 0` 主对话 run，不累计 occupancy。字段和公式以 `docs/telemetry.md` 为准。
 
 ## 其他表
@@ -101,13 +101,13 @@ daemon 启动时执行一次、之后每 24 小时执行 maintenance，并做 pa
 - `raw_updates`：30 天；
 - `message_events`：365 天。
 
-旧 `message_events` 只有在 `ingest_seq <=` 该 chat 所有已知 bot cursor 的最小值，且没有 reply obligation 引用该 message 时才删除。canonical `messages`/revisions/media/session 文件不由这条定时 retention 清理；可再生的`media.local_path`文件另由成功compaction后的引用回收处理。
+旧 `message_events` 只有在 `ingest_seq <=` 该 chat 所有已知 bot cursor 的最小值，且没有 reply obligation 引用该 message 时才删除。canonical `messages`/revisions/media/session 文件不由这条定时 retention 清理；可再生的`media.local_path`与`context_files`派生文件另由成功compaction后的引用回收处理。
 
 ## ID / dedupe 边界
 
 - update：`(bot_id, update_id)`；raw/canonical/event/obligation 在同一 transaction 内提交，失败整体回滚。
 - canonical message：`(chat_id, message_id)`；second-bot duplicate 只允许幂等 enrichment。
-- provider event：唯一 `event_key` + 单调 `ingest_seq`；edit/media completion 追加 delta。
+- provider event：唯一 `event_key` + 单调 `ingest_seq`；edit 与 vision 模式 media completion 追加 delta。
 - bot 自发消息：Telegram send result 立即 normalize/insert，随后 poller 副本按 canonical/event key 去重。
 
 LLM 序列化 grammar 与 fingerprint 边界见 `docs/cache.md`。

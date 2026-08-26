@@ -5,8 +5,8 @@
 ## Invariants
 
 1. 稳定 prefix 的首字节始终来自共享群聊协议，之后才是 persona；固定顺序的 tool name、description 与 parameter schema 属于同一 cache cohort。
-2. Telegram 消息正文只能以新的结构化 session entry 追加，不得改写；recent sticker candidates是唯一例外，它不属于正文，投影时会从旧entry移除并只放在当前最后一批消息后。
-3. `messages` 是 UI/canonical 最新读模型；provider 只消费不可变 `message_events`。edit、metadata enrichment 与 vision completion 都追加 delta。
+2. Telegram 消息正文只能以新的结构化 session entry 追加，不得改写；recent sticker candidates是唯一例外，它不属于正文，投影时会从旧entry移除并只放在当前最后一批消息后。context 模式下媒体的图片块随消息事件一同首次写入，此后同样不可变。
+3. `messages` 是 UI/canonical 最新读模型；provider 只消费不可变 `message_events`。edit、metadata enrichment 与 vision 模式的 vision completion（`media_update`）都追加 delta；context 模式的媒体没有事后 delta——图片在事件首次打包时就位或永远缺席。
 4. 已消费位置与当前可见性分离：`bot_cursors.consumed_seq` 只单调前进，`bot_visible_messages` 可在成功 compaction 或 session 轮换时替换。
 5. 只有完整 context fingerprint 相同且 manifest 指向的 session 文件存在时才恢复 session。cache-visible 身份改变必须在 restore 前创建新 session/context epoch。
 6. UI、IPC、日志、operator command 与本地媒体准备不得改变 provider payload。
@@ -14,7 +14,9 @@
 
 ## CACHE_SCHEMA_VERSION
 
-当前：**15**。
+当前：**16**。
+
+v16 引入双媒体模式（`media.mode: "vision"` 默认 / `"context"` opt-in）：共享协议的媒体占位符一行改为同时覆盖两种形态（vision 模式占位符内联持久化文字描述 / context 模式占位符之后紧跟该媒体的实际图片），context fingerprint 新增 `mediaMode`——切换模式即开启新 context epoch，旧 session 不跨模式 resume。上下文扩展 details 升级 v4 新增 `blocks`（text|image 交错，供 context 模式投影 image 内容块；vision 模式 resolver 不接线，投影保持纯字符串）。vision 模式的 provider grammar 不变：message segment 仍 pin `resolveVision:false`，描述仍以 `media_update` delta 追加，event serializer hash 不变。图片只随新 event 追加进 suffix，不改写已有 prefix。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
 
 v15 在共享协议末尾增加「可用工具」声明（search / run_js / send 三个工具及被问能力时的如实回答规则），修复模型对自身工具能力不自知、被问"能不能搜索/查资料/看网页"时误答的问题。trade-off：声明是双 bot 共享 prefix 的一部分，若某 bot 关闭工具开关（如 `tools.search: false`），需同步评估此声明是否仍成立——它假设三个工具都可用，与 per-bot 开关配置存在潜在不一致，会破坏共享 prefix 假设。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
 
@@ -63,6 +65,7 @@ cache-visible protocol 包括：
 - v13：recent sticker candidates只投影在最后一个Telegram batch；主模型有效窗口固定64K并在Pi估算32K时压缩到摘要+最后turn。
 - v14：引用渲染对纯媒体父消息输出媒体占位、父消息缺失追加 `(原消息不可见)`；可见集 walker 不再从 compaction entry 的 `visibleMessageIds` 重灌（详见上文）。
 - v15：共享协议末尾增加可用工具声明（search / run_js / send 及被问能力时的如实回答规则），修复模型能力自知缺失；trade-off 见上文（per-bot 工具开关与共享 prefix 假设的潜在不一致）。
+- v16：双媒体模式——共享协议占位符行同时覆盖 vision 描述与 context 内联图片，fingerprint 新增 `mediaMode`，details v4 新增 `blocks`；vision 模式 grammar 不变（详见上文）。
 
 ## Provider payload 结构
 
@@ -72,9 +75,10 @@ messages: structured Telegram projections + assistant/tool/summary entries; rece
 tools: [{ name, description, parameters }] in fixed order
 ```
 
+- context 模式下 Telegram projection 内部是 text|image 交错内容块：每个事件一段文本，媒体事件的图片块紧跟其文本段；vision 模式或无图片的 entry 投影为纯字符串，与历史字节一致（details v4 `blocks`）。
 - `src/agent/prompt.ts` 拥有 shared protocol/persona 组装。
 - `src/agent/tools.ts` 是 provider-facing 工具参数、调用、错误和终止语义的唯一权威；persona 不复制工具参数表。
-- `src/agent/extensions/context.ts` 从 `telegram_context_v2.details.providerText/stickerCandidates` 投影 provider 内容；旧 entry 只投影消息正文，候选只跟在当前最后一个 Telegram entry 后。恢复 cursor/visible ids 只读 structured details，绝不解析渲染文本。
+- `src/agent/extensions/context.ts` 从 `telegram_context_v2.details.providerText/blocks/stickerCandidates` 投影 provider 内容；旧 entry 只投影消息正文，候选只跟在当前最后一个 Telegram entry 后。恢复 cursor/visible ids 只读 structured details，绝不解析渲染文本。
 - `send` 成功后 provider 只看到有界 ACK 与 sent message ids；本地发送详情继续写 SQLite/event。
 - 未通过 `send` 发布的 assistant prose 写入本地 `agent_events`，session 中用固定 `[no_send]` 代替；thinking/tool protocol entry 保留。
 
@@ -91,9 +95,11 @@ tools: [{ name, description, parameters }] in fixed order
 [media_update #18453] [图片: 新的视觉描述]
 ```
 
+`media_update` 行只出现在 vision 模式（描述持久化后追加的 delta）；context 模式没有独立 delta 事件，媒体事件首次追加时占位符文本段之后即紧跟该媒体的 image 内容块（准备好时）。
+
 - message event 保留原有日期、时间、sender、reply、quote、forward 与媒体占位符语义。
-- 引用父消息不在可见集时渲染短引用：文字父消息引 `@who "snippet"`（≤40 字）；纯媒体父消息引媒体占位（`[图片]`/`[sticker 😺]`/`[video]` 等，事件日志路径 `resolveVision:false` 不触发 vision 表 live lookup）；父消息缺失（含 external_reply 跨群引用）追加 `(原消息不可见)`。父消息在可见集时保持裸 `↪ #id`。
-- message/event bytes 一旦写入 session 就不重算；后续变化使用 `edit`、`metadata`、`media_update` delta。
+- 引用父消息不在可见集时渲染短引用：文字父消息引 `@who "snippet"`（≤40 字）；纯媒体父消息引媒体占位（`[图片]`/`[sticker 😺]`/`[video]` 等，事件日志路径 `resolveVision:false` 不触发 vision 表 live lookup，fresh-batch 路径可渲染已持久化描述）；父消息缺失（含 external_reply 跨群引用）追加 `(原消息不可见)`。父消息在可见集时保持裸 `↪ #id`。
+- message/event bytes 一旦写入 session 就不重算；后续变化使用 `edit`、`metadata`、`media_update`（vision 模式）delta。
 - `telegram_context_v2.details` 同时保存 `consumedSeq`、本 entry 的 event refs、`visibleMessageIds`、固定消息 projection 与独立 sticker candidates。
 - session 写入成功或启动 reconcile 能从 structured details 证明写入后，SQLite cursor 才前进。provider 失败不会靠文本猜测状态。
 
@@ -106,33 +112,47 @@ tools: [{ name, description, parameters }] in fixed order
 - runtime 另从 `bot_visible_messages` 与本轮新打包消息的并集取最近 8 个不同的用户 sticker；只保留当前 bot 有 mapping 的项。候选独立存储，provider projection会从所有旧 Telegram entry 移除候选，只在当前最后一批消息后追加一次；预算不足时不追加。
 - page fetch 先受 8,000 字符本地护栏约束，再受 2,048 provider tokens 上限约束；query 与工具失败输出同样有界。
 
-## Vision 与 provider boundary
+## 媒体模式与 provider boundary
+
+`media.mode` 选择媒体到达模型的方式：`"vision"`（默认）由辅助视觉模型把媒体描述成文字，`"context"`（opt-in）把图片作为 image 内容块直接交给主模型。两种模式下 voice、audio、非视频 document 与 TGS 动态贴纸都只有文本占位——Pi 0.84.1 只支持 image 内容块，这是硬限制；视频都靠 `ffmpeg`/`ffprobe` 抽帧，缺失时视频在 Telegram 下载前即降级/跳过，不占主对话 token、不阻塞 daemon ready，CLI/operator log/debug 提示安装用途，群内上下文不增加提示文字。
+
+### Vision（默认模式）
 
 Vision 默认关闭；只有显式 `vision.enabled: true` 才会执行。`auxiliary_visual_model` 只选择任务模型，不隐式开启功能。
 
-- foreground 每轮默认最多 2 个 media、deployment并发 2。图片在provider边界占slot；视频在Telegram下载前预留同一个全局slot，并一直持有到本地抽帧和单次vision请求结束，避免多bot并行放大FFmpeg负载。scheduler只有一个FIFO并发门，不维护重启即丢失的小时/每日计数。
-- persistent media identity cache 在 bots 间复用。新的非空结果只追加 `media_update` event，不改写旧 message entry。
+- foreground 每轮最多 `vision.foreground_media_limit`（默认 2）个 media、deployment 并发 `vision.concurrency`（默认 2）。图片在provider边界占slot；视频在Telegram下载前预留同一个全局slot，并一直持有到本地抽帧和单次vision请求结束，避免多bot并行放大FFmpeg负载。scheduler只有一个FIFO并发门，不维护重启即丢失的小时/每日计数。
+- persistent media identity cache（`media.vision`）在 bots 间复用。新的非空结果只追加 `media_update` event，不改写旧 message entry；描述经 additive IPC `vision_update` 与 snapshot/history 的 `mediaDesc` 到达 TUI，都是 provider 外 side channel。
 - Telegram下载严格配对bot-specific `file_id`与对应Bot API；回复bot缺mapping时可复用其他已配置接收bot的source。这是provider外的确定性本地准备，不改变消息grammar或主对话每turn token。
 - video、animation、video note、video MIME document与video sticker按时长取1–3帧；位置固定为中点、三分点或20%/50%/80%，再在一次独立vision请求中提交全部帧。结果仍只追加既有`media_update` grammar；persistent/cross-bot hit不增加调用。
-- `ffmpeg`/`ffprobe`缺失在Telegram下载前成为provider外no-op：无vision调用、无动态provider payload、无主对话token，也不写terminal vision cache。CLI/operator log/debug提示安装用途，群内上下文不增加提示文字。
-- photo/sticker display cache、`media_ready`、TUI card 与 `vision_update` IPC 都是 provider 外 side channel。
+- `ffmpeg`/`ffprobe`缺失在Telegram下载前成为provider外no-op：无vision调用、无动态provider payload、无主对话token，也不写terminal vision cache；static image vision 不受影响。
+- photo/sticker display cache、`media_ready` 与 TUI card 都是 provider 外 side channel。
 - compaction 单独使用配置的廉价模型与 `cacheRetention: "none"`；vision/compaction 不继承主模型的 reasoning 默认。
+
+### Context（opt-in）
+
+没有视觉模型调用；主模型直接接收上下文图片。主模型必须支持 image input，否则 daemon 在任何 Telegram 调用前 fail fast（`image_input_unsupported`）。
+
+- 进入上下文的媒体：photo 与静态 sticker（webp/gif 先转 png，再过 Pi `resizeImage` 字节/尺寸双上限）；video、animation、video note、video MIME document 与 video sticker 按时长抽 1–3 帧（中点、三分点或 20%/50%/80%），每帧一个 image block。
+- 准备在 flush 打包前执行：只有 Telegram 下载与本地转码，零 LLM 调用。每轮最多 `media.max_images_per_turn`（默认 4）个媒体身份，下载/抽帧并发 `media.download_concurrency`（默认 2）。失败只记 `error` event（`stage=context_media`），消息仍以纯文本占位进入上下文。
+- 派生图片以 hash basename 写入 `data/media`（`<sha256(fileUniqueId#ctx)>.png|jpg`、视频逐帧 `<sha256(fileUniqueId#frameN)>.jpg`），DB `media.context_files` 记录 `[{name, mime}]`；同一 media identity 跨 bot 只准备一次并持久化复用。
+- 每张上下文图片按固定 1,100 token 计入 suffix 预算（`CONTEXT_IMAGE_TOKEN_ESTIMATE`）；超预算或超上限的媒体降级为纯文本占位，被 force-cap 保留的 mandatory event 永远纯文本。图片只随新 event 追加，不存在事后回填，因此 prefix 永不失效。
+- Telegram下载严格配对bot-specific `file_id`与对应Bot API；回复bot缺mapping时可复用其他已配置接收bot的source。这是provider外的确定性本地准备，不改变消息grammar。
 
 ## Compaction 与 context epoch
 
-- 主模型传给Pi的有效context window固定为65,536；compaction 触发公式为 `contextTokens > contextWindow - reserveTokens`，其中 `reserveTokens = max(16,384, 65,536 - compaction_threshold)`，所以 threshold 最高生效值为 49,152（config 校验拒绝超过它的值，避免 requested/effective 静默分叉）。缺省/示例 threshold 为 32,768（提前触发，缓冲 Pi 对 CJK 的 token 低估），生产为 49,152。`tg-compaction` 用状态导向 prompt 生成不超过800字的摘要，并保留最近 `compaction_keep_recent` token 原文（注意单位是 token 不是 turn：缺省 1 token 连一条消息都装不下，压缩后实际只剩摘要；生产推荐 20,000，约 1-2 个完整 turn 原文）。更早原文不再进入provider，只有摘要仍可见。
+- 主模型传给Pi的有效context window为配置的 `context_window`（缺省 65,536，会钳制 Pi catalog 值）；compaction 触发公式为 `contextTokens > contextWindow - reserveTokens`，其中 `reserveTokens = max(16,384, context_window - compaction_threshold)`，所以 threshold 最高生效值为 `context_window - 16,384`（config 校验拒绝超过它的值，避免 requested/effective 静默分叉）。缺省/示例为 65,536/32,768（提前触发，缓冲 Pi 对 CJK token 与上下文图片的估算偏差）；生产可随窗口上调，如 131,072/114,688。`tg-compaction` 用状态导向 prompt 生成不超过800字的摘要，并保留最近 `compaction_keep_recent` token 原文（注意单位是 token 不是 turn：缺省 1 token 连一条消息都装不下，压缩后实际只剩摘要；生产推荐 20,000，约 1-2 个完整 turn 原文）。更早原文不再进入provider，只有摘要仍可见。
 - summary 输入使用 Pi 的 `serializeConversation(convertToLlm(messages))`，因此 Telegram custom message 与 Pi 原生消息遵循同一 provider projection。
 - 空摘要、provider failure 或 abort 会 cancel；cursor、visible refs 与 epoch 均不伪造变化。
 - 成功结果的 structured details 保存当前 `consumedSeq` 与 retained `visibleMessageIds`。runtime 用这些 details 替换 visibility、推进 epoch；`consumedSeq` 永不回退。
-- visibility与epoch提交后，provider外observer按所有当前配置bot的visible refs、未消费event与reply obligation，对本地媒体cache做最多256项回收。它只清可再生文件与`local_path`，失败不改变compaction结果；startup backfill复用同一引用边界，避免重新下载已回收历史。
-- 媒体回收不修改session、summary、message/event serialization、vision结果或provider payload，因此不改变cache schema，也不增加LLM call/token。
+- visibility与epoch提交后，provider外observer按所有当前配置bot的visible refs、未消费event与reply obligation，对本地媒体cache做最多256项回收。它清可再生文件、`local_path`与 `context_files` 派生图片，失败不改变compaction结果；startup backfill复用同一引用边界，避免重新下载已回收历史。
+- 媒体回收不修改session、summary、message/event serialization或provider payload，因此不改变cache schema，也不增加LLM call/token；派生图片可按 `context_files` 记录随时重建。
 - 手工 `/compact` 复用同一边界，不向模型注入 operator 指令。
 
 ## Payload 诊断与 telemetry
 
 `tg-cache-observer` 在 `before_provider_request` 对 canonical payload 计算 deployment-local HMAC：system、tools、每条 message 与完整 payload 分段记录 hash，并记录相对上次请求的首个 divergence segment/index/byte offset。SQLite 不保存 plaintext payload、prompt、secret 或 HMAC key。
 
-每次 provider response 还记录 provider/api/model/session hash/cache retention、epoch、context/input/cache read/cache write/output/reasoning/latency/cost、trigger、public send、vision/tool rounds，以及 input event/token estimate/rows scanned。保留期默认 90 天，因此 UI 的 lifetime 表示**当前 SQLite 保留窗口**，不是永久累计。
+每次 provider response 还记录 provider/api/model/session hash/cache retention、epoch、context/input/cache read/cache write/output/reasoning/latency/cost、trigger、public send、vision calls（vision 模式）/附带图片数 `images_attached`（context 模式）/tool rounds，以及 input event/token estimate/rows scanned。保留期默认 90 天，因此 UI 的 lifetime 表示**当前 SQLite 保留窗口**，不是永久累计。
 
 若 provider/Pi 返回的 cache read/write 都为 0，telemetry 可对同 cohort 的相邻两次 raw chat payload 做本地严格前缀估算：system/tools 必须相同，前一次完整 message hash 列表必须逐项等于后一次前缀，且 bot/provider/api/model/epoch/session/cache retention 均不变。估算单独写入 `cache_read_estimated`，原始 usage/cost 不改写，UI 用 `≈` 标出；它证明理论可复用结构，不证明 provider 实际命中。该 observer-side 计算不改变 provider payload、cache identity 或 `CACHE_SCHEMA_VERSION`，也不增加 LLM call/token；完整口径见 `docs/telemetry.md`。
 
@@ -144,17 +164,17 @@ Vision 默认关闭；只有显式 `vision.enabled: true` 才会执行。`auxili
 
 | 项目 | 值 |
 | --- | --- |
-| schema | `15` |
-| zh system | `3879a9204276` |
-| en system | `dd8b0d03cef0` |
+| schema | `16` |
+| zh system | `b2f0432b9b7b` |
+| en system | `231c26fbb95b` |
 | legacy message serializer | `68a17d6e5c05` |
 | immutable event serializer | `4a57de738bf9` |
 | tools | `b16b54cf6564` |
 | compaction prompt | `045a5241fdd7` |
 | extension order | `e04f7032d531` |
-| context protocol | `c810cd1e5ab3` |
+| context protocol | `2e1c7762b239` |
 | sticker catalog block | exact-string lock（identity + format grammar） |
-| recent-context sticker suffix | exact-string lock（最近、去重、user-only、bot-sendable、最终尾部） |
-| quote reference | exact-string lock（媒体占位 / `resolveVision:false` 无 vision / 缺失标记 / 可见裸引用） |
+| recent-context sticker suffix | exact-string lock（最近、去重、user-only、bot-sendable、vision 模式携带持久化描述、最终尾部） |
+| quote reference | exact-string lock（媒体占位 / 事件日志路径 `resolveVision:false` 不带描述 / 缺失标记 / 可见裸引用） |
 
 测试必须 pin `TZ=Asia/Singapore`；`bun test` 自身强制 UTC。若 hash 有意变化，先解释 cache impact，再更新 version 与 golden；不要只改 expected value。

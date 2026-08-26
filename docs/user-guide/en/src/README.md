@@ -17,7 +17,7 @@ Read in order:
 - [Chat and observe in Pi](using-pi.md): attach, compose, history, and telemetry.
 - [Daily operations](operations.md): daemon lifecycle, configuration changes, backups, and multi-group isolation.
 - [Troubleshooting](troubleshooting.md): move from an observable symptom to a safe next action.
-- [Cost design overview](design-cost.md): how routing, cache, context, vision, and UI avoid wasted calls and tokens.
+- [Cost design overview](design-cost.md): how routing, cache, context, media, and UI avoid wasted calls and tokens.
 
 ## Product boundaries
 

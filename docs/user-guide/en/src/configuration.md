@@ -33,6 +33,12 @@ export default defineConfig({
   compaction_model: "openai-codex/gpt-5.6-luna:low",
   max_suffix_tokens: 12_000,
   max_message_tokens: 4_096,
+  context_window: 65_536,
+  media: {
+    mode: "vision", // default; "context" attaches images to the chat model directly
+    max_images_per_turn: 4,
+    download_concurrency: 2,
+  },
   vision: {
     enabled: false,
     foreground_media_limit: 2,
@@ -83,16 +89,22 @@ The public example pins an explicit cost-first profile: Luna, reasoning off, sho
 
 `reasoning_effort` must be both a valid Pi-wide enum and a level supported by the selected model. Pi's SDK silently clamps unsupported values to a nearby level; to prevent cost, behavior, and status from disagreeing, Telegram agent refuses to start before any Telegram/provider call and reports the requested and supported values. The same check covers main bots, `compaction_model`, and an enabled vision model. Use Pi `/model` to inspect selectable levels; for example, `deepseek-v4-flash` accepts only `off`, `high`, and `max`.
 
+`media.mode` selects how media reaches a model. The default `"vision"` works with any chat model: when `vision.enabled` is true, the `auxiliary_visual_model` describes each media item as text and the chat model reads that description. The opt-in `"context"` mode instead attaches photos, static stickers, and sampled video frames to the chat model's context directly as images, so the main model must accept image input — a text-only chat model makes the daemon refuse to start with `image_input_unsupported`; check a model's input capabilities with Pi `/model`. The `compaction_model` is exempt: it only summarizes text.
+
 If the `compaction_model` request fails with a provider error, compaction retries once with the bot's main model and logs `compaction_fallback`, so an unavailable compaction model cannot permanently wedge an overflowed session; intentional aborts (e.g. daemon shutdown) are not retried.
+
+Custom OpenAI-compatible endpoints (self-hosted gateways, proxies, etc.) are registered through Pi's native `~/.pi/agent/models.json` — no project-side extension is needed: declare `baseUrl`, `api: "openai-completions"`, and `apiKey` (which may reference an environment variable as `"$ENV_VAR"`) under `providers`, and give each model explicit `input` (e.g. `["text","image"]`), `contextWindow`, and `maxTokens`. After registering, confirm the model in Pi `/model`, then set `provider`/`model` in this config; if you plan to use `media.mode: "context"`, the model declaration must include image input or the daemon fails fast at startup.
 
 These controls are bounded by default:
 
 - `max_suffix_tokens: 12000` and `max_message_tokens: 4096` cap new provider-visible Telegram context;
+- `context_window` (default 65,536) caps the main model's effective context window; `compaction_threshold` must stay at or below `context_window` − 16,384 (Pi's response reserve);
 - `cache_retention: "short"` controls the main chat request, while compaction always uses its configured cheap task model with provider cache retention disabled;
-- `vision.enabled` is false by default. When enabled, each turn handles at most `foreground_media_limit` uncached media items and all bots share one FIFO gate with `concurrency` active jobs. A video occupies one slot from Telegram download through frame extraction and its provider request. Video understanding requires `ffmpeg` and `ffprobe` on the daemon host PATH; missing tools skip before download and consume no provider tokens, produce an operator-only installation hint, and do not affect daemon readiness, chat, images, or sticker sending;
+- `media.mode` defaults to `"vision"`. In the opt-in `"context"` mode, `max_images_per_turn` (default 4, ~1.1K tokens each) caps the images attached to one provider call, and media beyond the cap or the context budget degrades to text placeholders; `download_concurrency` (default 2) caps parallel Telegram downloads and video frame extractions;
+- `vision.enabled` is false by default and applies to vision mode. When enabled, each turn handles at most `foreground_media_limit` uncached media items and all bots share one FIFO gate with `concurrency` active jobs. A video occupies one slot from Telegram download through frame extraction and its provider request. Video frame sampling — needed by context mode and by enabled vision — requires `ffmpeg` and `ffprobe` on the daemon host PATH; missing tools make videos fall back to text placeholders (skipping before download and consuming no provider tokens) and produce an operator-only installation hint, without affecting daemon readiness, chat, images, or sticker sending;
 - telemetry, raw updates, and immutable message events default to 90, 30, and 365 days. Old message events are pruned only after every known bot cursor consumed them and no direct-reply obligation references them.
 
-Changing model, reasoning, cache policy, persona, tools, serializer, or another cache-visible field produces a new context fingerprint. The next controlled restart preserves the old session file but starts a new session before restoration, so stale context is never resumed under a new identity.
+Changing model, media mode, reasoning, cache policy, persona, tools, serializer, or another cache-visible field produces a new context fingerprint. The next controlled restart preserves the old session file but starts a new session before restoration, so stale context is never resumed under a new identity.
 
 `tools` controls:
 

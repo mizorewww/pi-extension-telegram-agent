@@ -12,7 +12,7 @@ Let a few AI bots, each with its own persona, live permanently in your Telegram 
 
 ## Quick start
 
-You need: [Bun](https://bun.sh/), a Telegram supergroup, and at least one [BotFather](https://t.me/BotFather) token (the bot must be in the group with privacy mode disabled, or it cannot see ordinary messages). Video understanding additionally needs host `ffmpeg` (including `ffprobe`); without it, the rest of the agent and static-image vision continue to work.
+You need: [Bun](https://bun.sh/), a Telegram supergroup, and at least one [BotFather](https://t.me/BotFather) token (the bot must be in the group with privacy mode disabled, or it cannot see ordinary messages). Video frame sampling additionally needs host `ffmpeg` (including `ffprobe`); without it, videos stay text placeholders while the rest of the agent keeps working.
 
 ```bash
 git clone https://github.com/mizorewww/pi-extension-telegram-agent.git
@@ -23,7 +23,7 @@ bun run pi
 
 Then two things inside Pi:
 
-1. `/login` to authenticate a model provider and `/model` to pick the default model (credentials stay with Pi, outside this repo).
+1. `/login` to authenticate a model provider and `/model` to pick the default model (credentials stay with Pi, outside this repo). The default media mode (`vision`) works with any chat model; image input is required only if you opt into `media.mode: "context"`, which refuses to start with a text-only model.
 2. `/tg config` to run the setup wizard: group ID, token, persona. Once it validates, the daemon is ready.
 
 Done. Mention your bot in the group or just say something; `/help` lists the group commands.
