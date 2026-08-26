@@ -399,6 +399,70 @@ test("immutable event and extension protocol grammar stable", () => {
 	).toBe(GOLDEN.contextProtocol);
 });
 
+test("media_update delta between same-day messages keeps one date separator (v16)", () => {
+	// Locks the deliberate v16 semantics: day state spans segments, so an interleaved delta
+	// does not re-emit --- YYYY-MM-DD --- the way the pre-v16 per-batch reset did.
+	const db = new Database(":memory:");
+	db.exec(readFileSync("src/db/schema.sql", "utf8"));
+	const base: MessageRow = {
+		chat_id: -1004402809405,
+		message_id: 200,
+		date: 1754612345,
+		thread_id: null,
+		sender_id: 111,
+		display_name: "Alice",
+		username: "alice",
+		sender_tag: null,
+		sender_chat: null,
+		is_bot: 0,
+		text: "first",
+		caption: null,
+		entities: null,
+		rich_message: null,
+		reply_to_message_id: null,
+		reply_to_sender_id: null,
+		quote: null,
+		forward_origin: null,
+		edit_date: null,
+		media: null,
+	};
+	const out = serializeMessageEvents(
+		db,
+		[
+			{
+				ingestSeq: 1,
+				chatId: base.chat_id,
+				messageId: 200,
+				revision: 0,
+				kind: "message",
+				eventDate: base.date,
+				payload: base,
+			},
+			{
+				ingestSeq: 2,
+				chatId: base.chat_id,
+				messageId: 200,
+				revision: 1,
+				kind: "media_update",
+				eventDate: base.date + 60,
+				payload: { file_unique_id: "u", media_kind: "photo", text: "a cat" },
+			},
+			{
+				ingestSeq: 3,
+				chatId: base.chat_id,
+				messageId: 201,
+				revision: 0,
+				kind: "message",
+				eventDate: base.date + 120,
+				payload: { ...base, message_id: 201, text: "second" },
+			},
+		],
+		{ visibleIds: new Set() },
+	);
+	expect(out.match(/--- \d{4}-\d{2}-\d{2} ---/g)).toHaveLength(1);
+	expect(out).toContain("[media_update #200] [图片: a cat]");
+});
+
 test("complete provider tool protocol + order stable (REQ-TEST-0001 R2)", () => {
 	expect(toolsHash()).toBe(GOLDEN.tools);
 });

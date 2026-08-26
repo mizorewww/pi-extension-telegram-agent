@@ -173,10 +173,12 @@ export interface SerializedEventSegment {
 
 /**
  * Serialize events one segment each so context-mode media image blocks can interleave at the
- * exact message position. Joining segment texts with "\n" yields byte-identical output to the
- * historical whole-batch rendering (date separators belong to the first segment of their day).
- * Message segments pin resolveVision:false: written bytes never change when a vision description
- * arrives later — the description is appended as its own media_update segment.
+ * exact message position. For pure message runs, joining segment texts with "\n" is byte-identical
+ * to the historical whole-batch rendering. One deliberate difference: a media_update delta between
+ * two same-day messages no longer re-emits the `--- YYYY-MM-DD ---` separator (the day state now
+ * spans segments; the old per-batch reset duplicated the line). Message segments pin
+ * resolveVision:false: written bytes never change when a vision description arrives later — the
+ * description is appended as its own media_update segment.
  */
 export function serializeMessageEventSegments(
 	db: Database,
