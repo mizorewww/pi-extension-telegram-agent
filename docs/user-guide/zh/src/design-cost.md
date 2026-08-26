@@ -12,7 +12,7 @@ mention、reply、配置名称和HMAC概率桶都由本地代码判断。普通�
 
 ## 2. Stable provider prefix 复用cache
 
-共享协议位于最前，persona随后，末尾是有界的 identity + format sticker 目录，再之后是固定顺序tool schema，让多只bot尽可能共享逐字节相同的prefix。固定目录只含有上限的 set + `static|animated|video` + emoji + short_id。另一份最多8条的动态候选只取当前context真正可见、且该bot可发送的最近用户sticker。候选在session中独立保存，provider只在最后一批Telegram消息之后看到一次，不会在每个历史消息批次后重复；vision模式下候选附持久化描述，context模式下这些sticker的图片本身已在context中；suffix预算不足时整体省略。三种格式都通过Telegram原始file id发送。
+共享协议位于最前，persona随后，末尾是有界的 sticker 目录，再之后是固定顺序tool schema，让多只bot尽可能共享逐字节相同的prefix。固定目录每行为 `s<id>: <emoji> <描述>`（描述取持久化 vision 文本，缺失时逐级降级为 `s<id>: <emoji>`、`s<id>`；set 名与格式不进入模型可见文本），并有条数上限。另一份最多8条的动态候选只取当前context真正可见、且该bot可发送的最近用户sticker，行格式与目录一致。候选在session中独立保存，provider只在最后一批Telegram消息之后看到一次，不会在每个历史消息批次后重复；suffix预算不足时整体省略。三种格式都通过Telegram原始file id发送。
 
 fingerprint覆盖Pi/provider/model/cache policy、protocol、persona、serializer、compaction、extensions与tools。cache-visible内容变化必须升级schema，并在restore前创建新session/epoch；旧session文件保留，但不会用不同identity恢复。UI、telemetry和operator命令不能偷偷改变provider bytes。权威规则见[Cache工程](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/cache.md)。
 
@@ -32,7 +32,7 @@ compaction使用配置的廉价task model且关闭provider cache retention，因
 
 `media.mode`选择媒体到达模型的方式。默认vision模式：`vision.enabled`开启后，辅助视觉模型为每个媒体生成一次文字描述——照片与静态sticker直接描述，视频（含视频sticker与GIF动图）抽最多3张代表帧、一次provider调用综合理解；结果按media identity持久化进`media.vision`列并在所有bot之间复用，以immutable media-update event追加而不是改写旧context，主模型读到的是`[图片: 描述]`占位，因此任何聊天模型都能用。UI使用缓存结果原位更新，不额外调用模型。opt-in的context模式完全不调用视觉模型：照片与静态sticker直接作为图片进入主模型上下文，视频本地抽取1-3张代表帧；媒体准备的全部成本是Telegram下载与本机转码。每张图片按固定1,100 token计入上下文预算，同时受`media.max_images_per_turn`（默认4）与上下文预算双重约束，超出的媒体自动降级为文字占位；准备好的图片记录进`media.context_files`持久化并跨bot复用。主模型必须声明图片输入，否则daemon启动即失败（`image_input_unsupported`）。两种模式下voice/audio/非视频document/TGS动态贴纸始终是文字占位——这是当前模型API的硬限制，不是可配置项。
 
-用户和bot的static照片/sticker都先落canonical DB并共用一条有界展示缓存；vision模式的video source只在真实vision turn中lazy准备。SQLite只保存cache-relative文件名，deployment移动后不会继续把TUI绑定到旧绝对路径。同一媒体按media identity只准备一次，pruning与context packing共用这同一份事实。两种模式的视频抽帧都需要FFmpeg；缺失时视频在下载前跳过、只留文字占位，不占provider token，也不影响聊天、图片或sticker发送。固定sticker目录仍是system prompt里identity-only的固定前缀，不参与每轮图片挂载。
+用户和bot的static照片/sticker都先落canonical DB并共用一条有界展示缓存；vision模式的video source只在真实vision turn中lazy准备。SQLite只保存cache-relative文件名，deployment移动后不会继续把TUI绑定到旧绝对路径。同一媒体按media identity只准备一次，pruning与context packing共用这同一份事实。两种模式的视频抽帧都需要FFmpeg；缺失时视频在下载前跳过、只留文字占位，不占provider token，也不影响聊天、图片或sticker发送。固定sticker目录仍是system prompt里的固定前缀（含已持久化的描述），不参与每轮图片挂载。
 
 成功compaction后，daemon会删除所有当前配置bot都不再引用的有界批次本地媒体文件；未消费消息与待回复媒体仍保留。消息、视觉描述与`media.context_files`、sticker short id和Telegram file mapping不会删除，因此以后重新需要时可以下载source，并继续复用已有的vision结果或派生文件。restart也不会把这批无引用历史自动下载回来。
 

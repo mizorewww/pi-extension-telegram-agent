@@ -10,11 +10,13 @@
 4. 已消费位置与当前可见性分离：`bot_cursors.consumed_seq` 只单调前进，`bot_visible_messages` 可在成功 compaction 或 session 轮换时替换。
 5. 只有完整 context fingerprint 相同且 manifest 指向的 session 文件存在时才恢复 session。cache-visible 身份改变必须在 restore 前创建新 session/context epoch。
 6. UI、IPC、日志、operator command 与本地媒体准备不得改变 provider payload。
-7. provider 输入和工具输出必须有界；不能把 raw update、Rich Message JSON 或无界历史塞入 context。sticker catalog 以 ≤`STICKER_CATALOG_MAX` 条 identity + format 行固定进 prefix；最近上下文候选最多 8 条，只能追加在本轮动态 suffix 最后。
+7. provider 输入和工具输出必须有界；不能把 raw update、Rich Message JSON 或无界历史塞入 context。sticker catalog 以 ≤`STICKER_CATALOG_MAX` 条 `s<id>: <emoji> <描述>` 行固定进 prefix；最近上下文候选最多 8 条，只能追加在本轮动态 suffix 最后。
 
 ## CACHE_SCHEMA_VERSION
 
-当前：**16**。
+当前：**17**。
+
+v17 收敛 sticker 的模型可见文本并关闭 context 模式的描述注入。消息行 sticker 占位删掉 ` set:<集合名>` 元数据（serializer v4：有描述 `[sticker 😺: 描述]`，无描述 `[sticker 😺]`，emoji 也缺时 `[sticker]`；图片块或描述已紧随其后，集合名是纯噪音）。sticker 目录块与近期上下文候选统一为 `s<id>: <emoji> <描述>` 行：目录头部精简为 `# Sticker 目录`（发送规则由 send 工具 description 承载），候选头部改为 `可发 sticker（近期上下文）：`，描述沿用持久化 vision 文本（`media.vision` JSON 的 `text`，空白压缩、≤60 字符），缺失时逐级降级为 `s<id>: <emoji>`、`s<id>`；set 名与 format 不再出现在任何模型可见文本；send 工具 sticker 参数描述里的候选块引用同步为新名（tools golden 随 v17 更新）。catalog snapshot hash 纳入描述文本，描述落地即开新 epoch。context 模式不再产生任何 `media_update` 事件：live 路径本就只在 vision 模式运行，旧 vision 缓存的 ingest 回放与 bot 自发 sticker 的持久化路径改为按模式 gate；已持久化的历史事件字节不变，vision 模式行为完全不变。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
 
 v16 引入双媒体模式（`media.mode: "vision"` 默认 / `"context"` opt-in）：共享协议的媒体占位符一行改为同时覆盖两种形态（vision 模式占位符内联持久化文字描述 / context 模式占位符之后紧跟该媒体的实际图片），context fingerprint 新增 `mediaMode`——切换模式即开启新 context epoch，旧 session 不跨模式 resume。上下文扩展 details 升级 v4 新增 `blocks`（text|image 交错，供 context 模式投影 image 内容块；vision 模式 resolver 不接线，投影保持纯字符串）。vision 模式的 provider grammar 不变：message segment 仍 pin `resolveVision:false`，描述仍以 `media_update` delta 追加，event serializer hash 不变。图片只随新 event 追加进 suffix，不改写已有 prefix。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
 
@@ -66,11 +68,12 @@ cache-visible protocol 包括：
 - v14：引用渲染对纯媒体父消息输出媒体占位、父消息缺失追加 `(原消息不可见)`；可见集 walker 不再从 compaction entry 的 `visibleMessageIds` 重灌（详见上文）。
 - v15：共享协议末尾增加可用工具声明（search / run_js / send 及被问能力时的如实回答规则），修复模型能力自知缺失；trade-off 见上文（per-bot 工具开关与共享 prefix 假设的潜在不一致）。
 - v16：双媒体模式——共享协议占位符行同时覆盖 vision 描述与 context 内联图片，fingerprint 新增 `mediaMode`，details v4 新增 `blocks`；vision 模式 grammar 不变（详见上文）。
+- v17：sticker 占位删 ` set:` 元数据（serializer v4）；目录/候选统一 `s<id>: <emoji> <描述>` 行，set 名与 format 退出模型可见文本，描述纳入 catalog fingerprint；context 模式不再产生 `media_update`（详见上文）。
 
 ## Provider payload 结构
 
 ```text
-system: SHARED_PROTOCOL + separator + persona [+ separator + identity + format sticker catalog]
+system: SHARED_PROTOCOL + separator + persona [+ separator + sticker catalog（s<id>: <emoji> <描述> 行）]
 messages: structured Telegram projections + assistant/tool/summary entries; recent-context sticker candidates only follow the last Telegram projection
 tools: [{ name, description, parameters }] in fixed order
 ```
@@ -108,7 +111,7 @@ tools: [{ name, description, parameters }] in fixed order
 - runtime 每轮最多索引读取 256 条近期 event，并额外读取最多 64 条 direct-address obligation event；不扫描整张 `messages` 表。
 - direct-address obligation 优先打包；普通 event 从最新端选择后恢复时间顺序。默认 suffix 上限 12,000 tokens，单 event 上限 4,096 tokens，并为输出、reasoning 与 tool follow-up 预留空间。
 - 普通溢出 event 可以被 cursor 消费但不标 visible；direct-address obligation 只有在结构化 commit marker 证明交付后才删除。
-- sticker catalog 在启动时同步进 DB 后以 identity + format block（每行 set + format + emoji + short_id，按 set 名 + rowid 排序）固化在 system prompt 尾部；prefix 由配置 + DB catalog 唯一决定，重启间稳定。catalog identity/format 变化通过 fingerprint snapshot 开新 epoch。
+- sticker catalog 在启动时同步进 DB 后以 `s<id>: <emoji> <描述>` 行（描述为持久化 vision 文本，缺失时逐级降级为 `s<id>: <emoji>`、`s<id>`；按 set 名 + rowid 排序，set 名本身不渲染）固化在 system prompt 尾部；prefix 由配置 + DB catalog 唯一决定，重启间稳定。catalog identity 或描述变化通过 fingerprint snapshot 开新 epoch。
 - runtime 另从 `bot_visible_messages` 与本轮新打包消息的并集取最近 8 个不同的用户 sticker；只保留当前 bot 有 mapping 的项。候选独立存储，provider projection会从所有旧 Telegram entry 移除候选，只在当前最后一批消息后追加一次；预算不足时不追加。
 - page fetch 先受 8,000 字符本地护栏约束，再受 2,048 provider tokens 上限约束；query 与工具失败输出同样有界。
 
@@ -164,17 +167,17 @@ Vision 默认关闭；只有显式 `vision.enabled: true` 才会执行。`auxili
 
 | 项目 | 值 |
 | --- | --- |
-| schema | `16` |
+| schema | `17` |
 | zh system | `b2f0432b9b7b` |
 | en system | `231c26fbb95b` |
 | legacy message serializer | `68a17d6e5c05` |
 | immutable event serializer | `4a57de738bf9` |
-| tools | `b16b54cf6564` |
+| tools | `c28a3db01190` |
 | compaction prompt | `045a5241fdd7` |
 | extension order | `e04f7032d531` |
 | context protocol | `2e1c7762b239` |
-| sticker catalog block | exact-string lock（identity + format grammar） |
-| recent-context sticker suffix | exact-string lock（最近、去重、user-only、bot-sendable、vision 模式携带持久化描述、最终尾部） |
+| sticker catalog block | exact-string lock（`s<id>: <emoji> <描述>` 行，set/format 不渲染） |
+| recent-context sticker suffix | exact-string lock（最近、去重、user-only、bot-sendable、与目录同一行语法携带持久化描述、最终尾部） |
 | quote reference | exact-string lock（媒体占位 / 事件日志路径 `resolveVision:false` 不带描述 / 缺失标记 / 可见裸引用） |
 
 测试必须 pin `TZ=Asia/Singapore`；`bun test` 自身强制 UTC。若 hash 有意变化，先解释 cache impact，再更新 version 与 golden；不要只改 expected value。

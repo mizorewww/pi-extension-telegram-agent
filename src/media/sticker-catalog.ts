@@ -1,11 +1,12 @@
 // Fixed sticker catalog per bot (REQ-STICKER-0001).
 // Each bot can configure Telegram sticker set names; at startup the sets are fetched, media
-// identity + per-bot file_id persisted, and short_ids assigned from rowids. The catalog is
-// serialized as identity + format (set + format + emoji + short_id, no vision text) into the stable system
-// prompt, so the prefix is fully determined by config + DB catalog and stays stable across
-// restarts. Recent visible user stickers are a separate bounded dynamic tail (cache schema v11);
-// in vision mode the tail carries the persisted vision description, in context mode the sticker
-// image enters the context as a media block so the tail only needs identity + format.
+// identity + per-bot file_id persisted, and short_ids assigned from rowids. Catalog and recent
+// candidates share one line grammar — `s12: 😺 描述`, degrading to `s12: 😺` then `s12` — where
+// the description is the persisted vision text (media.vision JSON `text`, whitespace-collapsed,
+// ≤60 chars). Set names never appear in model-visible text (cache schema v17). The catalog block
+// sits in the stable system prompt, so the prefix is determined by config + DB catalog, and the
+// snapshot hash covers description text so a landing description starts a new epoch. Recent
+// visible user stickers are a separate bounded dynamic tail (cache schema v11).
 
 import type { Database } from "bun:sqlite";
 import { errorCategory, log } from "../observability/log.ts";
@@ -26,13 +27,6 @@ export interface CatalogSticker {
 }
 
 export type StickerMime = "image/webp" | "application/x-tgsticker" | "video/webm";
-export type StickerFormat = "static" | "animated" | "video";
-
-export function stickerFormatFromMime(mime: string | null): StickerFormat {
-	if (mime === "application/x-tgsticker") return "animated";
-	if (mime === "video/webm") return "video";
-	return "static";
-}
 
 function stickerMime(sticker: { is_animated?: boolean; is_video?: boolean }): StickerMime {
 	if (sticker.is_video) return "video/webm";
@@ -162,9 +156,8 @@ export async function ensureStickerCatalog(
 }
 
 interface CatalogRow {
-	mime: string | null;
-	sticker_set: string | null;
 	sticker_emoji: string | null;
+	vision: string | null;
 	short_id: string;
 }
 
@@ -172,7 +165,7 @@ interface CatalogRow {
 function catalogRows(db: Database, botId: string, sets: readonly string[]): CatalogRow[] {
 	return db
 		.query(`
-		SELECT mime, sticker_set, sticker_emoji, short_id
+		SELECT sticker_emoji, vision, short_id
 		  FROM media m
 		 WHERE kind = 'sticker' AND short_id IS NOT NULL
 		   AND sticker_set IN (SELECT value FROM json_each(?))
@@ -186,41 +179,44 @@ function catalogRows(db: Database, botId: string, sets: readonly string[]): Cata
 }
 
 /**
- * Identity + format catalog block for the stable system prompt: one line per sticker
- * (set + format + emoji + short_id), no description text. Deterministic for a given
- * config + DB catalog, so the prefix stays stable across restarts. Empty string when
- * the bot has no sendable catalog stickers.
+ * Catalog block for the stable system prompt: one `s<id>: <emoji> <描述>` line per sticker
+ * (shared line grammar with the recent-candidate tail). Deterministic for a given config + DB
+ * catalog, so the prefix stays stable across restarts; a newly persisted description changes the
+ * snapshot hash and starts a new epoch. Empty string when the bot has no sendable catalog
+ * stickers. Sending rules live in the send tool description, not here.
  */
 export function stickerCatalogPromptBlock(db: Database, botId: string, sets: readonly string[]): string {
 	const rows = catalogRows(db, botId, sets);
 	if (rows.length === 0) return "";
-	const lines = rows.map(
-		(row) =>
-			`- [${row.sticker_set ?? ""}] [${stickerFormatFromMime(row.mime)}] ${row.sticker_emoji ?? ""} ${row.short_id}`,
-	);
-	return `# Sticker 目录\n\n你可以用 send 的 sticker 参数发送以下 sticker（填 short_id，不得编造其他 id）：\n\n${lines.join("\n")}`;
+	const lines = rows.map((row) => stickerLine(row.short_id, row.sticker_emoji, stickerDescription(row.vision)));
+	return `# Sticker 目录\n\n${lines.join("\n")}`;
 }
 
 interface ContextStickerRow {
 	rowid: number;
 	file_unique_id: string;
 	short_id: string | null;
-	sticker_set: string | null;
 	sticker_emoji: string | null;
 	vision: string | null;
-	mime: string | null;
 }
 
-function stickerDescription(row: ContextStickerRow): string {
-	if (row.vision) {
+/** Persisted vision description, whitespace-collapsed and bounded; empty when none exists. */
+function stickerDescription(vision: string | null): string {
+	if (vision) {
 		try {
-			const text = (JSON.parse(row.vision) as { text?: unknown }).text;
+			const text = (JSON.parse(vision) as { text?: unknown }).text;
 			if (typeof text === "string" && text.trim()) return text.replace(/\s+/g, " ").trim().slice(0, 60);
 		} catch {
 			// A malformed historical vision cache does not hide an otherwise sendable sticker.
 		}
 	}
-	return row.sticker_set ? `[${row.sticker_set}]` : "";
+	return "";
+}
+
+/** Shared line grammar: `s12: 😺 描述`, degrading to `s12: 😺` (no description) then `s12`. */
+function stickerLine(shortId: string, emoji: string | null, description: string): string {
+	const parts = [emoji, description].filter((part) => part);
+	return parts.length > 0 ? `${shortId}: ${parts.join(" ")}` : shortId;
 }
 
 /**
@@ -247,8 +243,8 @@ export function recentContextStickerCandidates(
 				UNION
 				SELECT CAST(value AS INTEGER) FROM json_each(?4)
 			)
-			SELECT media.rowid, media.file_unique_id, media.short_id, media.mime,
-			       media.sticker_set, media.sticker_emoji, media.vision
+			SELECT media.rowid, media.file_unique_id, media.short_id,
+			       media.sticker_emoji, media.vision
 			  FROM visible
 			  JOIN messages message
 			    ON message.chat_id = ?2 AND message.message_id = visible.message_id
@@ -282,13 +278,10 @@ export function recentContextStickerCandidates(
 				row.file_unique_id,
 			);
 		}
-		const description = stickerDescription(row);
-		lines.push(
-			`${shortId} [${stickerFormatFromMime(row.mime)}] = ${row.sticker_emoji ?? ""}${description ? ` ${description}` : ""}`.trim(),
-		);
+		lines.push(stickerLine(shortId, row.sticker_emoji, stickerDescription(row.vision)));
 		if (lines.length >= boundedLimit) break;
 	}
-	return lines.length > 0 ? `Available stickers (recent context):\n${lines.join("\n")}` : "";
+	return lines.length > 0 ? `可发 sticker（近期上下文）：\n${lines.join("\n")}` : "";
 }
 
 /** Keep dynamic candidates after every serialized message/delta so the preceding cache prefix is untouched. */
@@ -297,9 +290,14 @@ export function appendStickerCandidateSuffix(providerText: string, candidateBloc
 	return block ? `${providerText}\n\n${block}` : providerText;
 }
 
-/** Fingerprint the exact identity state that shapes the prompt block; vision text never participates. */
+/** Fingerprint the exact state that shapes the prompt block: identity plus description text. */
 export function stickerCatalogSnapshotHash(db: Database, botId: string, sets: readonly string[]): string {
+	const rows = catalogRows(db, botId, sets).map((row) => ({
+		short_id: row.short_id,
+		emoji: row.sticker_emoji,
+		description: stickerDescription(row.vision),
+	}));
 	return createHash("sha256")
-		.update(JSON.stringify({ sets: [...sets], rows: catalogRows(db, botId, sets) }))
+		.update(JSON.stringify({ sets: [...sets], rows }))
 		.digest("hex");
 }

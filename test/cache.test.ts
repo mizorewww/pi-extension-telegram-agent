@@ -13,7 +13,13 @@ process.env.TZ = "Asia/Singapore";
 
 import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
-import { serializeMessageEvents, serializeMessages, type MessageRow } from "../src/agent/serialize.ts";
+import {
+	serializeMessageEvents,
+	serializeMessages,
+	mediaPlaceholder,
+	type MessageRow,
+} from "../src/agent/serialize.ts";
+import { ingestUpdate } from "../src/telegram/ingest.ts";
 import {
 	buildSystemPrompt,
 	sha256Short,
@@ -37,12 +43,12 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 16,
+	schemaVersion: 17,
 	systemZhTemplate: "b2f0432b9b7b",
 	systemEnTemplate: "231c26fbb95b",
 	serialize: "68a17d6e5c05",
 	eventSerialize: "4a57de738bf9",
-	tools: "b16b54cf6564",
+	tools: "c28a3db01190",
 	compactionPrompt: "045a5241fdd7",
 	extensionOrder: "e04f7032d531",
 	contextProtocol: "2e1c7762b239",
@@ -484,7 +490,7 @@ test("compaction serializes custom Telegram messages through Pi", () => {
 	expect(conversation).toContain("telegram context survives compaction");
 });
 
-test("sticker catalog prompt block grammar stable (identity + format, per-bot)", () => {
+test("sticker catalog prompt block grammar stable (short_id + emoji + description, per-bot)", () => {
 	const db = new Database(":memory:");
 	db.exec(readFileSync("src/db/schema.sql", "utf8"));
 	const ins = db.prepare(
@@ -512,18 +518,15 @@ test("sticker catalog prompt block grammar stable (identity + format, per-bot)",
 	).run();
 	db.query("INSERT INTO media_file_ids (bot_id, file_id, file_unique_id) VALUES ('B', 'fid-3', 'uq-cat-b-only')").run();
 	const block = stickerCatalogPromptBlock(db, "A", ["Mikufufu"]);
-	// identity-only grammar: set + emoji + short_id, no vision description text
+	// v17 line grammar: short_id + emoji + persisted description; set name and format never render
 	expect(block).toBe(`# Sticker 目录
 
-你可以用 send 的 sticker 参数发送以下 sticker（填 short_id，不得编造其他 id）：
-
-- [Mikufufu] [static] 😺 s1
-- [Mikufufu] [animated] 🐱 s2`);
-	expect(block).not.toContain("得意的赞同");
+s1: 😺 得意的赞同，smug/amused
+s2: 🐱`);
+	expect(block).not.toContain("Mikufufu");
 	// deterministic across calls and isolated from other bots' mappings
 	expect(stickerCatalogPromptBlock(db, "A", ["Mikufufu"])).toBe(block);
-	expect(stickerCatalogPromptBlock(db, "B", ["Mikufufu"])).toContain("🅱️ s3");
-	expect(stickerCatalogPromptBlock(db, "B", ["Mikufufu"])).toContain("[video]");
+	expect(stickerCatalogPromptBlock(db, "B", ["Mikufufu"])).toContain("s3: 🅱️ 另一个 bot 的映射");
 	expect(stickerCatalogPromptBlock(db, "B", ["Mikufufu"])).not.toContain("s1");
 });
 
@@ -598,18 +601,19 @@ test("recent visible user stickers form a bounded final suffix", () => {
 		JSON.stringify({ kind: "sticker", file_unique_id: "other-bot-only", sticker_emoji: "🅱️" }),
 	);
 
-	// vision mode: the persisted description rides along; context mode (vision column null)
-	// renders the same identity + format lines without a description
+	// v17: both media modes share the same candidate line grammar — short_id + emoji +
+	// persisted description (context mode leaves the vision column null, so lines degrade
+	// to short_id + emoji); set name and format never render
 	const block = recentContextStickerCandidates(db, "A", chatId, 1, [6, 7, 8, 9, 10, 11, 12]);
-	expect(block).toBe(`Available stickers (recent context):
-s10 [video] = 😺 emotion-10
-s9 [animated] = 😺 emotion-9
-s8 [static] = 😺 emotion-8
-s7 [static] = 😺 emotion-7
-s6 [static] = 😺 emotion-6
-s5 [static] = 😺 emotion-5
-s4 [static] = 😺 emotion-4
-s3 [static] = 😺 emotion-3`);
+	expect(block).toBe(`可发 sticker（近期上下文）：
+s10: 😺 emotion-10
+s9: 😺 emotion-9
+s8: 😺 emotion-8
+s7: 😺 emotion-7
+s6: 😺 emotion-6
+s5: 😺 emotion-5
+s4: 😺 emotion-4
+s3: 😺 emotion-3`);
 	expect(block).not.toContain("bot");
 	expect(block).not.toContain("B only");
 	const providerText = appendStickerCandidateSuffix("serialized messages", block);
@@ -617,4 +621,57 @@ s3 [static] = 😺 emotion-3`);
 
 ${block}`);
 	expect(providerText.endsWith(block)).toBe(true);
+});
+
+test("sticker placeholder drops set metadata (serializer v4)", () => {
+	const db = new Database(":memory:");
+	db.exec(readFileSync("src/db/schema.sql", "utf8"));
+	const withSet = JSON.stringify({
+		kind: "sticker",
+		file_unique_id: "uq-s",
+		sticker_emoji: "😺",
+		sticker_set: "Mikufufu",
+	});
+	// set name never renders, with or without a persisted description
+	expect(mediaPlaceholder(db, withSet)).toBe("[sticker 😺]");
+	db.query("INSERT INTO media (file_unique_id, kind, vision) VALUES ('uq-s', 'sticker', ?)").run(
+		JSON.stringify({ model: "m", kind: "sticker", text: "得意的赞同", at: 1 }),
+	);
+	expect(mediaPlaceholder(db, withSet)).toBe("[sticker 😺: 得意的赞同]");
+	expect(
+		mediaPlaceholder(db, JSON.stringify({ kind: "sticker", file_unique_id: "uq-s", sticker_set: "Mikufufu" })),
+	).toBe("[sticker: 得意的赞同]");
+	expect(mediaPlaceholder(db, JSON.stringify({ kind: "sticker", sticker_set: "Mikufufu" }))).toBe("[sticker]");
+	// event-log path stays immutable: no live vision lookup
+	expect(mediaPlaceholder(db, withSet, false)).toBe("[sticker 😺]");
+});
+
+test("context mode replays no cached vision descriptions as media_update events (v17)", () => {
+	const db = new Database(":memory:");
+	db.exec(readFileSync("src/db/schema.sql", "utf8"));
+	db.query("INSERT INTO media (file_unique_id, kind, vision) VALUES ('uq-photo', 'photo', ?)").run(
+		JSON.stringify({ model: "m", kind: "photo", text: "一只猫", at: 1 }),
+	);
+	const photoUpdate = (updateId: number, messageId: number) => ({
+		update_id: updateId,
+		message: {
+			message_id: messageId,
+			date: 1754612400 + messageId,
+			chat: { id: -1001234, type: "supergroup" },
+			from: { id: 42, first_name: "Alice" },
+			photo: [{ file_unique_id: "uq-photo", file_id: "fid-1", width: 10, height: 10 }],
+		},
+	});
+	const mediaUpdateIds = () =>
+		(
+			db.query("SELECT message_id AS id FROM message_events WHERE kind = 'media_update' ORDER BY message_id").all() as {
+				id: number;
+			}[]
+		).map((row) => row.id);
+	// vision mode (default): the persisted description replays as a media_update delta
+	expect(ingestUpdate(db, "A", photoUpdate(1, 500), 1234).kind).toBe("inserted");
+	expect(mediaUpdateIds()).toEqual([500]);
+	// context mode: no media_update is produced even when a cached description exists
+	expect(ingestUpdate(db, "A", photoUpdate(2, 501), 1234, undefined, false).kind).toBe("inserted");
+	expect(mediaUpdateIds()).toEqual([500]);
 });

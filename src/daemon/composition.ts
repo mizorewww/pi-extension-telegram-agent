@@ -56,9 +56,14 @@ export async function composeDeployment<Api extends IdentityApi, Runtime>(
 /** Construct one independent polling boundary per configured bot after identities exist. */
 export function composePollers(
 	db: Database,
-	config: Pick<AppConfig, "bots" | "groupPeerId">,
+	config: Pick<AppConfig, "bots" | "groupPeerId" | "media">,
 	onMessage: MessageHandler,
 	replyBotTargets: ReadonlyMap<number, string>,
 ): Poller[] {
-	return config.bots.map((bot) => new Poller(db, bot.id, bot.token, config.groupPeerId, onMessage, replyBotTargets));
+	// media_update deltas (persisted vision descriptions) exist only in vision mode; context mode
+	// attaches image blocks to the message event itself and never injects description text.
+	const emitMediaUpdates = config.media.mode === "vision";
+	return config.bots.map(
+		(bot) => new Poller(db, bot.id, bot.token, config.groupPeerId, onMessage, replyBotTargets, emitMediaUpdates),
+	);
 }

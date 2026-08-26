@@ -2,7 +2,8 @@
 // Grammar stability is a cache invariant: never change existing output shape.
 //
 // Media renders as a text placeholder (`[图片]` / `[sticker 😄]` / `[video]` ...), optionally
-// carrying the persisted vision-mode description (`[图片: 描述]`). Event-log serialization pins
+// carrying the persisted vision-mode description (`[图片: 描述]` / `[sticker 😄: 描述]`). Set
+// names never appear in the placeholder (serializer v4). Event-log serialization pins
 // resolveVision:false so written bytes never change retroactively; a later description arrives as
 // a media_update delta. In context-media mode the actual image bytes additionally travel as
 // interleaved image content blocks anchored to the event's text segment (token-packer.ts,
@@ -11,7 +12,7 @@
 import type { Database } from "bun:sqlite";
 import type { MediaUpdatePayload, MessageEvent } from "../db/message-events.ts";
 
-export const TELEGRAM_SERIALIZER_VERSION = 3;
+export const TELEGRAM_SERIALIZER_VERSION = 4;
 
 export interface MessageRow {
 	chat_id: number;
@@ -66,7 +67,6 @@ export function mediaPlaceholder(db: Database, mediaJson: string, resolveVision 
 	const media = JSON.parse(mediaJson) as {
 		kind: string;
 		sticker_emoji?: string;
-		sticker_set?: string;
 		file_unique_id?: string;
 	};
 	let vision: string | null = null;
@@ -79,8 +79,7 @@ export function mediaPlaceholder(db: Database, mediaJson: string, resolveVision 
 	if (media.kind === "sticker") {
 		const emoji = media.sticker_emoji ?? "";
 		if (vision) return `[sticker${emoji ? " " + emoji : ""}: ${vision}]`;
-		const set = media.sticker_set ? ` set:${media.sticker_set}` : "";
-		return `[sticker${emoji ? " " + emoji : ""}${set}]`;
+		return `[sticker${emoji ? " " + emoji : ""}]`;
 	}
 	if (media.kind === "photo") return vision ? `[图片: ${vision}]` : "[图片]";
 	return `[${media.kind}]`;

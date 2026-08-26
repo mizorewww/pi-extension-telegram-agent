@@ -24,8 +24,12 @@ export function ingestUpdate(
 	update: any,
 	groupPeerId: number,
 	replyBotTargets?: ReadonlyMap<number, string>,
+	/** Vision mode replays persisted descriptions as media_update events; context mode never emits them. */
+	emitMediaUpdates = true,
 ): IngestResult {
-	return db.transaction(() => ingestUpdateTransaction(db, botId, update, groupPeerId, replyBotTargets))();
+	return db.transaction(() =>
+		ingestUpdateTransaction(db, botId, update, groupPeerId, replyBotTargets, emitMediaUpdates),
+	)();
 }
 
 function ingestUpdateTransaction(
@@ -34,6 +38,7 @@ function ingestUpdateTransaction(
 	update: any,
 	groupPeerId: number,
 	replyBotTargets?: ReadonlyMap<number, string>,
+	emitMediaUpdates = true,
 ): IngestResult {
 	const updateId = update.update_id as number;
 
@@ -52,7 +57,9 @@ function ingestUpdateTransaction(
 	const canonical = normalizeMessage(msg, payload.edited ? (msg.edit_date ?? Math.floor(Date.now() / 1000)) : null);
 	recordMedia(db, botId, canonical); // media identity/file_id tracked even for duplicate messages
 
-	const result = payload.edited ? editMessage(db, canonical) : insertMessage(db, botId, canonical);
+	const result = payload.edited
+		? editMessage(db, canonical, emitMediaUpdates)
+		: insertMessage(db, botId, canonical, emitMediaUpdates);
 	if ((result.kind === "inserted" || result.kind === "enriched") && replyBotTargets) {
 		createIngestReplyObligation(db, canonical, replyBotTargets);
 	}
@@ -121,7 +128,7 @@ function recordMedia(db: Database, botId: string, m: CanonicalMessage): void {
 	}
 }
 
-function insertMessage(db: Database, botId: string, m: CanonicalMessage): IngestResult {
+function insertMessage(db: Database, botId: string, m: CanonicalMessage, emitMediaUpdates = true): IngestResult {
 	const res = db
 		.query(
 			`INSERT OR IGNORE INTO messages (
@@ -167,7 +174,10 @@ function insertMessage(db: Database, botId: string, m: CanonicalMessage): Ingest
 		}
 		return { kind: "duplicate", chatId: m.chat_id, messageId: m.message_id };
 	}
-	if (m.media) {
+	if (m.media && emitMediaUpdates) {
+		// Vision-mode replay: a description persisted for this shared media identity joins the
+		// new message as a media_update delta. Context mode attaches image blocks instead and
+		// must never inject description text, so the caller disables this path.
 		const cached = db
 			.query("SELECT json_extract(vision, '$.text') AS text FROM media WHERE file_unique_id = ?")
 			.get(m.media.file_unique_id) as { text: string | null } | null;
@@ -176,7 +186,7 @@ function insertMessage(db: Database, botId: string, m: CanonicalMessage): Ingest
 	return { kind: "inserted", chatId: m.chat_id, messageId: m.message_id, routeVersion: 1 };
 }
 
-function editMessage(db: Database, m: CanonicalMessage): IngestResult {
+function editMessage(db: Database, m: CanonicalMessage, emitMediaUpdates = true): IngestResult {
 	const existing = db
 		.query(
 			"SELECT text, caption, entities, rich_message, date, edit_date FROM messages WHERE chat_id = ? AND message_id = ?",
@@ -191,7 +201,7 @@ function editMessage(db: Database, m: CanonicalMessage): IngestResult {
 	} | null;
 	if (!existing) {
 		// edit arrived for a message we never saw (started mid-history): store as new
-		return insertMessage(db, EDIT_UNKNOWN_BOT_ID, m);
+		return insertMessage(db, EDIT_UNKNOWN_BOT_ID, m, emitMediaUpdates);
 	}
 	// revision history: keep the superseded version, keyed by *its own* time — the original
 	// version uses the message date, an edited version its edit_date. Keying by the incoming
@@ -231,10 +241,15 @@ function editMessage(db: Database, m: CanonicalMessage): IngestResult {
 }
 
 /** Insert a message we just sent via Bot API (send tool). Dedupes against the later poller echo. */
-export function insertSentMessage(db: Database, botId: string, rawMsg: unknown): CanonicalMessage {
+export function insertSentMessage(
+	db: Database,
+	botId: string,
+	rawMsg: unknown,
+	emitMediaUpdates = true,
+): CanonicalMessage {
 	const canonical = normalizeMessage(rawMsg);
 	recordMedia(db, botId, canonical); // don't rely on the poller echo to fill file_id mappings
-	insertMessage(db, botId, canonical);
+	insertMessage(db, botId, canonical, emitMediaUpdates);
 	if (canonical.rich_truncated) {
 		log.warn("telegram_ingest", "rich_parse_truncated", { bot_id: botId, message_id: canonical.message_id });
 	}

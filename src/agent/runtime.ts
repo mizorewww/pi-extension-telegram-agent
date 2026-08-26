@@ -1036,7 +1036,13 @@ export class BotRuntime {
 			try {
 				const raw = await this.api.sendSticker(chatId, stickerFileId, params.reply_to);
 				try {
-					const canonical = await persistSentMessageWithRetry(this.db, this.bot.id, raw, "sticker");
+					const canonical = await persistSentMessageWithRetry(
+						this.db,
+						this.bot.id,
+						raw,
+						"sticker",
+						this.config.media.mode === "vision",
+					);
 					await finishCommittedComponent("sticker", raw, canonical.message_id);
 				} catch (error) {
 					if (!(error instanceof SentMessagePersistenceError)) throw error;

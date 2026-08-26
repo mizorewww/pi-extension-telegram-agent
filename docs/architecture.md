@@ -55,7 +55,7 @@
 
 - 每 bot 一个 `createAgentSession()`，各自拥有SessionManager和DefaultResourceLoader；整个daemon只创建一个Pi `ModelRuntime`。shared runtime通过Pi原生`createAgentSessionServices()`加载用户级已安装provider extension的catalog/auth/cost registration，但以untrusted project scope排除项目extension；bot session仍只加载本项目固定hidden extensions与tools。各session绑定解析后的provider/model/reasoning/cache retention。shared runtime在pid lock后、任何Telegram调用前刷新被选中的extension provider并预检全部聊天、compaction与启用的vision模型；`media.mode: "context"`时每个聊天模型的catalog `input`还必须包含image——上下文媒体以image内容块直接交给主模型，不支持会把所有媒体静默降级为文本占位——否则按`image_input_unsupported` fail fast（默认vision模式无此要求）。live refresh失败可继续使用插件baked/persisted catalog，但模型缺失、认证缺失或不支持reasoning仍fail fast。Pi SDK会静默clamp不支持的档位，本项目禁止这种requested/effective分叉；认证完全由Pi auth store提供。
 - runtime在打开session前计算完整context fingerprint（Pi/provider/api/model/reasoning/cache retention/schema/shared protocol/persona/serializer/compaction/catalog snapshot/extensions/tools）。manifest fingerprint与session文件都匹配才resume；否则保留旧文件、创建新session、推进epoch并清当前visibility。
-- 固定hidden extension顺序为`tg-context → tg-compaction → tg-cache-observer → tg-assistant-persistence`。shared protocol是system prompt首段，persona随后，identity + format sticker catalog block 在末尾。主模型有效context window = min(Pi catalog `contextWindow`, 顶层 `context_window`，默认 65,536)；compaction 触发点 = window − max(16,384, window − compaction_threshold)，threshold 超过 context_window − 16,384 会被配置校验拒绝；压缩后保留最近 `compaction_keep_recent` token 原文（单位是 token：缺省 1 token 实际不保留完整 turn、只剩摘要；生产推荐 20,000）。
+- 固定hidden extension顺序为`tg-context → tg-compaction → tg-cache-observer → tg-assistant-persistence`。shared protocol是system prompt首段，persona随后，sticker catalog block（`s<id>: <emoji> <描述>` 行）在末尾。主模型有效context window = min(Pi catalog `contextWindow`, 顶层 `context_window`，默认 65,536)；compaction 触发点 = window − max(16,384, window − compaction_threshold)，threshold 超过 context_window − 16,384 会被配置校验拒绝；压缩后保留最近 `compaction_keep_recent` token 原文（单位是 token：缺省 1 token 实际不保留完整 turn、只剩摘要；生产推荐 20,000）。
 - 触发/flush 是 BotRuntime 串行状态机：`idle → flushing → idle`。在途trigger只合并为`pendingTrigger`；shutdown最多等待30秒。每轮从`message_events`按cursor做有界索引读取，随后按`media.mode`分流媒体准备（见「媒体模式」）：vision模式对有描述缺口的媒体做有界lazy vision（新描述以`media_update` event追加入队，同轮按新high-water重扫一次使本批立即看到描述）；context模式经`ensureBatchContextMedia`为本批有图媒体准备派生图片（只下载+转码，零LLM调用）。再用保守token估算打包成`telegram_context_v2` custom message（details version 4，`blocks`保存text|image交错；context模式每张图片固定计1,100 token）。Pi 的`sendCustomMessage(triggerTurn)`会在promise返回前执行完整provider/tool turn，因此本批完整打包的message id先获得turn-local内存可见性，使同轮`send.reply_to`可通过preflight；session提交失败则从structured entries恢复。只有session持久化成功或startup reconcile证明entry存在后才推进durable cursor/visibility。
 - 群消息、edit、metadata与media completion（vision模式）使用固定紧凑grammar追加；写入session的message entry字节永不重算——vision描述以`[media_update #id] [图片: 描述]` delta追加，context模式准备好的图片作为image内容块交错在所属消息位置。recent sticker候选独立存进structured details，provider只在最后一个Telegram batch后投影一次。恢复和compaction只读structured details，不从文本正则反推identity。成功compaction只替换visibility与epoch，业务cursor永不回退；visibility commit之后同步运行一次最多256项的本地媒体回收observer，observer失败不会回滚compaction。
 - tools 固定为 `send`、`search`、`run_js`，禁用 coding agent 默认文件工具。`src/agent/tools.ts` 是 provider-facing 用法唯一权威；persona/protocol 不复制参数。`send(message?,sticker?,reply_to?)` 是唯一公开通道，`message` 为自然Markdown；本地仅映射bold/italic/strike/code/public link/heading/list/blockquote/simple table等固定子集，不启用HTML/MarkdownV2 parser或远程图片。完整成功返回固定 `ok`，远端 committed/partial/unknown 的退化路径返回固定 `no_retry`，两者都用 `terminate:true` 阻止 follow-up provider call，sent ids 只留本地 details/event。
@@ -123,7 +123,7 @@ daemon启动只读检查`ffmpeg`与`ffprobe`；缺失任一工具且当前模式
 - 缺`ffmpeg`/`ffprobe`时，视频链路在Telegram下载和provider调用之前立即返回`video_transcoder_unavailable`，不持久化terminal vision cache；static image vision不受影响。
 - production vision event只含kind、frames、providerCalled、source/converted bytes bucket、latency、input/output/reasoning token、cost与outcome；不含media identity/path/prompt/response。deployment scheduler是默认并发2的单FIFO门，每轮foreground最多`vision.foreground_media_limit`（默认2）。图片只在provider调用时占scheduler；视频在下载前占用同一个deployment-wide slot，直到抽帧与单次provider调用结束，因此所有bot合计最多同时运行`vision.concurrency`条视频流水线。direct reply媒体优先；失败或unsupported使用确定性fallback。
 - foreground vision的runtime可以与最先收到Telegram update的bot不同；本地媒体层必须复用正确接收bot的下载能力，只有所有已配置bot都没有该media mapping时才返回`file_id_unavailable`。这不增加provider call、retry或等待第二个poller。
-- 新的非空描述持久化后追加唯一`media_update` event；已经写入session的message entry不重算、不重写。固定 sticker catalog 不做 vision 回填，其 identity + format snapshot 只参与 fingerprint。
+- 新的非空描述持久化后追加唯一`media_update` event；已经写入session的message entry不重算、不重写。固定 sticker catalog 不做 vision 回填，但已持久化的描述会渲染进 catalog 行并参与 fingerprint（描述落地即开新 epoch）。
 - 新的非空描述成功写入 DB 后，`ensureVision` 只发布一次 `(fileUniqueId,text)`；cache hit、unsupported、空结果与失败不发布。background catalog 与 lazy batch 共用同一 in-flight promise，因此 UI transport 不增加 vision provider call。
 - `MsgItem.fileUniqueId` 与 additive `vision_update` 经 daemon IPC 广播给所有 live transcript；单bot filter只过滤LOCAL/usage，不过滤共享群消息及其视觉描述。旧 client 可忽略新字段/帧。snapshot/history 仍从同一 `media.vision` 读取，provider serialization 不变。
 - timeline 以 256-entry / 10-minute map 有界缓存乱序 update；message/live/history 到达时按 `fileUniqueId` 合并。已显示消息收到新描述时，feed 更新所有匹配 item 并用 Pi component tree 原位 rebuild，不追加 session entry；重复 update 幂等。
@@ -131,7 +131,7 @@ daemon启动只读检查`ffmpeg`与`ffprobe`；缺失任一工具且当前模式
 
 ### Context（opt-in）
 
-- 不做任何视觉模型调用；主模型直接收到交错在消息位置的image内容块。媒体准备只做下载+转码，零LLM调用，不生成文字描述。
+- 不做任何视觉模型调用；主模型直接收到交错在消息位置的image内容块。媒体准备只做下载+转码，零LLM调用，不生成文字描述。历史已持久化的 vision 描述同样绝不注入：本模式不产生任何 `media_update` 事件（live 路径只在 vision 模式运行；旧 vision 缓存的 ingest 回放与 bot 自发 sticker 的持久化路径按模式 gate），媒体只以图片块到达模型。
 - 范围：photo与静态sticker（WebP/GIF先走Pi公开`convertToPng()`转PNG，再经`resizeImage`；resize失败保留转换/原图）；视频类按本节开头的共享规则抽帧。
 - 时机与预算：flush打包前`ensureBatchContextMedia`处理本批事件，direct-reply obligation消息优先；每轮最多`media.max_images_per_turn`（默认4，0=完全关闭）个媒体身份、`media.download_concurrency`（默认2）并发。同一identity跨bot只准备一次（`dedupeInFlight`合并in-flight，`media.context_files`命中直接复用）。准备失败记`agent_events` error（`stage=context_media`），该消息仍以纯文本占位进上下文，失败是transient，后续轮次重试。准备媒体的runtime bot可以与最先收到update的bot不同：本地媒体层复用任一拥有该media mapping的已配置bot的下载能力，不增加provider call或等待第二个poller。
 - 派生文件：`data/media/`下`<sha256(fileUniqueId#ctx)>.png|jpg`，视频为`<sha256(fileUniqueId#frameN)>.jpg`（0600临时文件后rename）；DB `media.context_files`存JSON `[{name,mime}]`，与source同属media lifecycle回收（见上节）。
@@ -142,16 +142,16 @@ daemon启动只读检查`ffmpeg`与`ffprobe`；缺失任一工具且当前模式
 ## Sticker 可发送性
 
 - `media.file_unique_id` / `short_id` 是共享身份；`media_file_ids(bot_id,file_id,file_unique_id)` 才是 bot-specific 可发送能力。
-- catalog block 只用当前 bot mapping 过滤后的可发送 sticker 构建；set name 不能证明可发送。固定 catalog 每行包含 set + `static|animated|video` + emoji + short_id，按 set 名 + rowid 排序，上限 `STICKER_CATALOG_MAX` 条，完整进入 stable prefix。Telegram `is_animated` / `is_video` 归一化为 MIME metadata 并进入 catalog fingerprint。
-- runtime 不恢复旧的全库语义 top-K；它只从当前 generation 真正 visible 的消息与本轮新 visible 消息中选最近 8 个不同的用户 sticker，再按当前 bot mapping 过滤，并标注格式。候选块严格追加在本轮消息 suffix 最后，预算不足整体省略；历史 sticker 的 short id 按 `s<media.rowid>` 惰性补齐。
+- catalog block 只用当前 bot mapping 过滤后的可发送 sticker 构建；set name 不能证明可发送。固定 catalog 每行为 `s<short_id>: <emoji> <描述>`（描述为持久化 vision 文本，缺失时逐级降级为 `s<short_id>: <emoji>`、`s<short_id>`），按 set 名 + rowid 排序，set 名与 format 不进入模型可见文本；上限 `STICKER_CATALOG_MAX` 条，完整进入 stable prefix。catalog snapshot hash 覆盖 short_id + emoji + 描述文本，任一变化开新 epoch。
+- runtime 不恢复旧的全库语义 top-K；它只从当前 generation 真正 visible 的消息与本轮新 visible 消息中选最近 8 个不同的用户 sticker，再按当前 bot mapping 过滤，行格式与固定 catalog 一致（`s<id>: <emoji> <描述>`）。候选块严格追加在本轮消息 suffix 最后，预算不足整体省略；历史 sticker 的 short id 按 `s<media.rowid>` 惰性补齐。
 - `sendSticker` 直接使用当前 bot mapping 的 Telegram `file_id`，同一路径支持 `.WEBP` static、`.TGS` animated 与 `.WEBM` video sticker；不下载重传，也不跨 bot 混用 file id。
 - `send` tool 在任何 network call 前再次用同一 mapping 做 preflight；若已提交的 short id 缺 mapping，记录 `candidate_invariant`，不会先发文字再失败。
 - catalog 启动日志给出fetched/catalog/sendable/missing_file_id；缺mapping行不进入 catalog block。short id仍可由本地send preflight解析。
 
 ## Provider context flow
 
-- 稳定prefix：共享群聊protocol先于persona，末尾是 identity + format sticker catalog block，之后是固定顺序tool name/description/parameter schema。
-- 动态suffix：有界immutable event batch（context模式下图片以image块交错在消息位置；vision模式描述以`media_update` delta追加）、direct-address obligation与tool outputs只追加；最近上下文 sticker 候选是本轮 event projection 后的最终有界块（vision模式携带持久化描述，context模式候选本身identity-only、图片已在上下文）。
+- 稳定prefix：共享群聊protocol先于persona，末尾是 sticker catalog block（`s<id>: <emoji> <描述>` 行），之后是固定顺序tool name/description/parameter schema。
+- 动态suffix：有界immutable event batch（context模式下图片以image块交错在消息位置，不产生 `media_update`；vision模式描述以`media_update` delta追加）、direct-address obligation与tool outputs只追加；最近上下文 sticker 候选是本轮 event projection 后的最终有界块（与目录同一行语法，携带已持久化描述；context 模式图片本身已在上下文）。
 - `bot_cursors`保证业务消费单调；`bot_visible_messages`只表示当前generation真实可见的完整消息。两者不混用。
 - 成功compaction替换visible refs并开启新epoch但不改cursor；完整fingerprint不匹配则在restore前建立新session/epoch。
 - payload observer只持久化deployment-local HMAC和首个差异位置；不保存provider plaintext。

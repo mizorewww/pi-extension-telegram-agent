@@ -54,7 +54,7 @@ export const TOOL_DEFS = [
 			sticker: Type.Optional(
 				Type.String({
 					description:
-						"可选 static、animated 或 video 贴纸；只能填 system prompt 的 Sticker 目录或最新 Available stickers (recent context) 中列出的 short_id，不得编造。",
+						"可选 static、animated 或 video 贴纸；只能填 system prompt 的 Sticker 目录或最新「可发 sticker（近期上下文）」中列出的 short_id，不得编造。",
 				}),
 			),
 			reply_to: Type.Optional(
