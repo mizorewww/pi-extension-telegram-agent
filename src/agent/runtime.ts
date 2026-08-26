@@ -1303,6 +1303,9 @@ export class BotRuntime {
 		const stickerCandidateTokens = stickerCandidates ? estimateProviderTokensUpperBound(`\n\n${stickerCandidates}`) : 0;
 		const boundedStickerCandidates =
 			stickerCandidates && packed.estimatedTokens + stickerCandidateTokens <= suffixBudget ? stickerCandidates : "";
+		const boundedStickerCandidateTokens = boundedStickerCandidates
+			? estimateProviderTokensUpperBound(`\n\n${boundedStickerCandidates}`)
+			: 0;
 		const providerText = appendStickerCandidateSuffix(packed.text, boundedStickerCandidates);
 
 		const selectedIds = new Set(packed.visibleMessageIds);
@@ -1325,7 +1328,7 @@ export class BotRuntime {
 		this.currentTriggerMessageId = packed.events.at(-1)?.messageId ?? this.currentTriggerMessageId;
 		this.pendingInputMetrics = {
 			inputEvents: packed.events.length,
-			estimatedTokens: packed.estimatedTokens + stickerCandidateTokens,
+			estimatedTokens: packed.estimatedTokens + boundedStickerCandidateTokens,
 			rowsScanned,
 			visionCalls: this.pendingInputMetrics.visionCalls,
 			imagesAttached: packed.imagesAttached,
