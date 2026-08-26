@@ -1,6 +1,7 @@
 import { COMPACTION_SUMMARY_PREFIX } from "@earendil-works/pi-agent-core";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { createHmac } from "node:crypto";
+import { CONTEXT_IMAGE_TOKEN_ESTIMATE } from "../token-packer.ts";
 
 export interface ProviderPayloadObservation {
 	systemHash: string;
@@ -21,7 +22,22 @@ export interface ProviderPayloadObservation {
 // Diagnostic estimate for telemetry only; the hard budget upper bound is
 // estimateProviderTokensUpperBound in ../token-packer.ts (kept separate: different semantics).
 function tokenEstimate(value: unknown): number {
+	// Image content parts carry base64 data URLs: raw byte size would dwarf every text
+	// segment and collapse the scaled system/tools breakdown to zero, so charge the same
+	// flat per-image budget the packer uses.
+	if (isImageContentPart(value)) return CONTEXT_IMAGE_TOKEN_ESTIMATE;
+	if (Array.isArray(value)) return value.reduce<number>((sum, entry) => sum + tokenEstimate(entry), 0);
+	if (value && typeof value === "object") {
+		return Object.values(value).reduce<number>((sum, entry) => sum + tokenEstimate(entry), 0);
+	}
 	return Math.max(0, Math.round(Buffer.byteLength(canonicalJson(value), "utf8") / 2));
+}
+
+// Pi serializes images as image_url (chat completions) or input_image (responses) parts.
+function isImageContentPart(value: unknown): boolean {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const type = (value as Record<string, unknown>).type;
+	return type === "image_url" || type === "input_image";
 }
 
 function containsCompactionSummary(value: unknown): boolean {

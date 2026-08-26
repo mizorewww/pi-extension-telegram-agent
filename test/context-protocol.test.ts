@@ -23,6 +23,8 @@ import {
 	observeProviderPayload,
 	projectTelegramContext,
 } from "../src/agent/extensions/index.ts";
+import { CONTEXT_IMAGE_TOKEN_ESTIMATE } from "../src/agent/token-packer.ts";
+import { fitContextBreakdown } from "../src/observability/usage.ts";
 
 function fingerprintInput(): ContextFingerprintInput {
 	return {
@@ -213,6 +215,36 @@ describe("Pi context protocol", () => {
 		expect(changed.firstDivergentMessageIndex).toBe(0);
 		expect(changed.firstDivergentByteOffset).toBeGreaterThan(0);
 		expect(JSON.stringify(changed)).not.toContain("changed");
+	});
+
+	test("image content parts are charged a flat estimate, never their base64 byte size", () => {
+		// Regression: context-mode payloads carry data-URL images; counting raw base64 bytes
+		// inflated the messages estimate ~1000x and fitContextBreakdown then scaled the
+		// system/tools breakdown to zero (Status panel showed both as gone).
+		const base64 = "A".repeat(400_000);
+		const observation = observeProviderPayload(
+			{
+				model: "m",
+				tools: [{ name: "send", parameters: { type: "object" } }],
+				messages: [
+					{ role: "system", content: "protocol" },
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "[图片]" },
+							{ type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64}` } },
+						],
+					},
+				],
+			},
+			"local-hmac-key",
+		);
+		expect(observation.tokenEstimate.messages).toBeLessThan(CONTEXT_IMAGE_TOKEN_ESTIMATE + 64);
+		expect(observation.tokenEstimate.messages).toBeGreaterThanOrEqual(CONTEXT_IMAGE_TOKEN_ESTIMATE);
+		// The scaled breakdown must keep system/tools visible next to an image-bearing turn.
+		const fitted = fitContextBreakdown(observation.tokenEstimate, 20_000);
+		expect(fitted.system).toBeGreaterThan(0);
+		expect(fitted.messages).toBeGreaterThan(fitted.system);
 	});
 
 	test("estimates cache reuse only for an exact observed payload prefix", () => {
