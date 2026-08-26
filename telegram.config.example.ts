@@ -14,6 +14,8 @@ export default defineConfig({
 	provider: "openai-codex",
 	model: "gpt-5.6-luna",
 	// Thinking level: off / minimal / low / medium / high. Defaults to off.
+	// Non-off levels only take effect when the model is registered with reasoning: true
+	// in ~/.pi/agent/models.json — otherwise Pi clamps any level back to off.
 	reasoning_effort: "off",
 	// Provider prefix cache retention: none / short / long. "short" is the cheapest choice.
 	cache_retention: "short",
