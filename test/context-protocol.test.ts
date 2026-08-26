@@ -245,6 +245,25 @@ describe("Pi context protocol", () => {
 		const fitted = fitContextBreakdown(observation.tokenEstimate, 20_000);
 		expect(fitted.system).toBeGreaterThan(0);
 		expect(fitted.messages).toBeGreaterThan(fitted.system);
+
+		// Anthropic messages API serializes images as image + base64 source parts.
+		const anthropic = observeProviderPayload(
+			{
+				model: "m",
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "[图片]" },
+							{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64 } },
+						],
+					},
+				],
+			},
+			"local-hmac-key",
+		);
+		expect(anthropic.tokenEstimate.messages).toBeLessThan(CONTEXT_IMAGE_TOKEN_ESTIMATE + 64);
+		expect(anthropic.tokenEstimate.messages).toBeGreaterThanOrEqual(CONTEXT_IMAGE_TOKEN_ESTIMATE);
 	});
 
 	test("estimates cache reuse only for an exact observed payload prefix", () => {

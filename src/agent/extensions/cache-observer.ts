@@ -33,11 +33,20 @@ function tokenEstimate(value: unknown): number {
 	return Math.max(0, Math.round(Buffer.byteLength(canonicalJson(value), "utf8") / 2));
 }
 
-// Pi serializes images as image_url (chat completions) or input_image (responses) parts.
+// Pi serializes images as image_url (chat completions), input_image (responses), or
+// image + base64 source (Anthropic messages) parts.
 function isImageContentPart(value: unknown): boolean {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const type = (value as Record<string, unknown>).type;
-	return type === "image_url" || type === "input_image";
+	const record = value as Record<string, unknown>;
+	if (record.type === "image_url" || record.type === "input_image") return true;
+	if (record.type !== "image") return false;
+	const source = record.source;
+	return (
+		source != null &&
+		typeof source === "object" &&
+		!Array.isArray(source) &&
+		typeof (source as Record<string, unknown>).data === "string"
+	);
 }
 
 function containsCompactionSummary(value: unknown): boolean {
