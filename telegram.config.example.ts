@@ -34,6 +34,13 @@ export default defineConfig({
 	compaction_threshold: 32_768, // compact early for underestimated CJK text and context images
 	compaction_keep_recent: 20_000, // token budget kept verbatim after compaction (1 token keeps nothing; ~20K ≈ 1-2 turns)
 	sampling_cooldown_ms: 2_000, // min interval between two unprompted replies per bot
+	// Per-attempt provider call timeout in ms: a wedged upstream (no response head or
+	// idle stream) aborts after this budget, then retries with exponential backoff
+	// (10s/20s/40s …, capped at 60s) up to `provider_retries` extra attempts. When the
+	// budget is exhausted the turn ends with an error instead of pinning the bot busy.
+	// Defaults: 300_000 / 2. Bot-level overrides accepted per bot.
+	provider_timeout_ms: 300_000,
+	provider_retries: 2,
 	max_suffix_tokens: 12_000, // cap on new-message tokens attached per provider call
 	max_message_tokens: 4_096, // per-message token cap
 

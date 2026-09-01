@@ -72,6 +72,7 @@ import type { RoutingTrigger, TriggerResult, TriggerSource } from "./router.ts";
 import type { AgentStreamFrame, RuntimeControlSnapshot, UsageRun } from "../ipc.ts";
 import { consumedControlMessageIds } from "../telegram/control-command.ts";
 import { classifyPiProviderFailure } from "./model-runtime.ts";
+import { PROVIDER_RETRY_BASE_MS, PROVIDER_RETRY_MAX_BACKOFF_MS, guardProviderCall } from "./provider-guard.ts";
 import {
 	commitConsumedContext,
 	addVisibleMessageIds,
@@ -471,7 +472,30 @@ export class BotRuntime {
 		this.session = session;
 		const streamFunction = session.agent.streamFunction;
 		session.agent.streamFunction = (requestModel, context, options) =>
-			streamFunction(requestModel, context, { ...options, cacheRetention: this.bot.cacheRetention });
+			guardProviderCall(
+				(signal) =>
+					streamFunction(requestModel, context, {
+						...options,
+						signal,
+						cacheRetention: this.bot.cacheRetention,
+						timeoutMs: this.bot.providerTimeoutMs,
+					}),
+				requestModel,
+				options?.signal,
+				{
+					timeoutMs: this.bot.providerTimeoutMs,
+					maxRetries: this.bot.providerRetries,
+					baseBackoffMs: PROVIDER_RETRY_BASE_MS,
+					maxBackoffMs: PROVIDER_RETRY_MAX_BACKOFF_MS,
+					onRetry: (attempt, delayMs) =>
+						log.warn("agent_runtime", "provider_retry_scheduled", {
+							bot_id: this.bot.id,
+							attempt,
+							delay_ms: delayMs,
+							timeout_ms: this.bot.providerTimeoutMs,
+						}),
+				},
+			);
 		const sessionFile = session.sessionFile;
 		if (!sessionFile) throw new Error(`persistent session file unavailable for bot ${this.bot.id}`);
 		setSessionManifest(this.db, {

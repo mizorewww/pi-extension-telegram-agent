@@ -29,6 +29,8 @@ function makeBot(): BotConfig {
 		compactionKeepRecent: 1,
 		compactionModel: "test/compaction:off",
 		cacheRetention: "short",
+		providerTimeoutMs: 300_000,
+		providerRetries: 2,
 		maxSuffixTokens: 512,
 		maxMessageTokens: 4096,
 		tools: { send: true, search: false, runJs: false },

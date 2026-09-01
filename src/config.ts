@@ -80,6 +80,10 @@ export interface TelegramBotConfigInput {
 	compaction_keep_recent?: number;
 	/** Cheap task model used only for compaction: provider/model:effort. */
 	compaction_model?: string;
+	/** Per-attempt provider call timeout in ms before the request is aborted and retried (exponential backoff). */
+	provider_timeout_ms?: number;
+	/** Extra provider attempts after a timeout, backed off exponentially (0 = no retry). */
+	provider_retries?: number;
 	cache_retention?: "none" | "short" | "long";
 	max_suffix_tokens?: number;
 	max_message_tokens?: number;
@@ -104,6 +108,8 @@ export interface TelegramConfigInput {
 	compaction_keep_recent?: number;
 	compaction_model?: string;
 	cache_retention?: "none" | "short" | "long";
+	provider_timeout_ms?: number;
+	provider_retries?: number;
 	max_suffix_tokens?: number;
 	max_message_tokens?: number;
 	sampling_cooldown_ms?: number;
@@ -153,6 +159,10 @@ export interface BotConfig {
 	compactionKeepRecent: number;
 	compactionModel: string;
 	cacheRetention: "none" | "short" | "long";
+	/** Per-attempt provider call timeout in ms (abort + exponential-retry on timeout). */
+	providerTimeoutMs: number;
+	/** Extra provider attempts after a timeout (exponential backoff; 0 disables retry). */
+	providerRetries: number;
 	maxSuffixTokens: number;
 	maxMessageTokens: number;
 	tools: BotToolsConfig;
@@ -239,6 +249,8 @@ export interface RawBotConfig {
 	compaction_keep_recent?: unknown;
 	compaction_model?: unknown;
 	cache_retention?: unknown;
+	provider_timeout_ms?: unknown;
+	provider_retries?: unknown;
 	max_suffix_tokens?: unknown;
 	max_message_tokens?: unknown;
 	tools?: unknown;
@@ -259,6 +271,8 @@ export interface RawConfig {
 	compaction_keep_recent?: unknown;
 	compaction_model?: unknown;
 	cache_retention?: unknown;
+	provider_timeout_ms?: unknown;
+	provider_retries?: unknown;
 	max_suffix_tokens?: unknown;
 	max_message_tokens?: unknown;
 	sampling_cooldown_ms?: unknown;
@@ -406,6 +420,12 @@ export function loadBotConfig(rootDir: string, env: Record<string, string>, conf
 				`[config] ${at}.cache_retention: expected none, short, or long, got ${JSON.stringify(b.cache_retention)}`,
 			);
 		}
+		for (const key of ["provider_timeout_ms", "provider_retries"] as const) {
+			const v = b[key];
+			if (v !== undefined && (typeof v !== "number" || !Number.isFinite(v) || v < 0)) {
+				errors.push(`[config] ${at}.${key}: expected finite number >= 0, got ${JSON.stringify(v)}`);
+			}
+		}
 		for (const key of [
 			"compaction_threshold",
 			"compaction_keep_recent",
@@ -524,6 +544,12 @@ export function loadBotConfig(rootDir: string, env: Record<string, string>, conf
 		errors.push(
 			`[config] sampling_cooldown_ms: expected finite number >= 0, got ${JSON.stringify(raw.sampling_cooldown_ms)}`,
 		);
+	}
+	for (const key of ["provider_timeout_ms", "provider_retries"] as const) {
+		const v = raw[key];
+		if (v !== undefined && (typeof v !== "number" || !Number.isFinite(v) || v < 0)) {
+			errors.push(`[config] ${key}: expected finite number >= 0, got ${JSON.stringify(v)}`);
+		}
 	}
 	if (raw.telegram_admins !== undefined) {
 		if (!Array.isArray(raw.telegram_admins)) {
@@ -738,6 +764,8 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 	const defaultMaxSuffixTokens = num("max_suffix_tokens", 12_000, 512, Number.MAX_SAFE_INTEGER);
 	const defaultMaxMessageTokens = num("max_message_tokens", 4_096, 128, Number.MAX_SAFE_INTEGER);
 	const defaultSamplingCooldown = num("sampling_cooldown_ms", 2000, 0, Number.MAX_SAFE_INTEGER);
+	const defaultProviderTimeoutMs = num("provider_timeout_ms", 300_000, 1_000, 3_600_000);
+	const defaultProviderRetries = num("provider_retries", 2, 0, 5);
 	const botList = rawBots;
 	const telegramAdmins = Array.isArray(raw.telegram_admins)
 		? raw.telegram_admins.map((value) => normalizeTelegramAdmin(value)!)
@@ -795,6 +823,8 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 			cacheRetention: (["none", "short", "long"] as const).includes(b.cache_retention as never)
 				? (b.cache_retention as "none" | "short" | "long")
 				: defaultCacheRetention,
+			providerTimeoutMs: typeof b.provider_timeout_ms === "number" ? b.provider_timeout_ms : defaultProviderTimeoutMs,
+			providerRetries: typeof b.provider_retries === "number" ? b.provider_retries : defaultProviderRetries,
 			maxSuffixTokens: typeof b.max_suffix_tokens === "number" ? b.max_suffix_tokens : defaultMaxSuffixTokens,
 			maxMessageTokens: typeof b.max_message_tokens === "number" ? b.max_message_tokens : defaultMaxMessageTokens,
 			tools: {
