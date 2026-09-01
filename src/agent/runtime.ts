@@ -427,6 +427,7 @@ export class BotRuntime {
 				this.config.media.mode === "context"
 					? createContextImageResolver(join(this.config.dataDir, "media"))
 					: undefined,
+				this.config.media.maxImagesPerTurn,
 			),
 			makeTelegramCompactionExtension((event) => this.handleBeforeCompact(event)),
 			makeCachePayloadObserverExtension(payloadKey, (observation) => {

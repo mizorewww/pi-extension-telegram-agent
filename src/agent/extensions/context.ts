@@ -104,10 +104,27 @@ export type TelegramContextImageResolver = (ref: { name: string; mime: string })
 export function projectTelegramContext(
 	messages: AgentMessage[],
 	resolveImage?: TelegramContextImageResolver,
+	maxImages = 4,
 ): AgentMessage[] {
 	const lastTelegramContext = messages.findLastIndex(
 		(message) => message.role === "custom" && message.customType === TELEGRAM_CONTEXT_TYPE,
 	);
+	// Global per-call image budget: historical context messages keep their images only
+	// while the budget lasts, newest first. Older images degrade to their text-only
+	// placeholder (providerText already carries the [图片] marker), so a photo-heavy
+	// group cannot balloon the provider payload into tens of MB of base64.
+	const keptImages = new Map<number, number>();
+	let budget = maxImages;
+	for (let index = messages.length - 1; index >= 0 && budget > 0; index--) {
+		const message = messages[index];
+		if (message.role !== "custom" || message.customType !== TELEGRAM_CONTEXT_TYPE) continue;
+		if (!isTelegramContextDetails(message.details)) continue;
+		const images = message.details.blocks.filter((block) => block.type === "image");
+		if (images.length === 0) continue;
+		const kept = Math.min(images.length, budget);
+		keptImages.set(index, kept);
+		budget -= kept;
+	}
 	return messages.map((message, index) => {
 		if (message.role === "toolResult" && message.toolName === "send") {
 			const details = message.details as { sent?: unknown; outcome?: unknown } | undefined;
@@ -126,19 +143,25 @@ export function projectTelegramContext(
 		if (!isTelegramContextDetails(message.details)) return message;
 		const candidates = index === lastTelegramContext ? message.details.stickerCandidates.trim() : "";
 		const images = message.details.blocks.filter((block) => block.type === "image");
-		if (images.length === 0 || !resolveImage) {
+		const keep = keptImages.get(index) ?? 0;
+		if (images.length === 0 || !resolveImage || keep === 0) {
 			// Text-only projection keeps the historical exact-string bytes.
 			const text = candidates ? `${message.details.providerText}\n\n${candidates}` : message.details.providerText;
 			return { ...message, content: text };
 		}
 		const content: ({ type: "text"; text: string } | ImageContent)[] = [];
+		let attached = 0;
 		for (const block of message.details.blocks) {
 			if (block.type === "text") {
 				content.push({ type: "text", text: block.text });
 				continue;
 			}
+			if (attached >= keep) continue; // budget exhausted: keep the text placeholder, drop the image
 			const resolved = resolveImage({ name: block.name, mime: block.mime });
-			if (resolved) content.push(resolved);
+			if (resolved) {
+				content.push(resolved);
+				attached++;
+			}
 		}
 		if (candidates) {
 			const last = content.at(-1);
@@ -149,12 +172,17 @@ export function projectTelegramContext(
 	});
 }
 
-export function makeTelegramContextExtension(resolveImage?: TelegramContextImageResolver): InlineExtension {
+export function makeTelegramContextExtension(
+	resolveImage?: TelegramContextImageResolver,
+	maxImages = 4,
+): InlineExtension {
 	return {
 		name: "tg-context",
 		hidden: true,
 		factory: (pi) => {
-			pi.on("context", (event) => ({ messages: projectTelegramContext(event.messages, resolveImage) }));
+			pi.on("context", (event) => ({
+				messages: projectTelegramContext(event.messages, resolveImage, maxImages),
+			}));
 		},
 	};
 }

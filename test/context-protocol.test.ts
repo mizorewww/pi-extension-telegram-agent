@@ -432,6 +432,68 @@ describe("Pi context protocol", () => {
 		]);
 	});
 
+	test("historical images degrade to text placeholders beyond the per-call budget", () => {
+		const resolver = (ref: { name: string; mime: string }) => ({
+			type: "image" as const,
+			data: `b64-${ref.name}`,
+			mimeType: ref.mime,
+		});
+		const entry = (consumedSeq: number, providerText: string, imageNames: string[]) =>
+			({
+				role: "custom",
+				customType: "telegram_context_v2",
+				content: "stale-display",
+				display: false,
+				details: {
+					version: 4,
+					consumedSeq,
+					providerText,
+					blocks: [
+						{ type: "text", text: providerText },
+						...imageNames.map((name) => ({ type: "image", name, mime: "image/jpeg" })),
+					],
+					stickerCandidates: "",
+					visibleMessageIds: [consumedSeq],
+					events: [
+						{
+							ingestSeq: consumedSeq,
+							kind: "message",
+							chatId: -1001,
+							messageId: consumedSeq,
+							fullMessageVisible: true,
+						},
+					],
+				},
+				timestamp: consumedSeq,
+			}) as never;
+		// Three historical turns with 2 images each; budget 3 keeps the newest 3 images.
+		const projected = projectTelegramContext(
+			[
+				entry(1, "oldest", ["a1.jpg", "a2.jpg"]),
+				entry(2, "middle", ["b1.jpg", "b2.jpg"]),
+				entry(3, "newest", ["c1.jpg", "c2.jpg"]),
+			],
+			resolver,
+			3,
+		);
+		const oldest = projected[0] as { content: string };
+		const middle = projected[1] as { content: unknown[] };
+		const newest = projected[2] as { content: unknown[] };
+		// Oldest turn is fully text-only: its [图片] placeholder stays in the text.
+		expect(oldest.content).toBe("oldest");
+		// Middle turn keeps 1 of its 2 images (budget: 3 - 2 newest = 1).
+		expect(middle.content).toEqual([
+			{ type: "text", text: "middle" },
+			{ type: "image", data: "b64-b1.jpg", mimeType: "image/jpeg" },
+		]);
+		// Newest turn keeps both images.
+		expect(newest.content).toEqual([
+			{ type: "text", text: "newest" },
+			{ type: "image", data: "b64-c1.jpg", mimeType: "image/jpeg" },
+			{ type: "image", data: "b64-c2.jpg", mimeType: "image/jpeg" },
+		]);
+	});
+
 	test("unpublished assistant prose is absent from the next context", () => {
 		let unpublished = "";
 		let displayed: unknown = null;
