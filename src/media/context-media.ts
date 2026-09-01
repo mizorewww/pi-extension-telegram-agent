@@ -176,8 +176,17 @@ async function ensureContextMediaInner(
 			mimeType = converted.mimeType;
 		}
 		// A resize failure falls back to the converted/original image rather than dropping it.
+		// Context images ride the provider payload as base64, so bound the encoded size hard:
+		// the Pi default (4.5MB) leaves Telegram photos untouched and lets a photo-heavy group
+		// balloon the request body into tens of MB. 1024px / ~200KB keeps content readable
+		// while keeping the per-call payload bounded.
 		const resize = options.resize ?? resizeImage;
-		const resized = await resize(bytes, mimeType).catch(() => null);
+		const resized = await resize(bytes, mimeType, {
+			maxWidth: 1024,
+			maxHeight: 1024,
+			maxBytes: 200_000,
+			jpegQuality: 80,
+		}).catch(() => null);
 		if (resized) {
 			bytes = new Uint8Array(Buffer.from(resized.data, "base64"));
 			mimeType = resized.mimeType;

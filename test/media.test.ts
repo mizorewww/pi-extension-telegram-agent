@@ -197,11 +197,13 @@ describe("cross-bot media acquisition", () => {
 			["B", apiB],
 		]);
 		let resizeCalls = 0;
+		let resizeOptions: unknown = null;
 		const options = {
 			cacheDir,
 			botApis: apis,
-			resize: async (bytes: Uint8Array, mimeType: string) => {
+			resize: async (bytes: Uint8Array, mimeType: string, resizeOpts?: unknown) => {
 				resizeCalls++;
+				resizeOptions = resizeOpts;
 				return {
 					data: Buffer.from(bytes).toString("base64"),
 					mimeType,
@@ -230,6 +232,12 @@ describe("cross-bot media acquisition", () => {
 			expect(existsSync(join(cacheDir, refs?.[0]?.name ?? ""))).toBe(true);
 			expect(calls).toEqual(["A:get:file-a", "A:download:A.jpg"]);
 			expect(resizeCalls).toBe(1);
+			expect(resizeOptions).toEqual({
+				maxWidth: 1024,
+				maxHeight: 1024,
+				maxBytes: 200_000,
+				jpegQuality: 80,
+			});
 			expect(
 				JSON.parse(
 					(

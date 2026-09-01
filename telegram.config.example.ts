@@ -41,6 +41,12 @@ export default defineConfig({
 	// Defaults: 300_000 / 2. Bot-level overrides accepted per bot.
 	provider_timeout_ms: 300_000,
 	provider_retries: 2,
+	// Total on-disk bytes of context images that triggers compaction. Images ship as base64
+	// and provider billing undercounts them by orders of magnitude, so the text-token
+	// threshold alone never fires on a photo-heavy group. Compaction summarizes the
+	// history away and prunes the retained image files, keeping the context light.
+	// Default: 2_000_000 (about 10 resized photos).
+	context_image_budget_bytes: 2_000_000,
 	max_suffix_tokens: 12_000, // cap on new-message tokens attached per provider call
 	max_message_tokens: 4_096, // per-message token cap
 

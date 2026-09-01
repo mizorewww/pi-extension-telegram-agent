@@ -19,6 +19,8 @@ import {
 	NO_SEND_MARKER,
 	TELEGRAM_EXTENSION_ORDER,
 	applyAssistantPersistencePolicy,
+	contextImageBytes,
+	contextImageNames,
 	estimateCacheReadFromPrefix,
 	observeProviderPayload,
 	projectTelegramContext,
@@ -458,5 +460,34 @@ describe("Pi context protocol", () => {
 		]);
 		expect((result as { content: unknown }).content).toEqual([{ type: "text", text: NO_SEND_MARKER }]);
 		expect(JSON.stringify(result)).not.toContain("private draft");
+	});
+
+	test("contextImageBytes sums on-disk bytes of referenced images only", () => {
+		const root = mkdtempSync(join(tmpdir(), "tg-ctx-bytes-"));
+		try {
+			writeFileSync(join(root, "a.jpg"), new Uint8Array(1000));
+			writeFileSync(join(root, "b.jpg"), new Uint8Array(2000));
+			const entry = (consumedSeq: number, imageNames: string[]) => ({
+				type: "custom",
+				customType: "telegram_context_v2",
+				data: {
+					version: 4,
+					consumedSeq,
+					providerText: "text",
+					blocks: [
+						{ type: "text", text: "text" },
+						...imageNames.map((name) => ({ type: "image", name, mime: "image/jpeg" })),
+					],
+					stickerCandidates: "",
+					visibleMessageIds: [consumedSeq],
+					events: [],
+				},
+			});
+			const entries = [entry(1, ["a.jpg", "missing.jpg"]), entry(2, ["b.jpg"]), { type: "user", data: "ignored" }];
+			expect(contextImageBytes(entries, root)).toBe(3000);
+			expect(contextImageNames(entries)).toEqual(new Set(["a.jpg", "missing.jpg", "b.jpg"]));
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });

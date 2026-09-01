@@ -108,6 +108,8 @@ export interface TelegramConfigInput {
 	compaction_keep_recent?: number;
 	compaction_model?: string;
 	cache_retention?: "none" | "short" | "long";
+	/** Total on-disk bytes of context images that triggers compaction (base64 transport cost). */
+	context_image_budget_bytes?: number;
 	provider_timeout_ms?: number;
 	provider_retries?: number;
 	max_suffix_tokens?: number;
@@ -159,6 +161,8 @@ export interface BotConfig {
 	compactionKeepRecent: number;
 	compactionModel: string;
 	cacheRetention: "none" | "short" | "long";
+	/** Total on-disk bytes of context images that triggers compaction (base64 transport cost). */
+	contextImageBudgetBytes: number;
 	/** Per-attempt provider call timeout in ms (abort + exponential-retry on timeout). */
 	providerTimeoutMs: number;
 	/** Extra provider attempts after a timeout (exponential backoff; 0 disables retry). */
@@ -249,6 +253,7 @@ export interface RawBotConfig {
 	compaction_keep_recent?: unknown;
 	compaction_model?: unknown;
 	cache_retention?: unknown;
+	context_image_budget_bytes?: unknown;
 	provider_timeout_ms?: unknown;
 	provider_retries?: unknown;
 	max_suffix_tokens?: unknown;
@@ -271,6 +276,7 @@ export interface RawConfig {
 	compaction_keep_recent?: unknown;
 	compaction_model?: unknown;
 	cache_retention?: unknown;
+	context_image_budget_bytes?: unknown;
 	provider_timeout_ms?: unknown;
 	provider_retries?: unknown;
 	max_suffix_tokens?: unknown;
@@ -420,7 +426,7 @@ export function loadBotConfig(rootDir: string, env: Record<string, string>, conf
 				`[config] ${at}.cache_retention: expected none, short, or long, got ${JSON.stringify(b.cache_retention)}`,
 			);
 		}
-		for (const key of ["provider_timeout_ms", "provider_retries"] as const) {
+		for (const key of ["provider_timeout_ms", "provider_retries", "context_image_budget_bytes"] as const) {
 			const v = b[key];
 			if (v !== undefined && (typeof v !== "number" || !Number.isFinite(v) || v < 0)) {
 				errors.push(`[config] ${at}.${key}: expected finite number >= 0, got ${JSON.stringify(v)}`);
@@ -545,7 +551,7 @@ export function loadBotConfig(rootDir: string, env: Record<string, string>, conf
 			`[config] sampling_cooldown_ms: expected finite number >= 0, got ${JSON.stringify(raw.sampling_cooldown_ms)}`,
 		);
 	}
-	for (const key of ["provider_timeout_ms", "provider_retries"] as const) {
+	for (const key of ["provider_timeout_ms", "provider_retries", "context_image_budget_bytes"] as const) {
 		const v = raw[key];
 		if (v !== undefined && (typeof v !== "number" || !Number.isFinite(v) || v < 0)) {
 			errors.push(`[config] ${key}: expected finite number >= 0, got ${JSON.stringify(v)}`);
@@ -766,6 +772,7 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 	const defaultSamplingCooldown = num("sampling_cooldown_ms", 2000, 0, Number.MAX_SAFE_INTEGER);
 	const defaultProviderTimeoutMs = num("provider_timeout_ms", 300_000, 1_000, 3_600_000);
 	const defaultProviderRetries = num("provider_retries", 2, 0, 5);
+	const defaultContextImageBudgetBytes = num("context_image_budget_bytes", 2_000_000, 100_000, 100_000_000);
 	const botList = rawBots;
 	const telegramAdmins = Array.isArray(raw.telegram_admins)
 		? raw.telegram_admins.map((value) => normalizeTelegramAdmin(value)!)
@@ -825,6 +832,10 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 				: defaultCacheRetention,
 			providerTimeoutMs: typeof b.provider_timeout_ms === "number" ? b.provider_timeout_ms : defaultProviderTimeoutMs,
 			providerRetries: typeof b.provider_retries === "number" ? b.provider_retries : defaultProviderRetries,
+			contextImageBudgetBytes:
+				typeof b.context_image_budget_bytes === "number"
+					? b.context_image_budget_bytes
+					: defaultContextImageBudgetBytes,
 			maxSuffixTokens: typeof b.max_suffix_tokens === "number" ? b.max_suffix_tokens : defaultMaxSuffixTokens,
 			maxMessageTokens: typeof b.max_message_tokens === "number" ? b.max_message_tokens : defaultMaxMessageTokens,
 			tools: {

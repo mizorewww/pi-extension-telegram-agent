@@ -1,6 +1,8 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
+import { statSync } from "node:fs";
+import { join } from "node:path";
 import type { MessageEventKind } from "../../db/message-events.ts";
 import type { ContextMediaImage } from "../../media/context-media.ts";
 import { SEND_NO_RETRY_ACK, SEND_SUCCESS_ACK } from "../tools.ts";
@@ -78,6 +80,49 @@ export function isTelegramContextDetails(value: unknown): value is TelegramConte
 }
 
 /** Assemble provider-bound blocks from packed segments, merging adjacent text. */
+/**
+ * Total on-disk bytes of every image still referenced by Telegram context entries.
+ * This is the real transport cost of the context (base64 payload), which provider
+ * billing undercounts by orders of magnitude. Missing/pruned files cost nothing.
+ */
+export function contextImageBytes(entries: readonly unknown[], mediaDir: string): number {
+	let bytes = 0;
+	for (const entry of entries) {
+		if (typeof entry !== "object" || entry === null) continue;
+		const candidate = entry as { type?: unknown; customType?: unknown; data?: unknown };
+		if (candidate.type !== "custom" || candidate.customType !== TELEGRAM_CONTEXT_TYPE) continue;
+		if (!isTelegramContextDetails(candidate.data)) continue;
+		for (const block of candidate.data.blocks) {
+			if (block.type !== "image") continue;
+			try {
+				bytes += statSync(join(mediaDir, block.name)).size;
+			} catch {
+				// pruned/missing file: it no longer ships, so it costs nothing
+			}
+		}
+	}
+	return bytes;
+}
+
+/**
+ * Names of every image still referenced by Telegram context entries. Used after
+ * compaction to prune the image files (and their DB refs) so the compacted
+ * context stays light: images are summarized away, never re-shipped.
+ */
+export function contextImageNames(entries: readonly unknown[]): Set<string> {
+	const names = new Set<string>();
+	for (const entry of entries) {
+		if (typeof entry !== "object" || entry === null) continue;
+		const candidate = entry as { type?: unknown; customType?: unknown; data?: unknown };
+		if (candidate.type !== "custom" || candidate.customType !== TELEGRAM_CONTEXT_TYPE) continue;
+		if (!isTelegramContextDetails(candidate.data)) continue;
+		for (const block of candidate.data.blocks) {
+			if (block.type === "image") names.add(block.name);
+		}
+	}
+	return names;
+}
+
 export function buildTelegramContextBlocks(
 	segments: readonly { text: string; images: readonly ContextMediaImage[] }[],
 ): TelegramContextBlock[] {
