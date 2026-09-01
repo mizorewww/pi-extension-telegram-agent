@@ -45,8 +45,10 @@ export default defineConfig({
 	// and provider billing undercounts them by orders of magnitude, so the text-token
 	// threshold alone never fires on a photo-heavy group. Compaction summarizes the
 	// history away and prunes the retained image files, keeping the context light.
-	// Default: 2_000_000 (about 10 resized photos).
-	context_image_budget_bytes: 2_000_000,
+	// Default: 10_000_000 (~50 resized photos; Gemini 3 bills a fixed ~532 tokens per
+	// image at medium quality, so 50 images are only ~27K billed tokens — the binding
+	// constraint is transport bytes, not billing).
+	context_image_budget_bytes: 10_000_000,
 	max_suffix_tokens: 12_000, // cap on new-message tokens attached per provider call
 	max_message_tokens: 4_096, // per-message token cap
 

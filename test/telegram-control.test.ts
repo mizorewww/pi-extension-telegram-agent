@@ -114,7 +114,7 @@ describe("Telegram rich control status", () => {
 			cacheRetention: "short",
 			providerTimeoutMs: 300_000,
 			providerRetries: 2,
-			contextImageBudgetBytes: 2_000_000,
+			contextImageBudgetBytes: 10_000_000,
 			maxSuffixTokens: 12_000,
 			maxMessageTokens: 4_096,
 			tools: { send: true, search: false, runJs: false },

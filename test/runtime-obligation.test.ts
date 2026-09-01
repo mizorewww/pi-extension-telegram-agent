@@ -31,7 +31,7 @@ function makeBot(): BotConfig {
 		cacheRetention: "short",
 		providerTimeoutMs: 300_000,
 		providerRetries: 2,
-		contextImageBudgetBytes: 2_000_000,
+		contextImageBudgetBytes: 10_000_000,
 		maxSuffixTokens: 512,
 		maxMessageTokens: 4096,
 		tools: { send: true, search: false, runJs: false },
