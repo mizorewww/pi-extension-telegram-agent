@@ -1454,23 +1454,30 @@ export class BotRuntime {
 	 */
 	private async maybeAutoCompact(): Promise<void> {
 		if (this.stopping || !this.session) return;
-		if (this.running || this.flushing || this.controlCompacting || this.session.isStreaming) return;
-		const usage = this.session.getContextUsage();
-		const piTokens = usage?.tokens ?? 0;
-		const entries = this.session.sessionManager.buildContextEntries();
-		const imageBytes = contextImageBytes(entries, join(this.config.dataDir, "media"));
-		if (piTokens <= this.bot.compactionThreshold && imageBytes <= this.bot.contextImageBudgetBytes) return;
-		log.info("agent_runtime", "auto_compact_triggered", {
-			bot_id: this.bot.id,
-			pi_tokens: piTokens,
-			image_bytes: imageBytes,
-			threshold: this.bot.compactionThreshold,
-			image_budget: this.bot.contextImageBudgetBytes,
-		});
+		// Called from inside flush() after the provider turn settled, so `flushing` is
+		// always true here and must not gate the check (it silently disabled compaction
+		// for image-heavy contexts). `running` is also still true at this point: Pi emits
+		// agent_settled only after agent.prompt() resolves, i.e. after sendCustomMessage
+		// has already returned. The turn itself is over (isStreaming is false), so
+		// compacting is safe.
+		if (this.controlCompacting || this.session.isStreaming) return;
 		try {
+			const usage = this.session.getContextUsage();
+			const piTokens = usage?.tokens ?? 0;
+			const entries = this.session.sessionManager.buildContextEntries?.() ?? [];
+			const imageBytes = contextImageBytes(entries, join(this.config.dataDir, "media"));
+			if (piTokens <= this.bot.compactionThreshold && imageBytes <= this.bot.contextImageBudgetBytes) return;
+			log.info("agent_runtime", "auto_compact_triggered", {
+				bot_id: this.bot.id,
+				pi_tokens: piTokens,
+				image_bytes: imageBytes,
+				threshold: this.bot.compactionThreshold,
+				image_budget: this.bot.contextImageBudgetBytes,
+			});
 			await this.session.compact();
 			this.pruneCompactedImages();
 		} catch (error) {
+			// Estimation or compaction failure must never break the settled flush.
 			log.warn("agent_runtime", "auto_compact_failed", {
 				bot_id: this.bot.id,
 				error: error instanceof Error ? error.message : String(error),
