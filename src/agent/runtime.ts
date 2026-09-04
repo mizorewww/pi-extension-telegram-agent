@@ -1460,7 +1460,14 @@ export class BotRuntime {
 		// agent_settled only after agent.prompt() resolves, i.e. after sendCustomMessage
 		// has already returned. The turn itself is over (isStreaming is false), so
 		// compacting is safe.
-		if (this.controlCompacting || this.session.isStreaming) return;
+		if (this.controlCompacting || this.session.isStreaming) {
+			log.warn("agent_runtime", "auto_compact_skipped", {
+				bot_id: this.bot.id,
+				control_compacting: this.controlCompacting,
+				is_streaming: this.session.isStreaming,
+			});
+			return;
+		}
 		try {
 			const usage = this.session.getContextUsage();
 			const piTokens = usage?.tokens ?? 0;
