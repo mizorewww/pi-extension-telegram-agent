@@ -294,6 +294,7 @@ describe("cross-bot media acquisition", () => {
 			const options = {
 				cacheDir,
 				botApis: apis,
+				videoTranscoder: { ffmpeg: true, ffprobe: true },
 				extractFrames: async () => {
 					extractCalls++;
 					return {
