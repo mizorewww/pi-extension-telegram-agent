@@ -14,7 +14,9 @@
 
 ## CACHE_SCHEMA_VERSION
 
-当前：**17**。
+当前：**18**。
+
+v18 修复压缩输入遗漏：摘要同时接收 Pi 的 `messagesToSummarize` 与被丢弃的 `turnPrefixMessages`，不再遗漏拆分 turn 的前半段。图片压力改由原生 compaction 临时缩小保留窗口，不删除共享文件来改变 provider 内容。system/tools/序列化 grammar 的 golden hash 不变；由于摘要输入语义改变，保守开启新 epoch，旧 session 文件保留，首次请求会有一次冷缓存。
 
 v17 收敛 sticker 的模型可见文本并关闭 context 模式的描述注入。消息行 sticker 占位删掉 ` set:<集合名>` 元数据（serializer v4：有描述 `[sticker 😺: 描述]`，无描述 `[sticker 😺]`，emoji 也缺时 `[sticker]`；图片块或描述已紧随其后，集合名是纯噪音）。sticker 目录块与近期上下文候选统一为 `s<id>: <emoji> <描述>` 行：目录头部精简为 `# Sticker 目录`（发送规则由 send 工具 description 承载），候选头部改为 `可发 sticker（近期上下文）：`，描述沿用持久化 vision 文本（`media.vision` JSON 的 `text`，空白压缩、≤60 字符），缺失时逐级降级为 `s<id>: <emoji>`、`s<id>`；set 名与 format 不再出现在任何模型可见文本；send 工具 sticker 参数描述里的候选块引用同步为新名（tools golden 随 v17 更新）。catalog snapshot hash 纳入描述文本，描述落地即开新 epoch。context 模式不再产生任何 `media_update` 事件：live 路径本就只在 vision 模式运行，旧 vision 缓存的 ingest 回放与 bot 自发 sticker 的持久化路径改为按模式 gate；已持久化的历史事件字节不变，vision 模式行为完全不变。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
 
@@ -144,8 +146,9 @@ Vision 默认关闭；只有显式 `vision.enabled: true` 才会执行。`auxili
 ## Compaction 与 context epoch
 
 - 主模型传给Pi的有效context window为配置的 `context_window`（缺省 65,536，会钳制 Pi catalog 值）；compaction 触发公式为 `contextTokens > contextWindow - reserveTokens`，其中 `reserveTokens = max(16,384, context_window - compaction_threshold)`，所以 threshold 最高生效值为 `context_window - 16,384`（config 校验拒绝超过它的值，避免 requested/effective 静默分叉）。缺省/示例为 65,536/32,768（提前触发，缓冲 Pi 对 CJK token 与上下文图片的估算偏差）；生产可随窗口上调，如 131,072/114,688。`tg-compaction` 用状态导向 prompt 生成不超过800字的摘要，并保留最近 `compaction_keep_recent` token 原文（注意单位是 token 不是 turn：缺省 1 token 连一条消息都装不下，压缩后实际只剩摘要；生产推荐 20,000，约 1-2 个完整 turn 原文）。更早原文不再进入provider，只有摘要仍可见。
-- summary 输入使用 Pi 的 `serializeConversation(convertToLlm(messages))`，因此 Telegram custom message 与 Pi 原生消息遵循同一 provider projection。
-- 空摘要、provider failure 或 abort 会 cancel；cursor、visible refs 与 epoch 均不伪造变化。
+- 图片预算遍历真实 `custom_message.details` 的图片引用；超预算时本次原生 compact 临时采用 `keepRecentTokens=1`，无论成功失败都恢复配置。文件回收只有下述 media lifecycle 一个入口。
+- summary 输入包含 `messagesToSummarize` 和 `turnPrefixMessages`，使用 Pi 的 `serializeConversation(convertToLlm(messages))`，因此 Telegram custom message 与 Pi 原生消息遵循同一 provider projection。
+- 摘要只使用配置的 compaction model，遵守统一 retry 次数、单次完整请求 deadline 和 compaction signal；不切换主模型。空摘要、重试耗尽的 provider failure 或 abort 会 cancel；cursor、visible refs 与 epoch 均不伪造变化。
 - 成功结果的 structured details 保存当前 `consumedSeq` 与 retained `visibleMessageIds`。runtime 用这些 details 替换 visibility、推进 epoch；`consumedSeq` 永不回退。
 - visibility与epoch提交后，provider外observer按所有当前配置bot的visible refs、未消费event与reply obligation，对本地媒体cache做最多256项回收。它清可再生文件、`local_path`与 `context_files` 派生图片，失败不改变compaction结果；startup backfill复用同一引用边界，避免重新下载已回收历史。
 - 媒体回收不修改session、summary、message/event serialization或provider payload，因此不改变cache schema，也不增加LLM call/token；派生图片可按 `context_files` 记录随时重建。

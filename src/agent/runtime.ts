@@ -2,7 +2,7 @@
 // See docs/architecture.md and docs/research.md.
 
 import type { Database } from "bun:sqlite";
-import { readFileSync, mkdirSync, readdirSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, mkdirSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { contentText, retryAssistantCall } from "@earendil-works/pi-ai";
@@ -83,7 +83,6 @@ import {
 	TELEGRAM_CONTEXT_VERSION,
 	TELEGRAM_EXTENSION_ORDER,
 	contextImageBytes,
-	contextImageNames,
 	type ProviderPayloadObservation,
 	type TelegramContextDetails,
 } from "./extensions/index.ts";
@@ -801,7 +800,7 @@ export class BotRuntime {
 	): Promise<
 		{ summary: string; usage: Awaited<ReturnType<ModelRuntime["completeSimple"]>>["usage"] } | { failure: string }
 	> {
-		const conversation = serializeCompactionMessages(prep.messagesToSummarize);
+		const conversation = serializeCompactionMessages([...prep.messagesToSummarize, ...prep.turnPrefixMessages]);
 		const userText =
 			`<conversation>\n${conversation}\n</conversation>\n\n` +
 			(prep.previousSummary
@@ -1155,7 +1154,7 @@ export class BotRuntime {
 			input_events: packed.events.length,
 			provider_calls: this.providerCallsInRun,
 		});
-		await this.maybeAutoCompact();
+		const activeState = contextStateFromEntries(this.session.sessionManager.buildContextEntries(), highWater);
 		const deliveredObligationIds = delivered.map((obligation) => obligation.messageId);
 		if (deliveredObligationIds.length > 0) {
 			this.session.sessionManager.appendCustomEntry(TELEGRAM_CONTEXT_COMMIT_TYPE, {
@@ -1168,9 +1167,11 @@ export class BotRuntime {
 			chatId,
 			consumedSeq: highWater,
 			epoch: this.epoch,
-			visibleMessageIds: packed.visibleMessageIds,
+			visibleMessageIds: [...activeState.visible],
 			deliveredObligationIds,
 		});
+		this.visibleMessageIds = activeState.visible;
+		await this.maybeAutoCompact();
 		for (const obligation of delivered) {
 			this.recordEvent("reply_obligation_delivered", { message_id: obligation.messageId });
 		}
@@ -1212,22 +1213,10 @@ export class BotRuntime {
 		removeReplyObligations(this.db, this.bot.id, [{ chatId, messageId }]);
 	}
 
-	/**
-	 * Compact when the real context cost exceeds the configured threshold. Pi's own
-	 * threshold check only sees provider-billed tokens, so image-heavy contexts never
-	 * compact on their own; this closes that gap after each settled provider turn.
-	 * After a successful compaction the retained images are pruned (files + DB refs):
-	 * they are summarized away and must not keep shipping as base64, otherwise the
-	 * compacted context would immediately re-trip the image budget.
-	 */
+	/** Enforce image transport pressure after the durable batch commit; lifecycle owns file deletion. */
 	private async maybeAutoCompact(): Promise<void> {
 		if (this.stopping || !this.session) return;
-		// Called from inside flush() after the provider turn settled, so `flushing` is
-		// always true here and must not gate the check (it silently disabled compaction
-		// for image-heavy contexts). `running` is also still true at this point: Pi emits
-		// agent_settled only after agent.prompt() resolves, i.e. after sendCustomMessage
-		// has already returned. The turn itself is over (isStreaming is false), so
-		// compacting is safe.
+		// The provider turn has settled, but flush still owns its state until this returns.
 		if (this.controlCompacting || this.session.isStreaming) {
 			log.warn("agent_runtime", "auto_compact_skipped", {
 				bot_id: this.bot.id,
@@ -1239,7 +1228,7 @@ export class BotRuntime {
 		try {
 			const usage = this.session.getContextUsage();
 			const piTokens = usage?.tokens ?? 0;
-			const entries = this.session.sessionManager.buildContextEntries?.() ?? [];
+			const entries = this.session.sessionManager.buildContextEntries();
 			const imageBytes = contextImageBytes(entries, join(this.config.dataDir, "media"));
 			if (piTokens <= this.bot.compactionThreshold && imageBytes <= this.bot.contextImageBudgetBytes) return;
 			log.info("agent_runtime", "auto_compact_triggered", {
@@ -1249,44 +1238,24 @@ export class BotRuntime {
 				threshold: this.bot.compactionThreshold,
 				image_budget: this.bot.contextImageBudgetBytes,
 			});
-			await this.session.compact();
-			this.pruneCompactedImages();
+			const settings = this.session.settingsManager;
+			const keepRecentTokens = settings.getCompactionKeepRecentTokens();
+			const imagePressure = imageBytes > this.bot.contextImageBudgetBytes;
+			// Use Pi's cut-point algorithm to summarize the image-bearing history instead of
+			// deleting shared files behind retained entries. Restore normal retention afterwards.
+			if (imagePressure) settings.applyOverrides({ compaction: { keepRecentTokens: 1 } });
+			try {
+				await this.session.compact();
+			} finally {
+				if (imagePressure) settings.applyOverrides({ compaction: { keepRecentTokens } });
+			}
 		} catch (error) {
 			// Estimation or compaction failure must never break the settled flush.
 			log.warn("agent_runtime", "auto_compact_failed", {
 				bot_id: this.bot.id,
-				error: error instanceof Error ? error.message : String(error),
+				category: errorCategory(error),
 			});
 		}
-	}
-
-	/** Delete image files (and their DB refs) still referenced by the compacted context. */
-	private pruneCompactedImages(): void {
-		const entries = this.session?.sessionManager.buildContextEntries() ?? [];
-		const names = contextImageNames(entries);
-		if (names.size === 0) return;
-		const mediaDir = join(this.config.dataDir, "media");
-		for (const name of names) {
-			try {
-				unlinkSync(join(mediaDir, name));
-			} catch {
-				// already gone
-			}
-		}
-		const rows = this.db
-			.query("SELECT file_unique_id, context_files FROM media WHERE context_files IS NOT NULL")
-			.all() as { file_unique_id: string; context_files: string }[];
-		for (const row of rows) {
-			try {
-				const refs = JSON.parse(row.context_files) as { name?: unknown }[];
-				if (refs.some((ref) => typeof ref.name === "string" && names.has(ref.name))) {
-					this.db.query("UPDATE media SET context_files = NULL WHERE file_unique_id = ?").run(row.file_unique_id);
-				}
-			} catch {
-				// malformed refs: leave as-is
-			}
-		}
-		log.info("agent_runtime", "compaction_images_pruned", { bot_id: this.bot.id, images: names.size });
 	}
 
 	/** Manual compact that never passes instructions and never aborts an active response. */

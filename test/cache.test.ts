@@ -39,7 +39,7 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 17,
+	schemaVersion: 18,
 	systemZhTemplate: "b2f0432b9b7b",
 	systemEnTemplate: "231c26fbb95b",
 	serialize: "68a17d6e5c05",

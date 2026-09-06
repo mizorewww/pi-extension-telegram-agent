@@ -1,10 +1,10 @@
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 // Regression tests for the direct-address delivery guarantee (W1) and the flushLoop
 // teardown race (W2). SHARED_PROTOCOL promises a response whenever a human explicitly
 // @mentions, replies to, or name-keywords the bot; all three reasons must create a
 // durable obligation so a coalesced trigger cannot silently drop the message.
 // In-memory DB + fake session; no daemon, no network.
 
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
@@ -224,7 +224,53 @@ test("a committed send stays terminal when the usage observer fails", async () =
 	expect(creates).toBe(1);
 	expect(db.query("SELECT text FROM messages WHERE message_id=9001").get()).toEqual({ text: "sent" });
 });
-test("compaction propagates cancellation", async () => {
+
+test("post-turn compaction replaces durable and in-memory visibility together", async () => {
+	const { rt, db } = setup();
+	insertMessage(db, 9010, "hello");
+	const session = (rt as any).session;
+	session.getContextUsage = () => ({ tokens: 40000, contextWindow: 65536 });
+	session.compact = async () => {
+		const marker = session.sessionManager.appendCustomEntry("retained_marker", {});
+		session.sessionManager.appendCompaction("summary", marker, 40000, { visibleMessageIds: [] });
+		(rt as any).onCompactionEnd({
+			type: "compaction_end",
+			reason: "manual",
+			aborted: false,
+			result: { details: { visibleMessageIds: [] } },
+		});
+	};
+	rt.trigger("explicit", { reason: "explicit", chatId: CHAT_ID, messageId: 9010 });
+	await (rt as any).flushPromise;
+	expect([...(rt as any).visibleMessageIds]).toEqual([]);
+	expect(db.query("SELECT message_id FROM bot_visible_messages").all()).toEqual([]);
+	expect(obligationCount(db)).toBe(0);
+});
+
+test("Pi compaction during a provider turn cannot resurrect discarded batch IDs", async () => {
+	const { rt, db } = setup();
+	insertMessage(db, 9011, "hello");
+	const session = (rt as any).session;
+	const send = session.sendCustomMessage;
+	session.sendCustomMessage = async (message: unknown) => {
+		await send(message);
+		const marker = session.sessionManager.appendCustomEntry("retained_marker", {});
+		session.sessionManager.appendCompaction("summary", marker, 40000, { visibleMessageIds: [] });
+		(rt as any).onCompactionEnd({
+			type: "compaction_end",
+			reason: "threshold",
+			aborted: false,
+			result: { details: { visibleMessageIds: [] } },
+		});
+	};
+	rt.trigger("explicit", { reason: "explicit", chatId: CHAT_ID, messageId: 9011 });
+	await (rt as any).flushPromise;
+	expect([...(rt as any).visibleMessageIds]).toEqual([]);
+	expect(db.query("SELECT message_id FROM bot_visible_messages").all()).toEqual([]);
+	expect(obligationCount(db)).toBe(0);
+});
+
+test("compaction propagates cancellation and summarizes the discarded split-turn prefix", async () => {
 	const { rt } = setup();
 	const controller = new AbortController();
 	const prep = {
@@ -253,6 +299,46 @@ test("compaction propagates cancellation", async () => {
 	expect(result).toEqual({ failure: "summary generation aborted" });
 	expect(cancelled).toBe(true);
 	expect(requestText).toContain("earlier-message");
+	expect(requestText).toContain("latest-discarded-message");
+});
+
+test("image pressure uses Pi retention and never deletes a retained shared image", async () => {
+	const { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const root = mkdtempSync(join(tmpdir(), "tg-image-pressure-"));
+	const { rt } = setup();
+	try {
+		const mediaDir = join(root, "media");
+		mkdirSync(mediaDir);
+		writeFileSync(join(mediaDir, "shared.jpg"), new Uint8Array(100));
+		(rt as any).config.dataDir = root;
+		(rt as any).bot.contextImageBudgetBytes = 10;
+		const session = (rt as any).session;
+		session.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 20000 } });
+		session.sessionManager.appendCustomMessageEntry("telegram_context_v2", "image", false, {
+			version: 4,
+			consumedSeq: 1,
+			providerText: "image",
+			blocks: [{ type: "image", name: "shared.jpg", mime: "image/jpeg" }],
+			stickerCandidates: "",
+			visibleMessageIds: [1],
+			events: [],
+		});
+		let attempts = 0;
+		session.compact = async () => {
+			attempts++;
+			expect(session.settingsManager.getCompactionKeepRecentTokens()).toBe(1);
+			if (attempts === 2) throw new Error("summary unavailable");
+		};
+		await (rt as any).maybeAutoCompact();
+		await (rt as any).maybeAutoCompact();
+		expect(attempts).toBe(2);
+		expect(session.settingsManager.getCompactionKeepRecentTokens()).toBe(20000);
+		expect(existsSync(join(mediaDir, "shared.jpg"))).toBe(true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("compaction telemetry failure cancels explicitly instead of enabling Pi's default summarizer", async () => {

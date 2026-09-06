@@ -181,6 +181,7 @@ export function commitConsumedContext(
 ): void {
 	const transaction = db.transaction(() => {
 		setConsumedSeq(db, input.botId, input.chatId, input.consumedSeq);
+		db.query("DELETE FROM bot_visible_messages WHERE bot_id = ? AND chat_id = ?").run(input.botId, input.chatId);
 		const insertVisible = db.query(`
 			INSERT OR IGNORE INTO bot_visible_messages
 				(bot_id, chat_id, message_id, context_epoch)

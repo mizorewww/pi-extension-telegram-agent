@@ -11,7 +11,7 @@
   - 每 bot：`id`（`[A-Za-z0-9_-]+`，唯一）、`name`、`token_env`（指向 `.env` 里的 token key）、`persona_path`（绝对路径 / `~` / 相对项目根，可放仓库外）、`routing_p`（Σ≤1），可选覆盖 provider/model/reasoning/cache retention、compaction、12k suffix/4096 message预算、cooldown、`tools`与`sticker_sets`。顶层另有`context_window`（主模型有效上下文上限，同时把`compaction_threshold`压到`context_window − 16384`以内）、`media`（`mode`选`"vision"`默认或`"context"` opt-in；context模式下每次模型调用的图片上限`max_images_per_turn`与下载/抽帧并发`download_concurrency`）、`vision`段（`enabled`默认false、`foreground_media_limit`、`concurrency`，仅vision模式生效）和90/30/365天telemetry/raw/event retention。模型覆盖只是选择，不承载credential。
   - `sampling_cooldown_ms` 默认 2000，可全局设置并由单 bot 覆盖；必须有限且 `>=0`，0 关闭概率冷却。它只影响 probability routing，mention/reply/name 不会被静默吞掉。
   - `provider_timeout_ms` 默认 300000（5 分钟）、`provider_retries` 默认 2（共 3 次尝试），可全局设置并由单 bot 覆盖。单次 provider 调用超过 timeout 即中止请求（abort 信号同时传给 Pi 的 fetch）并按指数退避（Pi 原生策略，10s/20s/40s…）重试；预算耗尽后该 turn 以 error 收尾而非永久卡死。上游长挂（如本地 cliproxy 上游故障）时 bot 自动恢复，无需手动 restart。
-  - `context_image_budget_bytes` 默认 10000000（约 50 张降采样照片），可全局设置并由单 bot 覆盖。上下文图片以 base64 传输，provider 计费 token 严重低估其成本（Gemini 3 按质量档固定计费 ~532 token/张，50 张仅 ~2.7 万 token，128K 窗口装得下；瓶颈是传输字节而非计费），文本阈值永远等不到；图片总字节超过预算即触发压缩。压缩后历史图片进摘要并清理文件与 DB 引用，上下文恢复轻量，不会反复触发。
+  - `context_image_budget_bytes` 默认 10000000，以 active session 实际图片文件字节衡量压力。超限时通过原生 compaction 临时采用最小原文保留窗口；完成后恢复配置。共享文件仅由 media lifecycle 按所有 bot 的引用回收，不保证单次压缩一定回收全部图片。
   - `telegram_admins`：Telegram群内控制白名单，接受正整数user id或规范化`@username`；推荐固定numeric id。缺省/空数组会拒绝所有`compact`/`set`，但不影响公开`help`/`status`。
 - `.env`（`key: value` 冒号格式）：只放项目拥有的secret——bot tokens、`tiny_fish_api_key`、`router_secret`、`gpg_key_passphrase`（仅签名用）。LLM credential由Pi auth store独占。只有至少一个bot启用`tools.search`时才强制要求对应TinyFish key；首配默认关闭search，可在补key后编辑配置开启。
 - 改配置后重启daemon生效（无热重载）；本机persona除公开模板外默认被Git忽略。model/persona/cache policy/tools等cache-visible字段变化会在restore前生成新fingerprint/session/epoch，旧session文件保留但不会错误恢复。
@@ -139,3 +139,9 @@ bun run pi                          # 从项目依赖启动 Pi，自动加载 Te
 - `/tg compose` 报 no connected feed：先 `/tg attach [bot]`，确认 transcript 已收到 snapshot；compose 不会自行启动 daemon
 - Telegram群内mutation报权限不足：检查发送者的canonical numeric user id/`@username`是否在`telegram_admins`；display name、群匿名身份和bot身份都不会授权。
 - 发送提示 unknown outcome：原文会恢复且 compose 自动关闭；先在 Telegram 群确认是否已出现，再决定是否重发
+
+## 本次升级与恢复行为
+
+Linux 使用 /proc、macOS 使用系统 ps/lsof 验证 daemon 入口与工作目录。启动会自动迁移 pending dispatch 与永久 control identity 表；schema 18 会创建新上下文 epoch，保留旧 session 文件。pending dispatch 在拉取新 update 前恢复，可从 debug 的同名字段检查，不需要手动重放 Telegram update。
+
+聊天与摘要共用 provider_retries；0 禁止额外尝试。摘要只使用配置模型，故障不切换主模型，取消/停止可终止请求。手工发送返回 unknown_outcome 时先检查群内是否已出现消息，再决定是否另发，不能把它当作明确未发送。

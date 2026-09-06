@@ -130,3 +130,7 @@ Use `bun run debug` for read-only deployment diagnostics (see [Operations](opera
 One deployment has one `group_peer_id`. Multiple groups require isolated working directories and data/session/database/PID/socket resources. Do not run a second group in one checkout by only switching configuration files.
 
 Next: [Chat and observe in Pi](using-pi.md).
+
+When context images exceed the byte budget, that compaction temporarily reduces the retained-history window, then restores the setting. Shared media files use reference-based cleanup. Pending routing handoffs protect their raw updates from retention; control-message exclusion identities persist independently of telemetry.
+
+Cache schema 18 automatically starts a new context epoch and preserves old session files. New business tables migrate automatically. Mentions, including caption mentions, take precedence over replies across all bots, regardless of bot ordering.

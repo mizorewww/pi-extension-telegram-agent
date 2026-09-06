@@ -127,3 +127,7 @@ search与`run_js`只有字段显式为`true`才启用，不存在旧版隐式默
 一份 deployment 只有一个 `group_peer_id`。多个群必须使用隔离工作目录及 data/session/DB/pid/socket，不能在同一 checkout 只换配置文件并行运行。
 
 下一步：[在 Pi 中聊天和观察](using-pi.md)。
+
+图片上下文超预算时，本次压缩临时缩小原文保留窗口，结束后恢复配置。共享媒体文件由统一引用回收管理。未完成路由交付的 raw update 暂不受 retention 删除；control 消息排除身份永久保存。
+
+本次 cache schema 18 升级会自动创建新上下文 epoch，旧 session 文件保留；新增业务表自动迁移，无需手工改库。路由按全局 @mention（含 caption）优先于 reply，不再取决于 bot 排列顺序。

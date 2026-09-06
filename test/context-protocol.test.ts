@@ -4,6 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import {
 	buildContextFingerprint,
@@ -20,7 +21,6 @@ import {
 	TELEGRAM_EXTENSION_ORDER,
 	applyAssistantPersistencePolicy,
 	contextImageBytes,
-	contextImageNames,
 	estimateCacheReadFromPrefix,
 	observeProviderPayload,
 	projectTelegramContext,
@@ -467,10 +467,9 @@ describe("Pi context protocol", () => {
 		try {
 			writeFileSync(join(root, "a.jpg"), new Uint8Array(1000));
 			writeFileSync(join(root, "b.jpg"), new Uint8Array(2000));
-			const entry = (consumedSeq: number, imageNames: string[]) => ({
-				type: "custom",
-				customType: "telegram_context_v2",
-				data: {
+			const manager = SessionManager.inMemory(root);
+			const entry = (consumedSeq: number, imageNames: string[]) =>
+				manager.appendCustomMessageEntry("telegram_context_v2", "text", false, {
 					version: 4,
 					consumedSeq,
 					providerText: "text",
@@ -481,11 +480,11 @@ describe("Pi context protocol", () => {
 					stickerCandidates: "",
 					visibleMessageIds: [consumedSeq],
 					events: [],
-				},
-			});
-			const entries = [entry(1, ["a.jpg", "missing.jpg"]), entry(2, ["b.jpg"]), { type: "user", data: "ignored" }];
+				});
+			entry(1, ["a.jpg", "missing.jpg"]);
+			entry(2, ["b.jpg"]);
+			const entries = manager.buildContextEntries();
 			expect(contextImageBytes(entries, root)).toBe(3000);
-			expect(contextImageNames(entries)).toEqual(new Set(["a.jpg", "missing.jpg", "b.jpg"]));
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

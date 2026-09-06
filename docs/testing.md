@@ -19,10 +19,14 @@
 - `runjs.test.ts` — run_js sandbox：正常计算可用，host realm 隔离与资源限制成立。
 - `search.test.ts` — TinyFish search/fetch 契约：参数边界、SSRF prefilter（public IP 表）、untrusted boundary、telemetry 脱敏；只用本地 Bun server。
 - `db.test.ts` — SQLite migration：旧库迁移幂等且保留历史 telemetry；本地 cache estimate 只回填同 cohort 的严格 payload 前缀，不覆盖 provider usage 或 `cache_retention=none`。
-- `media.test.ts` — 跨bot Telegram media source配对、static/animated/video sticker metadata与原始file_id发送、vision模式（描述singleflight/persistent cache跨bot复用、视频固定代表帧单次vision调用、deployment全视频流水线并发门、缺FFmpeg时下载前no-op且不持久化terminal结果）与context模式（photo/static sticker转换、video抽帧singleflight与`context_files`持久化复用、失败可重试）、TGS/voice/audio不产出上下文图片、部署路径迁移、static sticker展示缓存、compaction后跨bot引用保护/派生文件清理/失败重试/启动不复活回收文件，以及Pi attach filter握手、activity单卡/原生thinking/完整正文、username与视觉描述乱序合并。
+- `media.test.ts` — 跨bot Telegram media source配对、static/animated/video sticker metadata与原始file_id发送、vision模式（描述singleflight/persistent cache跨bot复用、视频固定代表帧单次vision调用、deployment全视频流水线并发门、缺FFmpeg时下载前no-op且不持久化terminal结果）与context模式（photo/static sticker转换、video抽帧singleflight与`context_files`持久化复用、失败可重试）、TGS/voice/audio不产出上下文图片、部署路径迁移、static sticker展示缓存、compaction后跨bot引用保护/派生文件清理/失败重试/启动不复活回收文件、媒体引用查询按身份索引查找的执行计划，以及Pi attach filter握手、activity单卡/原生thinking/完整正文、username与视觉描述乱序合并。
 - `telegram-control.test.ts` — `/status` 的 InputRichMessage Markdown、统计数字千位分隔与缓存命中率、独立 plain projection、create→canonical persistence，以及仅在确定性rich拒绝时单次fallback的exactly-once边界。
 - `telemetry.test.ts` — Pi/Telegram status共享读模型：latest排除compaction、lifetime/live totals包含compaction、切换provider/model后的immutable per-run cost累计、本地 estimate 的 `≈` 标记、统一费用精度、runtime snapshot、统一字段顺序、context/window与`CH = R/(↑+R+W)`派生口径。
-- `runtime-obligation.test.ts` — direct address（explicit @mention / reply / 配置名称点名）在 coalesced trigger 下仍建 durable obligation 并交付、已可见不重复建、普通 overflow 静默消费设计锁定，以及 flushLoop teardown 窗口 trigger 不滞留。
+- `provider-guard.test.ts` — stream 创建与消费 deadline、主动取消、成功后清理，以及 Pi 原生零重试配置。
+- `visibility.test.ts` — active context 的完整消息可见性与 compaction 边界。
+- `telegram-delivery.test.ts` — 全局 mention 优先级与 caption、乱序 edit、manual send unknown outcome、control retention 与 pending handoff 跨重启交付。
+- `daemon-control.test.ts` — 临时假 daemon 的精确进程归属与含空格路径，拒绝其他部署与测试进程。
+- `runtime-obligation.test.ts` — 真实 Pi SessionManager 下的发送后遥测失败、turn 内/后压缩可见性、split-turn 摘要取消、图片压力设置恢复与共享文件保留； direct address（explicit @mention / reply / 配置名称点名）在 coalesced trigger 下仍建 durable obligation 并交付、已可见不重复建、普通 overflow 静默消费设计锁定，以及 flushLoop teardown 窗口 trigger 不滞留。
 
 ## 测试选择规则
 
@@ -54,7 +58,3 @@ bun run scripts/e2e-compaction.ts --bot <id>         # 通过公开control入口
 ## 已知 flaky
 
 （暂无）
-
-- `daemon-control.test.ts` — 进程归属识别、含空格路径与跨部署拒绝。
-
-- `telegram-delivery.test.ts` — 全局 mention 优先级与 caption、乱序 edit、manual send unknown outcome、control retention 与 pending handoff 跨重启交付。
