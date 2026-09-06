@@ -19,7 +19,6 @@ export class Poller {
 	private db: Database;
 	private groupPeerId: number;
 	private onMessage: MessageHandler | null;
-	private replyBotTargets: ReadonlyMap<number, string> | undefined;
 	private emitMediaUpdates: boolean;
 	private stopped = false;
 	private readonly abort = new AbortController();
@@ -30,7 +29,6 @@ export class Poller {
 		token: string,
 		groupPeerId: number,
 		onMessage: MessageHandler | null = null,
-		replyBotTargets?: ReadonlyMap<number, string>,
 		/** Vision mode only: replay persisted media descriptions as media_update events. */
 		emitMediaUpdates = true,
 	) {
@@ -39,7 +37,6 @@ export class Poller {
 		this.api = new BotApi(token);
 		this.groupPeerId = groupPeerId;
 		this.onMessage = onMessage;
-		this.replyBotTargets = replyBotTargets;
 		this.emitMediaUpdates = emitMediaUpdates;
 	}
 
@@ -56,6 +53,12 @@ export class Poller {
 		let backoffMs = 1000;
 		let ingestFailures = 0;
 		while (!this.stopped) {
+			if (!(await this.deliverPending())) {
+				await this.sleep(backoffMs);
+				backoffMs = Math.min(backoffMs * 2, 60_000);
+				continue;
+			}
+			if (this.stopped) break;
 			let updates: unknown[];
 			try {
 				updates = await this.api.getUpdates(this.offset(), POLL_TIMEOUT_SEC, this.abort.signal);
@@ -93,30 +96,23 @@ export class Poller {
 				if (this.stopped) break;
 				const updateId = (update as { update_id: number }).update_id;
 				try {
-					const result = ingestUpdate(
-						this.db,
-						this.botId,
-						update,
-						this.groupPeerId,
-						this.replyBotTargets,
-						this.emitMediaUpdates,
-					);
-					// advance the offset only after the update is durably ingested; on failure the
-					// next getUpdates re-pulls it and raw_updates dedupe keeps the replay idempotent
-					setBotState(this.db, this.botId, OFFSET_KEY, String(updateId + 1));
-					ingestFailures = 0;
-					if (result.kind === "inserted" || result.kind === "edited" || result.kind === "enriched") {
-						try {
-							await this.onMessage?.(result, update, this.botId);
-						} catch {
-							// The update and offset are already durable. A side-channel handler failure
-							// must not replay or halt polling.
-							log.error("telegram_poller", "message_handler_failed", {
-								bot_id: this.botId,
-								update_id: updateId,
-								category: "local_failure",
-							});
+					this.db.transaction(() => {
+						const result = ingestUpdate(this.db, this.botId, update, this.groupPeerId, this.emitMediaUpdates);
+						if (
+							this.onMessage &&
+							(result.kind === "inserted" || result.kind === "edited" || result.kind === "enriched")
+						) {
+							this.db
+								.query(`INSERT INTO pending_telegram_dispatch
+                                (bot_id, update_id, kind, chat_id, message_id, route_version) VALUES (?, ?, ?, ?, ?, ?)`)
+								.run(this.botId, updateId, result.kind, result.chatId!, result.messageId!, result.routeVersion!);
 						}
+						setBotState(this.db, this.botId, OFFSET_KEY, String(updateId + 1));
+					})();
+					ingestFailures = 0;
+					if (!(await this.deliverPending())) {
+						batchFailed = true;
+						break;
 					}
 				} catch (err) {
 					ingestFailures++;
@@ -146,19 +142,45 @@ export class Poller {
 		}
 	}
 
+	/** Acknowledge only after routing/control accepts the durable handoff. No Telegram refetch required. */
+	private async deliverPending(): Promise<boolean> {
+		const pending = this.db
+			.query(`SELECT p.update_id updateId, p.kind, p.chat_id chatId,
+            p.message_id messageId, p.route_version routeVersion, r.json
+            FROM pending_telegram_dispatch p JOIN raw_updates r USING (bot_id, update_id)
+            WHERE p.bot_id = ?`)
+			.get(this.botId) as (IngestResult & { updateId: number; json: string }) | null;
+		if (!pending) return true;
+		try {
+			if (!this.onMessage) throw new Error("routing handler unavailable");
+			const { updateId, json, ...result } = pending;
+			await this.onMessage(result, JSON.parse(json), this.botId);
+			this.db
+				.query("DELETE FROM pending_telegram_dispatch WHERE bot_id = ? AND update_id = ?")
+				.run(this.botId, updateId);
+			return true;
+		} catch (error) {
+			log.error("telegram_poller", "dispatch_pending", {
+				bot_id: this.botId,
+				update_id: pending.updateId,
+				message_id: pending.messageId,
+				category: errorCategory(error),
+			});
+			return false;
+		}
+	}
+
 	/** Backoff that aborts early on stop() so shutdown never waits out a sleep. */
 	private sleep(ms: number): Promise<void> {
 		if (this.abort.signal.aborted) return Promise.resolve();
 		return new Promise((resolve) => {
-			const timer = setTimeout(resolve, ms);
-			this.abort.signal.addEventListener(
-				"abort",
-				() => {
-					clearTimeout(timer);
-					resolve();
-				},
-				{ once: true },
-			);
+			const finish = () => {
+				clearTimeout(timer);
+				this.abort.signal.removeEventListener("abort", finish);
+				resolve();
+			};
+			const timer = setTimeout(finish, ms);
+			this.abort.signal.addEventListener("abort", finish, { once: true });
 		});
 	}
 }

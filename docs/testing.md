@@ -57,4 +57,4 @@ bun run scripts/e2e-compaction.ts --bot <id>         # 通过公开control入口
 
 - `daemon-control.test.ts` — 进程归属识别、含空格路径与跨部署拒绝。
 
-- `telegram-delivery.test.ts` — control identity 的永久排除不受 telemetry retention 影响。
+- `telegram-delivery.test.ts` — 全局 mention 优先级与 caption、乱序 edit、manual send unknown outcome、control retention 与 pending handoff 跨重启交付。

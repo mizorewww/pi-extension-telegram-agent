@@ -4,7 +4,6 @@
 import type { Database } from "bun:sqlite";
 import { log } from "../observability/log.ts";
 import { appendMediaUpdateEvents } from "../db/message-events.ts";
-import { createReplyObligation } from "../db/reply-obligations.ts";
 import { extractUpdateMessage, isTargetChat, normalizeMessage, type CanonicalMessage } from "../telegram/normalize.ts";
 
 export interface IngestResult {
@@ -23,13 +22,10 @@ export function ingestUpdate(
 	botId: string,
 	update: any,
 	groupPeerId: number,
-	replyBotTargets?: ReadonlyMap<number, string>,
 	/** Vision mode replays persisted descriptions as media_update events; context mode never emits them. */
 	emitMediaUpdates = true,
 ): IngestResult {
-	return db.transaction(() =>
-		ingestUpdateTransaction(db, botId, update, groupPeerId, replyBotTargets, emitMediaUpdates),
-	)();
+	return db.transaction(() => ingestUpdateTransaction(db, botId, update, groupPeerId, emitMediaUpdates))();
 }
 
 function ingestUpdateTransaction(
@@ -37,7 +33,6 @@ function ingestUpdateTransaction(
 	botId: string,
 	update: any,
 	groupPeerId: number,
-	replyBotTargets?: ReadonlyMap<number, string>,
 	emitMediaUpdates = true,
 ): IngestResult {
 	const updateId = update.update_id as number;
@@ -60,32 +55,10 @@ function ingestUpdateTransaction(
 	const result = payload.edited
 		? editMessage(db, canonical, emitMediaUpdates)
 		: insertMessage(db, botId, canonical, emitMediaUpdates);
-	if ((result.kind === "inserted" || result.kind === "enriched") && replyBotTargets) {
-		createIngestReplyObligation(db, canonical, replyBotTargets);
-	}
 	if (canonical.rich_truncated && (result.kind === "inserted" || result.kind === "edited")) {
 		log.warn("telegram_ingest", "rich_parse_truncated", { bot_id: botId, message_id: canonical.message_id });
 	}
 	return result;
-}
-
-/** Canonical row + pending obligation commit together, before the poller advances its offset. */
-function createIngestReplyObligation(
-	db: Database,
-	message: CanonicalMessage,
-	replyBotTargets: ReadonlyMap<number, string>,
-): void {
-	if (message.is_bot || message.reply_to_message_id == null) return;
-	let parentSenderId = message.reply_to_sender_id;
-	if (parentSenderId == null) {
-		const parent = db
-			.query("SELECT sender_id FROM messages WHERE chat_id = ? AND message_id = ?")
-			.get(message.chat_id, message.reply_to_message_id) as { sender_id: number | null } | null;
-		parentSenderId = parent?.sender_id ?? null;
-	}
-	if (parentSenderId == null) return;
-	const targetBotId = replyBotTargets.get(parentSenderId);
-	if (targetBotId) createReplyObligation(db, targetBotId, message.chat_id, message.message_id);
 }
 
 /** Persist media identity (shared file_unique_id) and this bot's file_id mapping. */
@@ -202,6 +175,9 @@ function editMessage(db: Database, m: CanonicalMessage, emitMediaUpdates = true)
 	if (!existing) {
 		// edit arrived for a message we never saw (started mid-history): store as new
 		return insertMessage(db, EDIT_UNKNOWN_BOT_ID, m, emitMediaUpdates);
+	}
+	if (existing.edit_date != null && m.edit_date != null && m.edit_date <= existing.edit_date) {
+		return { kind: "duplicate", chatId: m.chat_id, messageId: m.message_id };
 	}
 	// revision history: keep the superseded version, keyed by *its own* time — the original
 	// version uses the message date, an edited version its edit_date. Keying by the incoming

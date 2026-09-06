@@ -14,7 +14,6 @@ export interface DeploymentComposition<Api extends IdentityApi, Runtime> {
 	identities: BotIdentity[];
 	botNames: Map<string, string>;
 	botUserIds: Map<string, number>;
-	replyBotTargets: Map<number, string>;
 }
 
 /** Build the identity/runtime maps consumed by routing, Telegram control, and IPC. */
@@ -49,7 +48,6 @@ export async function composeDeployment<Api extends IdentityApi, Runtime>(
 		identities,
 		botNames: new Map(config.bots.map((bot) => [bot.id, bot.name] as const)),
 		botUserIds: new Map(identities.map((identity) => [identity.id, identity.userId] as const)),
-		replyBotTargets: new Map(identities.map((identity) => [identity.userId, identity.id] as const)),
 	};
 }
 
@@ -58,12 +56,9 @@ export function composePollers(
 	db: Database,
 	config: Pick<AppConfig, "bots" | "groupPeerId" | "media">,
 	onMessage: MessageHandler,
-	replyBotTargets: ReadonlyMap<number, string>,
 ): Poller[] {
 	// media_update deltas (persisted vision descriptions) exist only in vision mode; context mode
 	// attaches image blocks to the message event itself and never injects description text.
 	const emitMediaUpdates = config.media.mode === "vision";
-	return config.bots.map(
-		(bot) => new Poller(db, bot.id, bot.token, config.groupPeerId, onMessage, replyBotTargets, emitMediaUpdates),
-	);
+	return config.bots.map((bot) => new Poller(db, bot.id, bot.token, config.groupPeerId, onMessage, emitMediaUpdates));
 }

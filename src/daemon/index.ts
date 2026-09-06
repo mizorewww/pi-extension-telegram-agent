@@ -159,7 +159,7 @@ const composition = await composeDeployment(db, config, {
 		});
 	},
 });
-const { botApis, runtimes, identities, botNames, botUserIds, replyBotTargets } = composition;
+const { botApis, runtimes, identities, botNames, botUserIds } = composition;
 
 // The per-bot content fingerprint rotated incompatible sessions before they were opened.
 const storedSchema = getDaemonState(db, "cache_schema_version");
@@ -325,27 +325,22 @@ function route(result: IngestResult): void {
 	}
 }
 
-const pollers = composePollers(
-	db,
-	config,
-	(result, update, botId) => {
-		log.info("telegram_ingest", "update_committed", {
-			bot_id: botId,
-			kind: result.kind,
-			chat_id: result.chatId,
-			message_id: result.messageId,
-		});
-		const command = parseTelegramControlCommand(update, botId, identities);
-		if (command) runTelegramControl(command);
-		else route(result);
-		if (result.chatId != null && result.messageId != null) {
-			const row = broadcastMessageRow(result.chatId, result.messageId);
-			// Poller offset + canonical row are durable before this non-blocking side effect.
-			if (row) mediaCache.scheduleMessage(botId, row);
-		}
-	},
-	replyBotTargets,
-);
+const pollers = composePollers(db, config, (result, update, botId) => {
+	log.info("telegram_ingest", "update_committed", {
+		bot_id: botId,
+		kind: result.kind,
+		chat_id: result.chatId,
+		message_id: result.messageId,
+	});
+	const command = parseTelegramControlCommand(update, botId, identities);
+	if (command) runTelegramControl(command);
+	else route(result);
+	if (result.chatId != null && result.messageId != null) {
+		const row = broadcastMessageRow(result.chatId, result.messageId);
+		// Poller offset + canonical row are durable before this non-blocking side effect.
+		if (row) mediaCache.scheduleMessage(botId, row);
+	}
+});
 
 let stopping = false;
 async function shutdown(signal: string) {

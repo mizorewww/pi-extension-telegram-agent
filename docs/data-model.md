@@ -9,7 +9,12 @@
 ### raw_updates
 
 - `(bot_id, update_id)` 主键，保存完整 Telegram update JSON，用于去重、诊断和 replay。
-- retention 默认 30 天；poller offset 只有 durable transaction 成功后才推进。
+- retention 默认 30 天；仍被 pending dispatch 引用的来源不会删除。poller offset 与 ingest、pending dispatch 在同一事务提交。
+
+### pending_telegram_dispatch
+
+- `bot_id` 主键，每个 poller 最多保存一条未交付 handoff；保存 update/message identity、kind 与 route_version，不复制正文。
+- `(bot_id, update_id)` 外键引用 `raw_updates`。routing/control 回调成功后删除，失败和重启先交付再拉取新 update；accepted routing claim 防止重放重复触发。
 
 ### telegram_control_messages
 
@@ -19,7 +24,7 @@
 ### messages
 
 - `(chat_id, message_id)` 主键；多个 bot 看到同一群消息只保留一条 canonical 最新投影。
-- 保存 sender、reply/quote/forward、text/caption/entities、bounded Rich Message source、edit time 与 media identity。
+- 保存 sender、reply/quote/forward、text/caption/entities、bounded Rich Message source、edit time 与 media identity。仅更新更大的 edit_date，跨 bot 乱序或同时间副本不会倒退 canonical 或追加 edit event。
 - `reply_to_sender_id` 是 Telegram 嵌入父消息 sender 的有界 snapshot；缺失时 router 可查询 canonical parent。
 - Rich Message source 上限 256 KiB；`text` 是确定性、最多 32,768 code points 的 plain projection。IPC/Pi/provider 不接收 raw source。
 
@@ -59,7 +64,7 @@
 ### reply_obligations
 
 - `(bot_id, chat_id, message_id)` 主键，只保存必须交给目标 bot 的 direct human address identity（explicit @mention / reply / 配置名称点名），不保存正文。
-- canonical ingest/enrichment 与 reply obligation 在同一 transaction 提交；explicit/name obligation 由 runtime trigger 在消息尚未可见时幂等创建（INSERT OR IGNORE）。
+- 所有 direct-address obligation 由 runtime trigger 按最终目标在消息尚未可见时幂等创建（INSERT OR IGNORE）；创建前的路由窗口由 pending dispatch 保护，不在 ingest 预建另一个目标。
 - runtime 每次有界读取最多 64 条；只有 session 中的结构化 context commit marker 证明 delivery 后才删除。crash/restart reconcile 幂等。
 
 ### routing_claims
@@ -108,11 +113,11 @@ daemon 启动时执行一次、之后每 24 小时执行 maintenance，并做 pa
 - `raw_updates`：30 天；
 - `message_events`：365 天。
 
-旧 `message_events` 只有在 `ingest_seq <=` 该 chat 所有已知 bot cursor 的最小值，且没有 reply obligation 引用该 message 时才删除。canonical `messages`/revisions/media/session 文件不由这条定时 retention 清理；可再生的`media.local_path`与`context_files`派生文件另由成功compaction后的引用回收处理。
+旧 `message_events` 只有在 `ingest_seq <=` 该 chat 所有已知 bot cursor 的最小值，且没有 reply obligation 或 pending dispatch 引用该 message 时才删除。canonical `messages`/revisions/media/session 文件不由这条定时 retention 清理；可再生的`media.local_path`与`context_files`派生文件另由成功compaction后的引用回收处理。
 
 ## ID / dedupe 边界
 
-- update：`(bot_id, update_id)`；raw/canonical/event/obligation 在同一 transaction 内提交，失败整体回滚。
+- update：`(bot_id, update_id)`；raw/canonical/event/pending dispatch/offset 在同一 transaction 内提交，失败整体回滚。
 - canonical message：`(chat_id, message_id)`；second-bot duplicate 只允许幂等 enrichment。
 - provider event：唯一 `event_key` + 单调 `ingest_seq`；edit 与 vision 模式 media completion 追加 delta。
 - bot 自发消息：Telegram send result 立即 normalize/insert，随后 poller 副本按 canonical/event key 去重。

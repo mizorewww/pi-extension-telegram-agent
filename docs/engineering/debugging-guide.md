@@ -105,3 +105,7 @@ bun run debug -- --bot A --show-provider-content  # 敏感：显式读取完整�
 参考案例一（精确回复失败）：route/run/send 均存在，`agent_send.preflight_failed{category:reply_not_visible}` 证明失败发生在 Telegram create 前；修复的是 turn-local visibility 时序，而不是重试 Telegram 或要求模型更积极。
 
 参考案例二（provider context 取证）：历史 session 里的 `search` call/result 证明 TinyFish 返回没有被 context extension 过滤；当时 context inventory 显示当前工具只剩 `send`，再回溯配置归一化即可定位“省略字段被改成禁用”，无需猜模型为何不调用。
+
+## 未交付的 Telegram 路由
+
+`debug` 的每 bot `pending_dispatch` 显示尚未交付的 update_id、message_id 与 kind，并产生 `pending_telegram_dispatch` finding。非空时 poller 会先恢复这条 handoff，尚未继续拉取；结合 `telegram_poller.dispatch_pending` 的固定 category 判断路由/本地存储失败。回调成功后该字段变为 null。报告不包含 raw update、正文或完整 URL，不应手动删 pending 行来跳过失败。

@@ -52,8 +52,8 @@ export function explicitTriggerReason(db: Database, row: MessageRow, bot: BotIde
 	if (row.entities) {
 		const entities = JSON.parse(row.entities) as TgEntity[];
 		for (const e of entities) {
-			if (e.type === "mention" && row.text) {
-				const mentioned = row.text.slice(e.offset, e.offset + e.length).toLowerCase();
+			if (e.type === "mention" && (row.text ?? row.caption)) {
+				const mentioned = (row.text ?? row.caption)!.slice(e.offset, e.offset + e.length).toLowerCase();
 				if (mentioned === `@${bot.username.toLowerCase()}`) return "explicit";
 			}
 			if (e.type === "text_mention" && e.user?.id === bot.userId) return "explicit";
@@ -105,9 +105,10 @@ export function routeMessageDecision(
 	// Bot messages are observed history, never triggers — single authority point (REQ-TEST-0001
 	// R3): a caller forgetting the is_bot pre-check cannot introduce bot↔bot trigger loops.
 	if (row.is_bot) return makeDecision("nobody", "nobody");
-	for (const bot of bots) {
-		const reason = explicitTriggerReason(db, row, bot);
-		if (reason) return makeDecision(bot.id, reason);
+	const addressed = bots.map((bot) => ({ bot, reason: explicitTriggerReason(db, row, bot) }));
+	for (const priority of ["explicit", "reply"] as const) {
+		const match = addressed.find(({ reason }) => reason === priority);
+		if (match) return makeDecision(match.bot.id, priority);
 	}
 	for (const bot of bots) {
 		if (nameKeywordTrigger(row, bot)) return makeDecision(bot.id, "name");

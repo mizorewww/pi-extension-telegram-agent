@@ -32,6 +32,7 @@ export interface DebugFinding {
 	code:
 		| "unsupported_reasoning_effort"
 		| "video_transcoder_unavailable"
+		| "pending_telegram_dispatch"
 		| "cursor_backlog"
 		| "pending_reply_obligation"
 		| "route_without_run"
@@ -170,6 +171,9 @@ export function buildDebugReport(db: Database, input: DebugReportInput) {
 				backlog: Math.max(0, highWater - cursor),
 				pending_reply_obligations: obligationCount,
 			},
+			pending_dispatch: db
+				.query("SELECT update_id, message_id, kind FROM pending_telegram_dispatch WHERE bot_id = ?")
+				.get(botId) as { update_id: number; message_id: number; kind: string } | null,
 			claims,
 			runs,
 			events,
@@ -198,6 +202,12 @@ export function buildDebugReport(db: Database, input: DebugReportInput) {
 		});
 	}
 	for (const bot of bots) {
+		if (bot.pending_dispatch)
+			findings.push({
+				code: "pending_telegram_dispatch",
+				bot_id: bot.bot_id,
+				message_id: bot.pending_dispatch.message_id,
+			});
 		if (bot.context.backlog > 0)
 			findings.push({ code: "cursor_backlog", bot_id: bot.bot_id, count: bot.context.backlog });
 		if (bot.context.pending_reply_obligations > 0)

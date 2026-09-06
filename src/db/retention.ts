@@ -21,7 +21,11 @@ export function applyRetention(db: Database, config: RetentionConfig, now = Date
 	const prune = db.transaction((): RetentionResult => {
 		const agentEvents = db.query("DELETE FROM agent_events WHERE ts < ?").run(telemetryCutoffMs).changes;
 		const llmRuns = db.query("DELETE FROM llm_runs WHERE ts < ?").run(telemetryCutoffMs).changes;
-		const rawUpdates = db.query("DELETE FROM raw_updates WHERE received_at < ?").run(rawCutoffSec).changes;
+		const rawUpdates = db
+			.query(
+				"DELETE FROM raw_updates WHERE received_at < ? AND NOT EXISTS (SELECT 1 FROM pending_telegram_dispatch p WHERE p.bot_id = raw_updates.bot_id AND p.update_id = raw_updates.update_id)",
+			)
+			.run(rawCutoffSec).changes;
 		const messageEvents = db
 			.query(`
 			DELETE FROM message_events
@@ -33,6 +37,11 @@ export function applyRetention(db: Database, config: RetentionConfig, now = Date
 			   AND ingest_seq <= (
 			     SELECT MIN(c.consumed_seq) FROM bot_cursors c
 			      WHERE c.chat_id = message_events.chat_id
+			   )
+			   AND NOT EXISTS (
+			     SELECT 1 FROM pending_telegram_dispatch p
+			      WHERE p.chat_id = message_events.chat_id
+			        AND p.message_id = message_events.message_id
 			   )
 			   AND NOT EXISTS (
 			     SELECT 1 FROM reply_obligations o

@@ -663,6 +663,6 @@ test("context mode replays no cached vision descriptions as media_update events 
 	expect(ingestUpdate(db, "A", photoUpdate(1, 500), 1234).kind).toBe("inserted");
 	expect(mediaUpdateIds()).toEqual([500]);
 	// context mode: no media_update is produced even when a cached description exists
-	expect(ingestUpdate(db, "A", photoUpdate(2, 501), 1234, undefined, false).kind).toBe("inserted");
+	expect(ingestUpdate(db, "A", photoUpdate(2, 501), 1234, false).kind).toBe("inserted");
 	expect(mediaUpdateIds()).toEqual([500]);
 });

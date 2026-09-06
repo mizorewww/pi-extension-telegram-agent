@@ -18,6 +18,17 @@ CREATE TABLE IF NOT EXISTS telegram_control_messages (
  PRIMARY KEY (chat_id, message_id)
 );
 
+-- One unacknowledged routing/control handoff per poller, atomic with ingestion/offset.
+CREATE TABLE IF NOT EXISTS pending_telegram_dispatch (
+ bot_id TEXT PRIMARY KEY,
+ update_id INTEGER NOT NULL,
+ kind TEXT NOT NULL CHECK (kind IN ('inserted', 'edited', 'enriched')),
+ chat_id INTEGER NOT NULL,
+ message_id INTEGER NOT NULL,
+ route_version INTEGER NOT NULL,
+ FOREIGN KEY (bot_id, update_id) REFERENCES raw_updates(bot_id, update_id)
+);
+
 CREATE TABLE IF NOT EXISTS messages (
 	chat_id INTEGER NOT NULL,
 	message_id INTEGER NOT NULL,
