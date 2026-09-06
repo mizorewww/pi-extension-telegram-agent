@@ -82,7 +82,7 @@ export interface TelegramBotConfigInput {
 	compaction_model?: string;
 	/** Per-attempt provider call timeout in ms before the request is aborted and retried (exponential backoff). */
 	provider_timeout_ms?: number;
-	/** Extra provider attempts after a timeout, backed off exponentially (0 = no retry). */
+	/** Extra Pi attempts for retryable provider failures (0 disables all automatic retries). */
 	provider_retries?: number;
 	cache_retention?: "none" | "short" | "long";
 	max_suffix_tokens?: number;
@@ -165,7 +165,7 @@ export interface BotConfig {
 	contextImageBudgetBytes: number;
 	/** Per-attempt provider call timeout in ms (abort + exponential-retry on timeout). */
 	providerTimeoutMs: number;
-	/** Extra provider attempts after a timeout (exponential backoff; 0 disables retry). */
+	/** Extra Pi attempts for retryable provider failures; shared by chat and compaction. */
 	providerRetries: number;
 	maxSuffixTokens: number;
 	maxMessageTokens: number;

@@ -5,7 +5,7 @@ import type { Database } from "bun:sqlite";
 import { readFileSync, mkdirSync, readdirSync, existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { contentText } from "@earendil-works/pi-ai";
+import { contentText, retryAssistantCall } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
@@ -55,7 +55,7 @@ import type { RoutingTrigger, TriggerResult, TriggerSource } from "./router.ts";
 import type { AgentStreamFrame, RuntimeControlSnapshot, UsageRun } from "../ipc.ts";
 import { consumedControlMessageIds } from "../telegram/control-command.ts";
 import { classifyPiProviderFailure } from "./model-runtime.ts";
-import { PROVIDER_RETRY_BASE_MS, PROVIDER_RETRY_MAX_BACKOFF_MS, guardProviderCall } from "./provider-guard.ts";
+import { providerRetryPolicy, guardProviderCall } from "./provider-guard.ts";
 import {
 	commitConsumedContext,
 	addVisibleMessageIds,
@@ -91,7 +91,7 @@ import { buildContextFingerprint, canResumeContextSession, sha256 } from "./cont
 import { contextStateFromEntries } from "./context-state.ts";
 import { parsePiModelReference, type PiRequestThinkingLevel } from "./model-ref.ts";
 import type { VideoTranscoderAvailability } from "../media/video-frames.ts";
-import { log } from "../observability/log.ts";
+import { errorCategory, log } from "../observability/log.ts";
 import { fitContextBreakdown } from "../observability/usage.ts";
 import { AgentActivityCollector } from "./activity.ts";
 
@@ -437,6 +437,7 @@ export class BotRuntime {
 			sessionManager,
 			settingsManager: SettingsManager.inMemory({
 				compaction: { enabled: true, reserveTokens, keepRecentTokens: this.bot.compactionKeepRecent },
+				retry: { ...providerRetryPolicy(this.bot.providerRetries), provider: { maxRetries: 0 } },
 			}),
 			resourceLoader: loader,
 			noTools: "builtin",
@@ -457,16 +458,6 @@ export class BotRuntime {
 				options?.signal,
 				{
 					timeoutMs: this.bot.providerTimeoutMs,
-					maxRetries: this.bot.providerRetries,
-					baseBackoffMs: PROVIDER_RETRY_BASE_MS,
-					maxBackoffMs: PROVIDER_RETRY_MAX_BACKOFF_MS,
-					onRetry: (attempt, delayMs) =>
-						log.warn("agent_runtime", "provider_retry_scheduled", {
-							bot_id: this.bot.id,
-							attempt,
-							delay_ms: delayMs,
-							timeout_ms: this.bot.providerTimeoutMs,
-						}),
 				},
 			);
 		const sessionFile = session.sessionFile;
@@ -567,6 +558,14 @@ export class BotRuntime {
 					}
 					break;
 				}
+				case "auto_retry_start":
+					log.warn("agent_runtime", "provider_retry_scheduled", {
+						bot_id: this.bot.id,
+						scope: "chat",
+						attempt: event.attempt,
+						delay_ms: event.delayMs,
+					});
+					break;
 				case "agent_end":
 					break;
 				case "tool_execution_start":
@@ -754,45 +753,51 @@ export class BotRuntime {
 	private async handleBeforeCompact(
 		event: SessionBeforeCompactEvent,
 	): Promise<{ cancel: true } | { compaction: CompactionResult }> {
-		const prep = event.preparation;
-		const gen = await this.generateCompactionSummary(prep);
-		if (!("summary" in gen)) {
-			// NOTE: the SDK swallows extension handler exceptions and would silently fall back
-			// to the default summarizer, so refusal goes through cancel -> compaction_end { aborted: true }.
-			this.recordEvent("error", { stage: "compaction", error: gen.failure });
+		try {
+			const prep = event.preparation;
+			const gen = await this.generateCompactionSummary(prep, event.signal);
+			if (!("summary" in gen)) {
+				// NOTE: the SDK swallows extension handler exceptions and would silently fall back
+				// to the default summarizer, so refusal goes through cancel -> compaction_end { aborted: true }.
+				this.recordEvent("error", { stage: "compaction", error: gen.failure });
+				return { cancel: true };
+			}
+			const branchEntries = event.branchEntries;
+			const keptIndex = branchEntries.findIndex((entry) => entry.id === prep.firstKeptEntryId);
+			const keptEntries = keptIndex >= 0 ? branchEntries.slice(keptIndex) : [];
+			const chatId = Number(`-100${this.config.groupPeerId}`);
+			const state = contextStateFromEntries(keptEntries, getConsumedSeq(this.db, this.bot.id, chatId));
+			const unresolvedReplyMessageIds = listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN).map(
+				(obligation) => obligation.messageId,
+			);
+			return {
+				compaction: {
+					summary: gen.summary,
+					firstKeptEntryId: prep.firstKeptEntryId,
+					tokensBefore: prep.tokensBefore,
+					usage: gen.usage,
+					details: {
+						version: TELEGRAM_CONTEXT_VERSION,
+						consumedSeq: state.consumedSeq,
+						visibleMessageIds: [...state.visible],
+						unresolvedReplyMessageIds,
+					},
+				},
+			};
+		} catch (error) {
+			// Pi falls back to its default summarizer if an extension throws. Refuse explicitly.
+			log.warn("agent_runtime", "compaction_handler_failed", {
+				bot_id: this.bot.id,
+				category: errorCategory(error),
+			});
 			return { cancel: true };
 		}
-		const branchEntries = event.branchEntries ?? [];
-		const keptIndex = branchEntries.findIndex((entry) => entry.id === prep.firstKeptEntryId);
-		const keptEntries = keptIndex >= 0 ? branchEntries.slice(keptIndex) : [];
-		const chatId = Number(`-100${this.config.groupPeerId}`);
-		const state = contextStateFromEntries(keptEntries, getConsumedSeq(this.db, this.bot.id, chatId));
-		const unresolvedReplyMessageIds = listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN).map(
-			(obligation) => obligation.messageId,
-		);
-		return {
-			compaction: {
-				summary: gen.summary,
-				firstKeptEntryId: prep.firstKeptEntryId,
-				tokensBefore: prep.tokensBefore,
-				usage: gen.usage,
-				details: {
-					version: TELEGRAM_CONTEXT_VERSION,
-					consumedSeq: state.consumedSeq,
-					visibleMessageIds: [...state.visible],
-					unresolvedReplyMessageIds,
-				},
-			},
-		};
 	}
 
-	/**
-	 * Chat-oriented compaction summary via the aux model; on provider error retries once with the
-	 * main model so an unavailable compaction model cannot wedge an overflowed session forever.
-	 * Failure names provider error/abort apart from empty text.
-	 */
+	/** The configured summary model shares the native retry policy and request watchdog. */
 	private async generateCompactionSummary(
 		prep: SessionBeforeCompactEvent["preparation"],
+		signal: AbortSignal,
 	): Promise<
 		{ summary: string; usage: Awaited<ReturnType<ModelRuntime["completeSimple"]>>["usage"] } | { failure: string }
 	> {
@@ -806,19 +811,42 @@ export class BotRuntime {
 			systemPrompt: COMPACTION_SUMMARY_PROMPT,
 			messages: [{ role: "user" as const, content: userText, timestamp: Date.now() }],
 		};
-		const options = { cacheRetention: "none" as const, maxTokens: 4096, reasoning: this.compactionReasoning };
-		let model = this.compactionModel;
-		let result = await this.modelRuntime.completeSimple(model, request, options);
-		if (result.stopReason === "error") {
-			// aborted is intentional (shutdown/abort signal), never retried.
-			log.warn("agent_runtime", "compaction_fallback", {
-				bot_id: this.bot.id,
-				category: classifyPiProviderFailure(result.errorMessage ?? "compaction model failed"),
-			});
-			model = this.model;
-			result = await this.modelRuntime.completeSimple(model, request, options);
-		}
-		this.recordCompactionUsage(result.usage, Date.now(), model);
+		const model = this.compactionModel;
+		const result = await retryAssistantCall(
+			async () => {
+				const response = await guardProviderCall(
+					(attemptSignal) =>
+						this.modelRuntime.streamSimple(model, request, {
+							cacheRetention: "none",
+							maxTokens: Math.min(4096, model.maxTokens),
+							reasoning: this.compactionReasoning,
+							signal: attemptSignal,
+							timeoutMs: this.bot.providerTimeoutMs,
+							maxRetries: 0,
+						}),
+					model,
+					signal,
+					{ timeoutMs: this.bot.providerTimeoutMs },
+				).result();
+				try {
+					this.recordCompactionUsage(response.usage, Date.now(), model);
+				} catch {
+					log.warn("agent_runtime", "compaction_usage_failed", { bot_id: this.bot.id, category: "local_failure" });
+				}
+				return response;
+			},
+			providerRetryPolicy(this.bot.providerRetries),
+			signal,
+			{
+				onRetryScheduled: (attempt, _maxAttempts, delayMs) =>
+					log.warn("agent_runtime", "provider_retry_scheduled", {
+						bot_id: this.bot.id,
+						scope: "compaction",
+						attempt,
+						delay_ms: delayMs,
+					}),
+			},
+		);
 		if (result.stopReason === "error" || result.stopReason === "aborted") {
 			return { failure: `summary generation ${result.stopReason}` };
 		}
@@ -1662,6 +1690,7 @@ export class BotRuntime {
 
 	async stop(): Promise<void> {
 		this.stopping = true;
+		this.session?.abortCompaction();
 		this.typingLease.stop();
 		this.endAssistantStream();
 		// Bounded wait for an in-flight flush so the Pi/SQLite context commit can settle;

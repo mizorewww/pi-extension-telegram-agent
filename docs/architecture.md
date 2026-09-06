@@ -62,6 +62,8 @@
 - `search(query?|url?)`复用同一TinyFish tool且强制二选一：query只发送现行`query`并在本地保留≤5条短结果；url只允许≤2048字符的public HTTP(S)，本机不做DNS/GET，提交一个URL到Fetch API。fetch固定一页、≤1 MiB、≤8,000字符/50秒，进入provider前再截到≤2,048 tokens并套untrusted boundary；事件不记录query、URL path/query/fragment、正文或key。群消息不会触发eager fetch。
 - local assistant text（未调send）→ agent_events + TUI；session里只保留固定`[no_send]`，不把未发布prose带入后续provider context。
 
+- provider watchdog 只负责单次请求从创建 stream 到消费结束的 deadline 与取消；聊天使用 Pi session retry，摘要使用 Pi `retryAssistantCall`，共用 `provider_retries`，adapter retry 设为 0。摘要只请求配置的 compaction model，传递 compaction signal，停止时 abortCompaction，不另切主模型。
+
 ## run_js sandbox 威胁模型
 
 - **威胁**：run_js 输入来自 LLM，LLM 上下文来自群消息 → 群成员可经 prompt injection 让 bot 执行攻击者构造的 JS。最坏情况是读到 daemon 同 uid 可读的 `.env`（全部 bot token / API key）并联网外发。

@@ -1,3 +1,4 @@
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 // Regression tests for the direct-address delivery guarantee (W1) and the flushLoop
 // teardown race (W2). SHARED_PROTOCOL promises a response whenever a human explicitly
 // @mentions, replies to, or name-keywords the bot; all three reasons must create a
@@ -222,4 +223,45 @@ test("a committed send stays terminal when the usage observer fails", async () =
 	expect(result.terminate).toBe(true);
 	expect(creates).toBe(1);
 	expect(db.query("SELECT text FROM messages WHERE message_id=9001").get()).toEqual({ text: "sent" });
+});
+test("compaction propagates cancellation", async () => {
+	const { rt } = setup();
+	const controller = new AbortController();
+	const prep = {
+		messagesToSummarize: [{ role: "user", content: "earlier-message", timestamp: 1 }],
+		turnPrefixMessages: [{ role: "user", content: "latest-discarded-message", timestamp: 2 }],
+	};
+	let requestText = "";
+	let cancelled = false;
+	(rt as any).compactionModel = fakeModel();
+	(rt as any).modelRuntime = {
+		streamSimple: (_model: unknown, request: any, options: any) => {
+			requestText = request.messages[0].content;
+			options.signal.addEventListener(
+				"abort",
+				() => {
+					cancelled = true;
+				},
+				{ once: true },
+			);
+			return createAssistantMessageEventStream();
+		},
+	};
+	const pending = (rt as any).generateCompactionSummary(prep, controller.signal);
+	controller.abort();
+	const result = await Promise.race([pending, Bun.sleep(100).then(() => ({ failure: "did not cancel" }))]);
+	expect(result).toEqual({ failure: "summary generation aborted" });
+	expect(cancelled).toBe(true);
+	expect(requestText).toContain("earlier-message");
+});
+
+test("compaction telemetry failure cancels explicitly instead of enabling Pi's default summarizer", async () => {
+	const { rt } = setup();
+	(rt as any).generateCompactionSummary = async () => ({ failure: "summary generation aborted" });
+	(rt as any).recordEvent = () => {
+		throw new Error("event storage unavailable");
+	};
+	expect(await (rt as any).handleBeforeCompact({ preparation: {}, signal: new AbortController().signal })).toEqual({
+		cancel: true,
+	});
 });

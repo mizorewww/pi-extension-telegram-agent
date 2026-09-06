@@ -89,7 +89,7 @@ export default defineConfig({
 
 `reasoning_effort`不仅必须是Pi全局枚举，还必须是所选模型实际支持的档位。Pi SDK本身会把不支持的值静默夹到最近档位；Telegram agent为避免费用、行为与状态显示不一致，会在任何Telegram/provider调用前拒绝启动，并列出requested与supported值。main bot、`compaction_model`及vision模式下启用的辅助视觉模型执行同一检查。请在Pi `/model`查看可选档位；例如`deepseek-v4-flash`只接受`off`、`high`、`max`。
 
-`compaction_model`的请求失败（provider error）时会自动用该bot的主模型重试一次并记录`compaction_fallback`日志，避免压缩模型不可用导致overflow的session永久卡死；主动abort（如daemon关停）不会重试。
+摘要只使用配置的 `compaction_model`，失败不会切换到主模型。`provider_retries` 是聊天和摘要请求可重试错误的最大额外尝试次数；0 会关闭 Pi 与 adapter 的额外重试。每次请求的 timeout 覆盖 stream 创建与消费全过程；取消或 daemon 关停会终止摘要请求。
 
 自定义OpenAI兼容端点（自建网关、代理等）通过Pi原生的`~/.pi/agent/models.json`注册，不需要任何项目侧扩展：在`providers`里声明`baseUrl`、`api: "openai-completions"`、`apiKey`（可写成`"$ENV_VAR"`引用环境变量），并为每个模型显式声明`input`（如`["text","image"]`）、`contextWindow`、`maxTokens`。注册后在Pi `/model`确认可用，再把`provider`/`model`写进本配置；打算用`media.mode: "context"`时模型声明必须包含image输入，否则daemon启动时fail fast。
 
