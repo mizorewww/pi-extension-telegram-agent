@@ -76,6 +76,14 @@ function migrate(db: Database): void {
 			db.exec(`ALTER TABLE llm_runs ADD COLUMN ${column} ${sqlType}`);
 		}
 	}
+	db.transaction(() => {
+		if (getDaemonState(db, "control_identity_migrated") === "1") return;
+		db.exec(`INSERT OR IGNORE INTO telegram_control_messages (chat_id, message_id)
+            SELECT json_extract(payload, '$.chat_id'), json_extract(payload, '$.message_id') FROM agent_events
+            WHERE kind IN ('telegram_control_claim', 'telegram_control_reply')
+              AND json_type(payload, '$.chat_id') = 'integer' AND json_type(payload, '$.message_id') = 'integer'`);
+		setDaemonState(db, "control_identity_migrated", "1");
+	})();
 	backfillMessageEvents(db);
 }
 

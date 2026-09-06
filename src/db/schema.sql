@@ -11,6 +11,13 @@ CREATE TABLE IF NOT EXISTS raw_updates (
 );
 CREATE INDEX IF NOT EXISTS idx_raw_updates_received_at ON raw_updates(received_at);
 
+-- Permanent control identities, independent of telemetry retention.
+CREATE TABLE IF NOT EXISTS telegram_control_messages (
+ chat_id INTEGER NOT NULL,
+ message_id INTEGER NOT NULL,
+ PRIMARY KEY (chat_id, message_id)
+);
+
 CREATE TABLE IF NOT EXISTS messages (
 	chat_id INTEGER NOT NULL,
 	message_id INTEGER NOT NULL,

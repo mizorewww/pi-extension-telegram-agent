@@ -13,9 +13,7 @@ import {
 } from "../observability/status.ts";
 import { extractUpdateMessage } from "./normalize.ts";
 
-export const CONTROL_COMMAND_CLAIM_EVENT = "telegram_control_claim";
 export const CONTROL_COMMAND_AUDIT_EVENT = "telegram_control";
-export const CONTROL_REPLY_EVENT = "telegram_control_reply";
 
 const MAX_REPLY_CHARS = 3500;
 const MAX_LABEL_CHARS = 64;
@@ -217,36 +215,19 @@ export class TelegramControlCommandService {
 	}
 
 	/** Persist and expose a sent control reply so it remains outside every future provider epoch. */
-	consumeReply(botId: string, chatId: number, messageId: number): void {
-		const existing = this.db
-			.query(
-				`SELECT 1 FROM agent_events WHERE kind = ? AND json_extract(payload, '$.chat_id') = ? AND json_extract(payload, '$.message_id') = ? LIMIT 1`,
-			)
-			.get(CONTROL_REPLY_EVENT, chatId, messageId);
-		if (!existing) {
-			this.db
-				.query("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES (?, ?, ?, ?)")
-				.run(botId, this.now(), CONTROL_REPLY_EVENT, JSON.stringify({ chat_id: chatId, message_id: messageId }));
-		}
+	consumeReply(_botId: string, chatId: number, messageId: number): void {
+		this.db
+			.query("INSERT OR IGNORE INTO telegram_control_messages (chat_id, message_id) VALUES (?, ?)")
+			.run(chatId, messageId);
 		this.consumeEveryRuntime(messageId);
 	}
 
 	private claim(command: ParsedTelegramControlCommand): boolean {
-		const existing = this.db
-			.query(
-				`SELECT 1 FROM agent_events WHERE kind = ? AND json_extract(payload, '$.chat_id') = ? AND json_extract(payload, '$.message_id') = ? LIMIT 1`,
-			)
-			.get(CONTROL_COMMAND_CLAIM_EVENT, command.chatId, command.messageId);
-		if (existing) return false;
-		this.db
-			.query("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES (?, ?, ?, ?)")
-			.run(
-				command.replyBotId,
-				this.now(),
-				CONTROL_COMMAND_CLAIM_EVENT,
-				JSON.stringify({ chat_id: command.chatId, message_id: command.messageId, command: command.action.kind }),
-			);
-		return true;
+		return (
+			this.db
+				.query("INSERT OR IGNORE INTO telegram_control_messages (chat_id, message_id) VALUES (?, ?)")
+				.run(command.chatId, command.messageId).changes > 0
+		);
 	}
 
 	private async execute(command: ParsedTelegramControlCommand): Promise<ControlExecutionResult> {
@@ -371,16 +352,10 @@ export class TelegramControlCommandService {
 
 /** IDs marked here stay out of provider suffixes across every context generation. */
 export function consumedControlMessageIds(db: Database, chatId: number): Set<number> {
-	const rows = db
-		.query(
-			`SELECT DISTINCT json_extract(payload, '$.message_id') message_id FROM agent_events WHERE kind IN (?, ?) AND json_extract(payload, '$.chat_id') = ?`,
-		)
-		.all(CONTROL_COMMAND_CLAIM_EVENT, CONTROL_REPLY_EVENT, chatId) as { message_id: unknown }[];
-	return new Set(
-		rows.flatMap((row) =>
-			typeof row.message_id === "number" && Number.isSafeInteger(row.message_id) ? [row.message_id] : [],
-		),
-	);
+	const rows = db.query("SELECT message_id FROM telegram_control_messages WHERE chat_id = ?").all(chatId) as {
+		message_id: number;
+	}[];
+	return new Set(rows.map((row) => row.message_id));
 }
 
 function isHuman(sender: ControlSender): boolean {

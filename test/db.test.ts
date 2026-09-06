@@ -61,3 +61,22 @@ describe("database migrations", () => {
 		}
 	});
 });
+
+test("migrates control identity once and preserves it after audit retention", () => {
+	const path = join(tmpdir(), `tg-control-migration-${process.pid}-${Date.now()}.db`);
+	cleanup.add(path);
+	const legacy = new Database(path);
+	legacy.exec(
+		`CREATE TABLE agent_events (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL)`,
+	);
+	legacy
+		.query("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES ('A', 1, 'telegram_control_claim', ?)")
+		.run(JSON.stringify({ chat_id: -100123, message_id: 88 }));
+	legacy.close();
+	for (let pass = 0; pass < 2; pass++) {
+		const db = openDb(path);
+		expect(db.query("SELECT * FROM telegram_control_messages").all()).toEqual([{ chat_id: -100123, message_id: 88 }]);
+		db.exec("DELETE FROM agent_events");
+		db.close();
+	}
+});

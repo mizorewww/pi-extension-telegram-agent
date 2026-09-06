@@ -11,6 +11,11 @@
 - `(bot_id, update_id)` 主键，保存完整 Telegram update JSON，用于去重、诊断和 replay。
 - retention 默认 30 天；poller offset 只有 durable transaction 成功后才推进。
 
+### telegram_control_messages
+
+- `(chat_id, message_id)` 主键，永久保存 control command/reply 的排除身份，与 telemetry 保留期独立。
+- 启动迁移一次性从历史 `agent_events` 的 control claim/reply 回填现存身份，并记录 `control_identity_migrated`；后续读写只有本表。此前已被 retention 删除的身份无法凭空恢复。
+
 ### messages
 
 - `(chat_id, message_id)` 主键；多个 bot 看到同一群消息只保留一条 canonical 最新投影。
@@ -93,7 +98,7 @@
 ## 其他表
 
 - `aliases`：`(chat_id,user_id) → u<N>`，为无 username sender 提供稳定别名。
-- Telegram control 的 durable claim/reply evidence 存在 `agent_events`；control message 永久排除在 provider context 之外。
+- Telegram control 的排除身份存于 `telegram_control_messages`；`agent_events` 只保留可过期的行为审计。
 
 ## Retention 与安全删除
 
