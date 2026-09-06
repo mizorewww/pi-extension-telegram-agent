@@ -36,6 +36,11 @@ CREATE TABLE IF NOT EXISTS messages (
 	PRIMARY KEY (chat_id, message_id)
 );
 
+-- Match lifecycle's TEXT expression: JSON extraction alone has no TEXT affinity,
+-- so SQLite cannot seek it when comparing with media.file_unique_id.
+CREATE INDEX IF NOT EXISTS idx_messages_media_identity
+ ON messages(CAST(json_extract(media, '$.file_unique_id') AS TEXT)) WHERE media IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS message_revisions (
 	chat_id INTEGER NOT NULL,
 	message_id INTEGER NOT NULL,

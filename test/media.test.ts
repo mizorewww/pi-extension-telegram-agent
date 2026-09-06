@@ -28,7 +28,7 @@ import {
 	type MediaDownloadApi,
 } from "../src/media/local-cache.ts";
 import { MediaCacheQueue } from "../src/media/media-cache.ts";
-import { pruneUnreferencedMediaCache } from "../src/media/lifecycle.ts";
+import { listReferencedMissingDisplayMediaIds, pruneUnreferencedMediaCache } from "../src/media/lifecycle.ts";
 import { ensureStickerCatalog } from "../src/media/sticker-catalog.ts";
 import { ensureContextMedia } from "../src/media/context-media.ts";
 import {
@@ -1009,6 +1009,28 @@ describe("video frame sampling", () => {
 });
 
 describe("post-compaction media cache pruning", () => {
+	test("media reference checks seek by identity instead of scanning message history per file", () => {
+		const db = openDb(":memory:");
+		const query = db.query.bind(db);
+		const plans: string[][] = [];
+		db.query = ((sql: string) => {
+			if (sql.includes("FROM messages message")) {
+				const rows = query(`EXPLAIN QUERY PLAN ${sql}`).all('["A","B"]', 100) as { detail: string }[];
+				plans.push(rows.map((row) => row.detail));
+			}
+			return query(sql);
+		}) as typeof db.query;
+		try {
+			listReferencedMissingDisplayMediaIds(db, ["A", "B"], 100);
+			pruneUnreferencedMediaCache(db, "/unused", ["A", "B"]);
+			expect(plans).toHaveLength(2);
+			for (const plan of plans)
+				expect(plan.some((detail) => /SEARCH message .*idx_messages_media_identity/.test(detail))).toBe(true);
+		} finally {
+			db.close();
+		}
+	});
+
 	test("deletes only unreferenced files and does not backfill them on restart", async () => {
 		const directory = temporaryDirectory("tg-media-prune-");
 		const mediaDir = join(directory, "media");

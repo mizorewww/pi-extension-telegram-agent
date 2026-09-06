@@ -18,6 +18,8 @@
 - `reply_to_sender_id` 是 Telegram 嵌入父消息 sender 的有界 snapshot；缺失时 router 可查询 canonical parent。
 - Rich Message source 上限 256 KiB；`text` 是确定性、最多 32,768 code points 的 plain projection。IPC/Pi/provider 不接收 raw source。
 
+- `idx_messages_media_identity` 对非空 media 的 `CAST(json_extract(media, '$.file_unique_id') AS TEXT)` 建部分表达式索引；media lifecycle 使用完全相同的 TEXT 表达式按身份查找，避免每个文件重扫消息历史。
+
 ### message_revisions
 
 - `(chat_id, message_id, edit_date)` 主键，保存被替换版本的 text/caption/entities/rich source。

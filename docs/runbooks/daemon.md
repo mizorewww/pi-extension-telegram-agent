@@ -45,6 +45,7 @@ sudo loginctl enable-linger <user>             # 不登录也随开机启动
 - 配置错误会在启动期逐条列出（stderr / daemon.log），不会静默跑坏配置。
 - 双 start 竞态由排他pid锁挡住；并发restart由`data/daemon.control.lock`串行，第二个立即报`restart already in progress`。
 - restart会验证同仓库进程身份，并回收同一deployment里缺失于pid file的孤儿daemon；foreign PID与仅在参数中提到daemon路径的shell命令不会收到signal。旧PID、pid file与socket全部消失后才spawn，新socket必须可真实连接才报告ready。
+- socket 在同步初始化及信号处理器就绪后才发布。媒体回填引用查询使用 TEXT 表达式索引，避免生产历史量下阻塞事件循环；下载仍通过后台队列执行。
 - 首次初始化超过60秒但child仍存活时只报告starting；child早退会显示`data/daemon.log`中有界且脱敏的末尾，不会输出token/env值。
 
 ## 观察

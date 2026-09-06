@@ -20,7 +20,8 @@ export interface MediaPruneOptions {
 const ACTIVE_MEDIA_REFERENCE_SQL = `EXISTS (
 	SELECT 1
 	  FROM messages message
-	 WHERE json_extract(message.media, '$.file_unique_id') = media.file_unique_id
+	 WHERE message.media IS NOT NULL
+       AND CAST(json_extract(message.media, '$.file_unique_id') AS TEXT) = media.file_unique_id
 	   AND (
 	     EXISTS (
 	       SELECT 1

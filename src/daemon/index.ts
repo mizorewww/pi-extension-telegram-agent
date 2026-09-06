@@ -238,7 +238,6 @@ for (const [botId, rt] of runtimes) {
 	rt.streamSink = (stream) => ipc.broadcastStream(stream);
 	rt.streamDemand = () => ipc.hasStreamListener(botId);
 }
-ipc.start();
 const mediaBackfillCount = mediaCache.scheduleBackfill();
 log.info("media_cache", "startup_scheduled", { scheduled: mediaBackfillCount, limit: 100, concurrency: 2 });
 
@@ -390,6 +389,8 @@ async function shutdown(signal: string) {
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));
 
+// Publish the readiness socket only after synchronous startup work and signal handlers are ready.
+ipc.start();
 log.info("daemon", "ready", { pid: process.pid, group_peer_id: config.groupPeerId, bot_count: config.bots.length });
 const pollerRuns = Promise.all(pollers.map((p) => p.run()));
 await pollerRuns;
