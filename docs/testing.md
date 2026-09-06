@@ -11,7 +11,7 @@
 
 ## 当前测试集
 
-`test/` 只保留长期 invariant 与安全边界的守卫，共 10 个测试文件：
+`test/` 只保留长期 invariant 与安全边界的守卫，共 13 个测试文件：
 
 - `cache.test.ts` — cache golden：锁定 cache-visible protocol 的 hash（system prompt、tool schema 与顺序、消息/compaction 序列化 grammar、extension 顺序、sticker catalog block）。任何 provider-visible 变化都会在这里报警。
 - `context-protocol.test.ts` — context fingerprint / extension / model capability 契约：恢复 session 的 cache-identity 判断、structured context 协议、相邻 raw payload 严格前缀的本地 cache estimate、用户级已安装provider extension进入daemon shared runtime，以及不允许 Pi 静默 clamp 不支持的 reasoning 档位。
@@ -54,3 +54,5 @@ bun run scripts/e2e-compaction.ts --bot <id>         # 通过公开control入口
 ## 已知 flaky
 
 （暂无）
+
+- `daemon-control.test.ts` — 进程归属识别、含空格路径与跨部署拒绝。
