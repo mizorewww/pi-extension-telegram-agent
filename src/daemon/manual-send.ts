@@ -5,7 +5,12 @@ import { errorCategory, log } from "../observability/log.ts";
 import { createHash } from "node:crypto";
 import type { SendMessageRequest, SendMessageResult } from "../ipc.ts";
 import { TelegramApiError } from "../telegram/api.ts";
-import { sendTextAndPersist, SentMessagePersistenceError, type TextSendApi } from "../telegram/send.ts";
+import {
+	classifyTelegramCreateFailure,
+	sendTextAndPersist,
+	SentMessagePersistenceError,
+	type TextSendApi,
+} from "../telegram/send.ts";
 
 export const TELEGRAM_TEXT_MAX_CHARS = 4096;
 const REQUEST_ID_MAX = 128;
@@ -131,6 +136,7 @@ export class ManualSendService {
 					error: "Telegram may have accepted the message, but local persistence failed; do not retry automatically",
 				};
 			}
+			const failure = classifyTelegramCreateFailure(error);
 			const telegramCode = error instanceof TelegramApiError ? error.code : null;
 			log.error("manual_send", "telegram_create_failed", {
 				bot_id: botId,
@@ -141,8 +147,11 @@ export class ManualSendService {
 				requestId,
 				botId,
 				ok: false,
-				code: "telegram_error",
-				error: telegramCode == null ? "Telegram send failed" : `Telegram send failed (${telegramCode})`,
+				code: failure.outcome === "unknown" ? "unknown_outcome" : "telegram_error",
+				error:
+					failure.outcome === "unknown"
+						? "Telegram send result is unknown; check the group before retrying"
+						: `Telegram send failed (${telegramCode})`,
 			};
 		}
 	}

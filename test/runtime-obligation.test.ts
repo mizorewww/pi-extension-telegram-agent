@@ -9,7 +9,7 @@ import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { BotRuntime } from "../src/agent/runtime.ts";
 import type { AppConfig, BotConfig } from "../src/config.ts";
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { SessionManager, SettingsManager, type ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 const CHAT_ID = -1004402809405;
 const BOT_ID = "A";
@@ -88,13 +88,14 @@ function setup(): Harness {
 		chatActionSender: async () => {},
 	});
 	(rt as any).model = fakeModel();
+	const sessionManager = SessionManager.inMemory("/tmp/unused");
 	(rt as any).session = {
+		settingsManager: SettingsManager.inMemory(),
+		sessionManager,
 		getContextUsage: () => null,
-		sendCustomMessage: async (message: { content: string }) => {
+		sendCustomMessage: async (message: { customType: string; content: string; display: boolean; details: unknown }) => {
+			sessionManager.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
 			sent.push(message.content);
-		},
-		sessionManager: {
-			appendCustomEntry: () => "entry",
 		},
 	};
 	return { rt, db, sent };
@@ -195,4 +196,30 @@ test("W2: a trigger arriving in the flushLoop teardown window is not stranded", 
 	expect((rt as any).flushing).toBe(false);
 	expect(sent).toHaveLength(1);
 	expect(sent[0]).toContain(`#${messageId}`);
+});
+
+test("a committed send stays terminal when the usage observer fails", async () => {
+	const { rt, db } = setup();
+	let creates = 0;
+	(rt as any).api = {
+		sendMessageWithEntities: async () => {
+			creates++;
+			return {
+				chat: { id: CHAT_ID },
+				message_id: 9001,
+				date: 100,
+				from: { id: 123, is_bot: true, first_name: "Bot" },
+				text: "sent",
+			};
+		},
+	};
+	(rt as any).lastLlmRunId = 1;
+	(rt as any).lastUsageRun = { id: 1 };
+	rt.usageSink = () => {
+		throw new Error("observer failed");
+	};
+	const result = await (rt as any).executeSend({ message: "sent" });
+	expect(result.terminate).toBe(true);
+	expect(creates).toBe(1);
+	expect(db.query("SELECT text FROM messages WHERE message_id=9001").get()).toEqual({ text: "sent" });
 });

@@ -6,6 +6,7 @@ import { applyRetention } from "../src/db/retention.ts";
 import { routeMessageDecision } from "../src/agent/router.ts";
 import type { MessageRow } from "../src/agent/serialize.ts";
 import { ingestUpdate } from "../src/telegram/ingest.ts";
+import { ManualSendService } from "../src/daemon/manual-send.ts";
 import { TelegramControlCommandService, consumedControlMessageIds } from "../src/telegram/control-command.ts";
 
 let db: Database;
@@ -55,6 +56,29 @@ test("older edits from a delayed poller cannot roll canonical or event history b
 	).toBe("duplicate");
 	expect(db.query("SELECT text, edit_date FROM messages").get()).toEqual({ text: "new", edit_date: 300 });
 	expect(db.query("SELECT COUNT(*) n FROM message_events").get()).toEqual(before);
+});
+
+test("operator timeouts remain unknown outcomes and request replay never repeats the create", async () => {
+	let creates = 0;
+	const service = new ManualSendService(
+		db,
+		chatId,
+		new Map([
+			[
+				"A",
+				{
+					sendMessage: async () => {
+						creates++;
+						throw new DOMException("timeout", "TimeoutError");
+					},
+				},
+			],
+		]),
+	);
+	const input = { type: "send_message" as const, requestId: "request-1", botId: "A", text: "hello" };
+	expect(await service.send(input)).toMatchObject({ ok: false, code: "unknown_outcome" });
+	expect(await service.send(input)).toMatchObject({ ok: false, code: "unknown_outcome" });
+	expect(creates).toBe(1);
 });
 
 test("telemetry retention cannot erase durable control exclusion", () => {
