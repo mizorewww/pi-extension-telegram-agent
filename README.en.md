@@ -56,4 +56,4 @@ Full reference: [Configuration guide](docs/user-guide/en/src/configuration.md).
 
 ## Contributing
 
-Start with [AGENTS.md](AGENTS.md) and the [development guide](docs/engineering/development-guide.md); the documentation index is [docs/index.md](docs/index.md). Licensed under MIT — see [LICENSE](LICENSE).
+Start with [AGENTS.md](AGENTS.md) and the [development guide](docs/engineering/development-guide.md); the documentation index is [docs/index.md](docs/index.md). Licensed under BSD 2-Clause — see [LICENSE](LICENSE).
