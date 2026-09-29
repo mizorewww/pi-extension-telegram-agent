@@ -1,6 +1,6 @@
 # Installation and first setup
 
-This project runs 1..N AI bots, each with its own persona, inside one Telegram supergroup. It is designed to be fast (a resident daemon routes messages directly), context-optimized (the provider prefix cache means repeated context is not billed again), and simple (one configuration track, no intermediate concepts) — low cost is the result of those three.
+This project runs 1..N AI bots, each with its own persona, inside one Telegram supergroup. It is designed to be fast (a resident daemon routes messages directly), context-optimized (provider prefix caching can reduce repeated input costs, with provider-specific discounts), and simple (one configuration track, no intermediate concepts) — low cost is the result of those three.
 
 There is exactly one configuration track: `telegram.config.ts` for non-secret settings, `.env` for secrets such as tokens, and Pi for model authentication. The wizard below writes these files for you in its final step.
 

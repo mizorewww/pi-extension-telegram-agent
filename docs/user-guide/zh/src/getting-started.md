@@ -1,6 +1,6 @@
 # 安装与首次配置
 
-本项目让 1..N 个各有 persona 的 AI bot 住进一个 Telegram supergroup。设计目标是快（daemon 常驻、消息直接路由）、上下文优化（provider prefix cache 让重复上下文不重复计费）、简洁（一套配置、没有中间概念），省成本是这三者的结果。
+本项目让 1..N 个各有 persona 的 AI bot 住进一个 Telegram supergroup。设计目标是快（daemon 常驻、消息直接路由）、上下文优化（provider prefix cache 可降低重复输入费用，折扣取决于 provider）、简洁（一套配置、没有中间概念），省成本是这三者的结果。
 
 配置只有一套：`telegram.config.ts` 放非 secret 设置，`.env` 放 token 等 secret，模型认证由 Pi 管理。下面的向导会在最后一步替你写好这些文件。
 

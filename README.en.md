@@ -7,7 +7,7 @@ Let a few AI bots, each with its own persona, live permanently in your Telegram 
 ## Why use it
 
 - **Fast**: a local daemon runs permanently, and incoming messages route straight to the right bot — no cold start.
-- **Cheap**: the provider prefix cache means repeated context is never billed twice; routing, dedupe, and state are pure deterministic code — zero model calls spent on plumbing.
+- **Cheap**: provider prefix caching can reduce repeated input costs; the actual discount depends on the provider. Routing, dedupe, and state use deterministic code without model calls.
 - **Simple**: one config file, one structure. Change a value, restart, done.
 
 ## Quick start
