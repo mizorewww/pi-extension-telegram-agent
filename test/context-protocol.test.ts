@@ -41,7 +41,7 @@ import type { DebugDeploymentIdentity } from "../src/config.ts";
 
 function fingerprintInput(): ContextFingerprintInput {
 	return {
-		piVersion: "0.84.1",
+		piVersion: "0.86.0",
 		provider: "openai-codex",
 		api: "responses",
 		model: "gpt-5.6-luna",
@@ -131,7 +131,7 @@ describe("Pi context protocol", () => {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
-	test("loads user-installed provider extensions into the daemon model runtime", async () => {
+	test("loads user-installed providers and executes their normalized transcript stream", async () => {
 		const root = mkdtempSync(join(tmpdir(), "tg-provider-extension-"));
 		const agentDir = join(root, "agent");
 		const cwd = join(root, "workspace");
@@ -140,12 +140,29 @@ describe("Pi context protocol", () => {
 		const extensionPath = join(root, "provider.ts");
 		writeFileSync(
 			extensionPath,
-			`export default function (pi) {
+			`import { collapseSystemMessages, getCurrentSystemPrompt, getCurrentTools, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+export default function (pi) {
 	pi.registerProvider("fixture-provider", {
 		name: "Fixture Provider",
 		baseUrl: "http://127.0.0.1:1/v1",
-		api: "openai-completions",
+		api: "fixture-transcript-api",
 		apiKey: "fixture-key",
+		streamSimple(model, context) {
+			const transcript = collapseSystemMessages(context);
+			const stream = createAssistantMessageEventStream();
+			stream.push({ type: "done", reason: "stop", message: {
+				role: "assistant", api: model.api, provider: model.provider, model: model.id,
+				content: [{ type: "text", text: JSON.stringify({
+					prompt: getCurrentSystemPrompt(transcript.messages),
+					tools: getCurrentTools(transcript.messages).map(tool => tool.name),
+					lastRole: transcript.messages.at(-1)?.role
+				}) }],
+				usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+				stopReason: "stop", timestamp: 1
+			} });
+			return stream;
+		},
 		models: [{
 			id: "fixture-model",
 			name: "Fixture Model",
@@ -165,6 +182,24 @@ describe("Pi context protocol", () => {
 			const model = runtime.getModel("fixture-provider", "fixture-model");
 			expect(model?.cost).toEqual({ input: 1.25, output: 2.5, cacheRead: 0.25, cacheWrite: 0 });
 			expect(runtime.hasConfiguredAuth("fixture-provider")).toBe(true);
+			const result = await runtime.completeSimple(model!, {
+				systemPrompt: "fixture system",
+				tools: [
+					{ name: "fixture-tool", description: "Fixture", parameters: { type: "object", properties: {} } as any },
+				],
+				messages: [{ role: "user", content: "fixture user", timestamp: 1 }],
+			});
+			expect(result.stopReason).toBe("stop");
+			expect(result.content).toEqual([
+				{
+					type: "text",
+					text: JSON.stringify({
+						prompt: "fixture system",
+						tools: ["fixture-tool"],
+						lastRole: "user",
+					}),
+				},
+			]);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

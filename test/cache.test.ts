@@ -25,6 +25,7 @@ import {
 	sha256Short,
 	CACHE_SCHEMA_VERSION,
 	COMPACTION_SUMMARY_PROMPT,
+	TELEGRAM_TURN_PROMPT,
 	REPLY_RECOVERY_PROMPT,
 	SHARED_PROTOCOL,
 	TOOL_CAPABILITY_DECLARATION,
@@ -41,7 +42,7 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 21,
+	schemaVersion: 23,
 	systemZhTemplate: "a4c784e00a37",
 	systemEnTemplate: "b89a39b52e87",
 	serialize: "68a17d6e5c05",
@@ -50,6 +51,7 @@ const GOLDEN = {
 	compactionPrompt: "045a5241fdd7",
 	multimodalCompaction: "e2da2b8b68fa",
 	replyRecovery: "4fc7e277e338",
+	telegramTurn: "43bb809c775c",
 	extensionOrder: "e04f7032d531",
 	contextProtocol: "2e1c7762b239",
 };
@@ -505,6 +507,7 @@ test("multimodal summary envelope and bounded reply recovery protocol stay stabl
 	);
 	expect(sha256Short(JSON.stringify(content))).toBe(GOLDEN.multimodalCompaction);
 	expect(sha256Short(REPLY_RECOVERY_PROMPT)).toBe(GOLDEN.replyRecovery);
+	expect(sha256Short(TELEGRAM_TURN_PROMPT)).toBe(GOLDEN.telegramTurn);
 });
 
 test("compaction serializes custom Telegram messages through Pi", () => {

@@ -12,7 +12,7 @@ import {
 	type ModelThinkingLevel,
 } from "@earendil-works/pi-ai";
 
-/** The subset of Pi's ModelRuntime the daemon reads; Pi 0.84.1 always provides all three. */
+/** The subset of Pi's ModelRuntime the daemon reads; Pi 0.86.0 always provides all three. */
 export type ConfigurableModelRuntime = Pick<ModelRuntime, "getModel" | "hasConfiguredAuth" | "getProviderAuthStatus">;
 
 export type PiModelConfigurationCategory =

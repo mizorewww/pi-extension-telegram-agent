@@ -34,7 +34,7 @@ const { session } = await createAgentSession({
 	thinkingLevel: bot.reasoningEffort,
 	modelRuntime,
 	sessionManager: SessionManager.inMemory(process.cwd()),
-	settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
+	settingsManager: SettingsManager.inMemory({ cacheWarming: "off", compaction: { enabled: false } }),
 	resourceLoader: loader,
 	noTools: "all",
 });

@@ -30,6 +30,7 @@ import {
 	sha256Short,
 	CACHE_SCHEMA_VERSION,
 	COMPACTION_SUMMARY_PROMPT,
+	TELEGRAM_TURN_PROMPT,
 	REPLY_RECOVERY_PROMPT,
 	SHARED_PROTOCOL,
 } from "./prompt.ts";
@@ -89,7 +90,6 @@ import {
 	makeCachePayloadObserverExtension,
 	makeTelegramCompactionExtension,
 	makeTelegramContextExtension,
-	TELEGRAM_CONTEXT_TYPE,
 	TELEGRAM_CONTEXT_VERSION,
 	TELEGRAM_EXTENSION_ORDER,
 	contextImageBytes,
@@ -227,6 +227,7 @@ export class BotRuntime {
 	private telemetryHmacKey = "";
 	private staticPrefixTokenEstimate = 0;
 	private pendingPayloadObservations: ProviderPayloadObservation[] = [];
+	private pendingTurnContext: TelegramContextDetails | null = null;
 	private currentTriggerMessageId: number | null = null;
 	private pendingInputMetrics = {
 		inputEvents: 0,
@@ -437,6 +438,7 @@ export class BotRuntime {
 			// The image resolver is only wired in context mode; in vision mode the context is
 			// text-only (vision descriptions render inside the serialized placeholders).
 			makeTelegramContextExtension(
+				() => this.pendingTurnContext,
 				this.config.media.mode === "context"
 					? createContextImageResolver(join(this.config.dataDir, "media"))
 					: undefined,
@@ -473,6 +475,7 @@ export class BotRuntime {
 				modelRuntime: this.modelRuntime,
 				sessionManager: manager,
 				settingsManager: SettingsManager.inMemory({
+					cacheWarming: "off",
 					compaction: {
 						enabled: true,
 						reserveTokens: Math.max(MIN_COMPACTION_RESERVE, selectedModel.contextWindow - this.bot.compactionThreshold),
@@ -1236,18 +1239,18 @@ export class BotRuntime {
 			visionCalls: this.pendingInputMetrics.visionCalls,
 			imagesAttached: packed.imagesAttached,
 		};
-		// sendCustomMessage(triggerTurn) does not resolve until the provider turn, including
-		// tool execution, has finished. Make only the fully packed references addressable
-		// during that turn; durable visibility still commits after the session submission.
+		// Native prompt preflight installs system/tools even on the first request; the
+		// before_agent_start extension appends this batch as a persistent custom message.
+		// Make packed references addressable during the turn; durable visibility commits below.
 		for (const messageId of packed.visibleMessageIds) this.visibleMessageIds.add(messageId);
+		this.pendingTurnContext = details;
 		try {
-			await this.session.sendCustomMessage(
-				{ customType: TELEGRAM_CONTEXT_TYPE, content: packed.text, display: false, details },
-				{ triggerTurn: true },
-			);
+			await this.session.prompt(TELEGRAM_TURN_PROMPT, { expandPromptTemplates: false });
 		} catch (error) {
 			this.reconcileContextStateFromSession();
 			throw error;
+		} finally {
+			this.pendingTurnContext = null;
 		}
 		if (
 			!this.lastTurnFailed &&

@@ -4,7 +4,7 @@
 // durable obligation so a coalesced trigger cannot silently drop the message.
 // In-memory DB + fake session; no daemon, no network.
 
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -117,9 +117,11 @@ function setup(publicSend = true): Harness {
 		settingsManager: SettingsManager.inMemory(),
 		sessionManager,
 		getContextUsage: () => null,
-		sendCustomMessage: async (message: { customType: string; content: string; display: boolean; details: unknown }) => {
-			sessionManager.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
-			sent.push(message.content);
+		prompt: async () => {
+			const details = (rt as any).pendingTurnContext;
+			if (!details) throw new Error("unexpected repair turn");
+			sessionManager.appendCustomMessageEntry("telegram_context_v2", details.providerText, false, details);
+			sent.push(details.providerText);
 			if (publicSend) {
 				const result = await (rt as any).executeSend({ message: "fixture reply" });
 				sessionManager.appendMessage({
@@ -132,9 +134,6 @@ function setup(publicSend = true): Harness {
 					timestamp: Date.now(),
 				});
 			}
-		},
-		prompt: async () => {
-			throw new Error("unexpected repair turn");
 		},
 	};
 	return { rt, db, sent };
@@ -191,7 +190,7 @@ test("a provider turn that ends in error keeps the direct-address obligation and
 	const messageId = 1006;
 	insertMessage(db, messageId, "hello @bot");
 	const session = (rt as any).session;
-	const send = session.sendCustomMessage;
+	const prompt = session.prompt;
 	const failedTurn = {
 		type: "message_end",
 		message: {
@@ -207,8 +206,8 @@ test("a provider turn that ends in error keeps the direct-address obligation and
 		events = listener;
 	};
 	(rt as any).subscribeEvents();
-	session.sendCustomMessage = async (message: unknown) => {
-		await send(message);
+	session.prompt = async () => {
+		await prompt();
 		events?.({ type: "agent_start" });
 		events?.(failedTurn);
 		events?.({ type: "agent_settled" });
@@ -219,8 +218,8 @@ test("a provider turn that ends in error keeps the direct-address obligation and
 	expect(obligationCount(db)).toBe(1);
 	expect((db.query("SELECT COUNT(*) count FROM llm_runs").get() as { count: number }).count).toBe(0);
 	// The next trigger re-packs the owed message as a mandatory event and a healthy turn clears it.
-	session.sendCustomMessage = async (message: unknown) => {
-		await send(message);
+	session.prompt = async () => {
+		await prompt();
 		events?.({ type: "agent_start" });
 		events?.({ ...failedTurn, message: { ...failedTurn.message, stopReason: "stop" } });
 		await (rt as any).executeSend({ message: "fixture reply" });
@@ -342,9 +341,9 @@ test("Pi compaction during a provider turn cannot resurrect discarded batch IDs"
 	const { rt, db } = setup();
 	insertMessage(db, 9011, "hello");
 	const session = (rt as any).session;
-	const send = session.sendCustomMessage;
-	session.sendCustomMessage = async (message: unknown) => {
-		await send(message);
+	const prompt = session.prompt;
+	session.prompt = async () => {
+		await prompt();
 		const marker = session.sessionManager.appendCustomEntry("retained_marker", {});
 		session.sessionManager.appendCompaction("summary", marker, 40000, { visibleMessageIds: [] });
 		(rt as any).onCompactionEnd({
@@ -453,7 +452,9 @@ test("a silent direct-address turn gets only one repair attempt and remains owed
 	insertMessage(db, 9020, "hello @bot");
 	const session = (rt as any).session;
 	let repairs = 0;
+	const prompt = session.prompt;
 	session.prompt = async () => {
+		if ((rt as any).pendingTurnContext) return prompt();
 		repairs++;
 	};
 	rt.trigger("explicit", { reason: "reply", chatId: CHAT_ID, messageId: 9020 });
@@ -462,6 +463,7 @@ test("a silent direct-address turn gets only one repair attempt and remains owed
 	expect(obligationCount(db)).toBe(1);
 	expect((rt as any).flushing).toBe(false);
 	session.prompt = async () => {
+		if ((rt as any).pendingTurnContext) return prompt();
 		repairs++;
 		await (rt as any).executeSend({ message: "fixture reply" });
 	};
@@ -483,14 +485,15 @@ test("an unknown Telegram create closes the obligation without any automatic res
 		},
 	};
 	const session = (rt as any).session;
-	const send = session.sendCustomMessage;
-	session.sendCustomMessage = async (message: unknown) => {
-		await send(message);
-		const result = await (rt as any).executeSend({ message: "fixture reply" });
-		expect(result.details.outcome).toBe("unknown");
-	};
+	const prompt = session.prompt;
 	let repairs = 0;
 	session.prompt = async () => {
+		if ((rt as any).pendingTurnContext) {
+			await prompt();
+			const result = await (rt as any).executeSend({ message: "fixture reply" });
+			expect(result.details.outcome).toBe("unknown");
+			return;
+		}
 		repairs++;
 	};
 	rt.trigger("explicit", { reason: "explicit", chatId: CHAT_ID, messageId: 9021 });
@@ -531,6 +534,71 @@ function assistantResult(input = 100) {
 		timestamp: Date.now(),
 	};
 }
+
+test("Telegram turns initialize the native prompt without duplicating deferred context", async () => {
+	const root = mkdtempSync(join(tmpdir(), "tg-context-usage-"));
+	const db = new Database(":memory:");
+	db.exec(readFileSync("src/db/schema.sql", "utf8"));
+	const bot = { ...makeBot(), personaPath: join(root, "persona.md"), compactionModel: "test/test-model:low" };
+	writeFileSync(bot.personaPath, "Fixture persona.");
+	const config = { ...makeConfig(bot), dataDir: root };
+	let calls = 0;
+	const requestPrompts: string[] = [];
+	let authAvailable = true;
+	const modelRuntime = {
+		getModel: () => fakeModel(),
+		hasConfiguredAuth: () => authAvailable,
+		checkAuth: async () => undefined,
+		isUsingOAuth: () => false,
+		getAuth: async () => ({ auth: { apiKey: "fixture" } }),
+		streamSimple: (_model: unknown, context: any) => {
+			requestPrompts.push(getCurrentSystemPrompt(context.messages));
+			const stream = createAssistantMessageEventStream();
+			calls++;
+			stream.push({ type: "done", reason: "stop", message: assistantResult(10_000) });
+			return stream;
+		},
+	} as unknown as ModelRuntime;
+	const rt = new BotRuntime(db, bot, config, modelRuntime, {
+		videoTranscoder: { ffmpeg: false, ffprobe: false },
+		chatActionSender: async () => {},
+	});
+	const restoreLog = setLogSink(() => {});
+	try {
+		await rt.init();
+		const session = (rt as any).session;
+		for (let call = 1; call <= 3; call++) {
+			insertMessage(db, 9100 + call, "fixture user");
+			expect(rt.trigger("probability", { reason: "probability", chatId: CHAT_ID, messageId: 9100 + call })).toBe(
+				"started",
+			);
+			await (rt as any).flushPromise;
+			// First Telegram turn must already have the same complete Pi-owned prompt as later requests.
+			expect(requestPrompts.at(-1)).toBe(session.systemPrompt);
+		}
+		expect(calls).toBe(3);
+		// A native preflight failure must leave the batch unconsumed and out of future repair turns.
+		authAvailable = false;
+		insertMessage(db, 9104, "deferred fixture user");
+		rt.trigger("probability", { reason: "probability", chatId: CHAT_ID, messageId: 9104 });
+		await (rt as any).flushPromise;
+		expect(calls).toBe(3);
+		expect((rt as any).pendingTurnContext).toBeNull();
+		authAvailable = true;
+		rt.trigger("probability", { reason: "probability", chatId: CHAT_ID, messageId: 9104 });
+		await (rt as any).flushPromise;
+		expect(calls).toBe(4);
+		const batches = session.sessionManager.getBranch().filter((entry: any) => entry.type === "custom_message");
+		expect(batches.flatMap((entry: any) => entry.details.events.map((event: any) => event.messageId))).toEqual([
+			9101, 9102, 9103, 9104,
+		]);
+	} finally {
+		await rt.stop();
+		restoreLog();
+		db.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
 
 function imageDetails(id: number) {
 	return {

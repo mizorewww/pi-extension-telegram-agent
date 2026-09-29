@@ -334,6 +334,7 @@ test("live selection rotates Pi session and epoch, survives reload, and failed w
 	const restoreLog = setLogSink((record) => logs.push(JSON.parse(record)));
 	try {
 		await runtime.init();
+		expect((runtime as any).session.settingsManager.getCacheWarmingMode()).toBe("off");
 		const before = getSessionManifest(db, bot.id)!;
 		const history: AssistantMessage = {
 			role: "assistant",

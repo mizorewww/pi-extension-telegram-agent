@@ -16,6 +16,7 @@ import type { SendParams } from "../src/agent/tools.ts";
 import { type BotApi, isReactionEmoji, TelegramApiError } from "../src/telegram/api.ts";
 import type { AppConfig, BotConfig } from "../src/config.ts";
 import { BotRuntime } from "../src/agent/runtime.ts";
+import type { TelegramContextDetails } from "../src/agent/extensions/context.ts";
 import { SessionManager, SettingsManager, type ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 const CHAT_ID = -1004402809405;
@@ -240,14 +241,15 @@ test("a reaction-only turn does not clear a direct-address obligation; the owed 
 	});
 	(rt as never as { model: unknown }).model = fakeModel();
 	const sessionManager = SessionManager.inMemory("/tmp/unused");
+	const turnContext = () => (rt as never as { pendingTurnContext: TelegramContextDetails | null }).pendingTurnContext;
 	const session = {
 		settingsManager: SettingsManager.inMemory(),
 		sessionManager,
 		getContextUsage: () => null,
-		sendCustomMessage: async (message: { customType: string; content: string; display: boolean; details: unknown }) => {
-			sessionManager.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
+		prompt: async () => {
+			const details = turnContext();
+			if (details) sessionManager.appendCustomMessageEntry("telegram_context_v2", details.providerText, false, details);
 		},
-		prompt: async () => {},
 	};
 	(rt as never as { session: unknown }).session = session;
 	const messageId = 9200;
@@ -260,10 +262,10 @@ test("a reaction-only turn does not clear a direct-address obligation; the owed 
 		(db.query("SELECT COUNT(*) count FROM reply_obligations").get() as { count: number }).count;
 
 	// The turn reacts instead of replying.
-	const append = session.sendCustomMessage;
+	const append = session.prompt;
 	let reacted = false;
-	session.sendCustomMessage = async (message: Parameters<typeof append>[0]) => {
-		await append(message);
+	const react = async () => {
+		await append();
 		if (reacted) return;
 		reacted = true;
 		const result = await (
@@ -273,6 +275,7 @@ test("a reaction-only turn does not clear a direct-address obligation; the owed 
 	};
 	let repairs = 0;
 	session.prompt = async () => {
+		if (turnContext()) return react();
 		repairs++;
 	};
 	rt.trigger("explicit", { reason: "explicit", chatId: CHAT_ID, messageId });
@@ -284,6 +287,7 @@ test("a reaction-only turn does not clear a direct-address obligation; the owed 
 
 	// The repair turn's real send clears the obligation.
 	session.prompt = async () => {
+		if (turnContext()) return react();
 		repairs++;
 		await (rt as never as { executeSend: (params: SendParams) => Promise<unknown> }).executeSend({
 			message: "fixture reply",

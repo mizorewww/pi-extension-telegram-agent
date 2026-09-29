@@ -14,7 +14,11 @@
 
 ## CACHE_SCHEMA_VERSION
 
-当前：**21**。
+当前：**23**。
+
+v23：Telegram turn 经 `session.prompt()` 原生 preflight 启动，`before_agent_start` 注入本轮 `telegram_context_v2`，保证第一次请求已包含完整 system/persona/tools。Pi 0.86 的 `sendCustomMessage(triggerTurn)` 绕过该 preflight，冷启动首轮会遗漏 prompt；不再使用这个入口。每轮增加一条固定短触发消息 `Process the new Telegram context.`，单独锁定 golden；群消息、摘要、工具 grammar 不变，不增加模型调用次数。触发消息在持久历史中只追加，前缀不回写；异常时清理尚未提交的本轮引用，避免污染下一次请求。新 epoch 不恢复旧的缺失前缀。
+
+v22：Pi 四包同步升级到 0.86.0，provider stream 改用 Pi 原生 normalized transcript（system prompt 与 tools 从 system message 读取），满足 Devin/SWE-2 扩展的最低 SDK 要求。项目 system/tools/消息/摘要 grammar 的 golden hash 不变；SDK provider boundary 改变，因此保守轮换 epoch，保留旧 session，首次请求冷缓存。daemon 和 smoke 明确关闭 Pi 新增的 `cacheWarming`，不产生后台预热请求。
 
 v21：send 工具新增可选 `reaction` 参数，经 Bot API `setMessageReaction` 在 `reply_to` 消息上点一个固定枚举内的 reaction emoji（本地白名单 preflight，VS16 规范化），作为不必回复时的表态通道。reaction 不是消息 create：幂等、best-effort——reaction-only 失败直接抛回模型安全重试，已提交消息后的 reaction 失败只记 `reaction_failed` 事件、不降级 send 结果；reaction-only 成功不产生 sent id，因此不算 direct-address 的公开回应（v20 补答与 obligation 语义不变）。send 的 name/description/parameter schema 与共享协议能力声明同步更新（system/tools golden 变化），消息/摘要序列化 grammar 不变。升级会为每个 bot 创建新 epoch，旧 session 文件保留，首次请求冷缓存。
 
@@ -126,7 +130,7 @@ tools: [{ name, description, parameters }] in fixed order
 
 ## 媒体模式与 provider boundary
 
-`media.mode` 选择媒体到达模型的方式：`"vision"`（默认）由辅助视觉模型把媒体描述成文字，`"context"`（opt-in）把图片作为 image 内容块直接交给主模型。两种模式下 voice、audio、非视频 document 与 TGS 动态贴纸都只有文本占位——Pi 0.84.1 只支持 image 内容块，这是硬限制；视频都靠 `ffmpeg`/`ffprobe` 抽帧，缺失时视频在 Telegram 下载前即降级/跳过，不占主对话 token、不阻塞 daemon ready，CLI/operator log/debug 提示安装用途，群内上下文不增加提示文字。
+`media.mode` 选择媒体到达模型的方式：`"vision"`（默认）由辅助视觉模型把媒体描述成文字，`"context"`（opt-in）把图片作为 image 内容块直接交给主模型。两种模式下 voice、audio、非视频 document 与 TGS 动态贴纸都只有文本占位——Pi 0.86.0 只支持 image 内容块，这是硬限制；视频都靠 `ffmpeg`/`ffprobe` 抽帧，缺失时视频在 Telegram 下载前即降级/跳过，不占主对话 token、不阻塞 daemon ready，CLI/operator log/debug 提示安装用途，群内上下文不增加提示文字。
 
 ### Vision（默认模式）
 
@@ -179,7 +183,7 @@ Vision 默认关闭；只有显式 `vision.enabled: true` 才会执行。`auxili
 
 | 项目 | 值 |
 | --- | --- |
-| schema | `21` |
+| schema | `23` |
 | zh system | `a4c784e00a37` |
 | en system | `b89a39b52e87` |
 | legacy message serializer | `68a17d6e5c05` |
@@ -188,6 +192,7 @@ Vision 默认关闭；只有显式 `vision.enabled: true` 才会执行。`auxili
 | compaction prompt | `045a5241fdd7` |
 | multimodal compaction envelope | `e2da2b8b68fa` |
 | reply recovery suffix | `4fc7e277e338` |
+| Telegram turn trigger | `43bb809c775c` |
 | extension order | `e04f7032d531` |
 | context protocol | `2e1c7762b239` |
 | sticker catalog block | exact-string lock（`s<id>: <emoji> <描述>` 行，set/format 不渲染） |

@@ -175,11 +175,21 @@ export function projectTelegramContext(
 	});
 }
 
-export function makeTelegramContextExtension(resolveImage?: TelegramContextImageResolver): InlineExtension {
+export function makeTelegramContextExtension(
+	getTurnContext: () => TelegramContextDetails | null,
+	resolveImage?: TelegramContextImageResolver,
+): InlineExtension {
 	return {
 		name: "tg-context",
 		hidden: true,
 		factory: (pi) => {
+			pi.on("before_agent_start", () => {
+				const details = getTurnContext();
+				if (!details) return;
+				return {
+					message: { customType: TELEGRAM_CONTEXT_TYPE, content: details.providerText, display: false, details },
+				};
+			});
 			pi.on("context", (event) => ({ messages: projectTelegramContext(event.messages, resolveImage) }));
 		},
 	};

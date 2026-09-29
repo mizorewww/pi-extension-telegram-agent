@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 21; // v21: send gains an optional reaction bound to reply_to
+export const CACHE_SCHEMA_VERSION = 23; // v23: native prompt preflight before every Telegram turn
 
 // Fixed shared protocol is deliberately the first byte of every bot's system prompt so bots in
 // the same provider/cache cohort share the longest possible exact prefix.
@@ -53,6 +53,9 @@ export const COMPACTION_SUMMARY_PROMPT = `你在为一个长期住在 Telegram �
 - 这个人设真正会关心的信息
 
 输出中文，分段，直接给摘要正文，控制在 800 字以内。`;
+
+/** Native prompt() installs the Pi system/tool baseline before the injected Telegram context. */
+export const TELEGRAM_TURN_PROMPT = "Process the new Telegram context.";
 
 /** One bounded repair of an otherwise healthy but unpublished direct-address turn. */
 export const REPLY_RECOVERY_PROMPT =
