@@ -23,7 +23,7 @@
 - `telegram-control.test.ts` — `/status` 的 InputRichMessage Markdown、统计数字千位分隔与缓存命中率、独立 plain projection、create→canonical persistence，以及仅在确定性rich拒绝时单次fallback的exactly-once边界。
 - `model-menu.test.ts` — Pi 全目录分页与64-byte callback上限、管理员/群/Bot菜单归属边界、callback不进入消息路由、配置原子写入/回滚、模型切换的会话与epoch隔离及重启恢复。
 - `telemetry.test.ts` — Pi/Telegram status共享读模型：latest排除compaction、lifetime/live totals包含compaction、切换provider/model后的immutable per-run cost累计、本地 estimate 的 `≈` 标记、统一费用精度、runtime snapshot、统一字段顺序、context/window与`CH = R/(↑+R+W)`派生口径。
-- `provider-guard.test.ts` — stream 创建与消费 deadline、主动取消、成功后清理，以及 Pi 原生零重试配置。
+- `provider-guard.test.ts` — stream 创建与消费 deadline、主动取消、成功后清理、Pi 原生零重试配置，以及 smoke 对错误/截断/空/旧/错误答案的非成功判定。
 - `reaction.test.ts` — reaction 白名单、幂等失败边界，以及 reaction-only 不结清公开回复 obligation。
 - `visibility.test.ts` — active context 的完整消息可见性与 compaction 边界。
 - `telegram-delivery.test.ts` — 全局 mention 优先级与 caption、乱序 edit、manual send unknown outcome、control retention 与 pending handoff 跨重启交付。
@@ -33,6 +33,8 @@
 ## 测试选择规则
 
 `runtime-obligation.test.ts` 另覆盖 Pi 原生失败 turn 与下一 prompt preflight 不触发 threshold 摘要、overflow 仍可恢复、摘要失败只记录实际报告的非零用量，以及真实 Telegram 首轮与连续请求包含相同完整 prompt，认证 preflight 失败后重试不重复消费或丢弃本轮上下文。
+
+`smoke-pi.ts` 使用有 deadline、无自动重试的单次真实请求，必须收到新的完整正确答案才退出成功；不输出 thinking 或 provider 错误原文。
 
 - **鼓励 TDD**：新行为先写失败的测试再实现。但脚手架测试在功能稳定后必须删除——测试集只保护长期 invariant 与安全边界，不锁实现细节，不为覆盖率保留一次性验收测试。
 - 能确定性复现的 bug fix 必须有回归测试。

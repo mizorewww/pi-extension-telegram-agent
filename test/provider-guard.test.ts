@@ -8,6 +8,8 @@ import {
 } from "@earendil-works/pi-ai";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { guardProviderCall, providerRetryPolicy } from "../src/agent/provider-guard.ts";
+import { runSmokePrompt } from "../scripts/smoke-pi.ts";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 const model = {
 	id: "test",
@@ -110,4 +112,43 @@ test("zero-retry policy disables native Pi session and summary retries", async (
 	);
 	expect(result.stopReason).toBe("error");
 	expect(calls).toBe(1);
+});
+
+test("smoke rejects resolved provider failures, empty or stale replies, and incorrect answers", async () => {
+	const answer = {
+		role: "assistant" as const,
+		content: [{ type: "text" as const, text: "4" }],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop" as const,
+		timestamp: 1,
+	};
+	for (const result of [
+		undefined,
+		{ ...answer, stopReason: "error" as const },
+		{ ...answer, stopReason: "aborted" as const },
+		{ ...answer, stopReason: "length" as const },
+		{ ...answer, content: [] },
+		{ ...answer, content: [{ type: "text" as const, text: "5" }] },
+		answer,
+	]) {
+		const messages: AgentMessage[] = [answer];
+		const session = {
+			messages,
+			prompt: async () => {
+				if (result) messages.push(result);
+			},
+		};
+		if (result === answer) expect(await runSmokePrompt(session)).toBe(answer);
+		else await expect(runSmokePrompt(session)).rejects.toThrow("SMOKE FAILED");
+	}
 });
