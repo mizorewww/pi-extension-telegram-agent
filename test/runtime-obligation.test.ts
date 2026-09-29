@@ -751,6 +751,121 @@ for (const supportsImages of [true, false]) {
 	});
 }
 
+for (const failure of ["auth", "overflow"] as const) {
+	test(`native compaction skips failed-turn thresholds but preserves ${failure} recovery semantics`, async () => {
+		const root = mkdtempSync(join(tmpdir(), "tg-failed-compaction-"));
+		const { rt, db } = setup();
+		const loader = new DefaultResourceLoader({
+			cwd: root,
+			agentDir: root,
+			noExtensions: true,
+			noSkills: true,
+			noPromptTemplates: true,
+			noContextFiles: true,
+			systemPrompt: "Deterministic fixture.",
+			extensionFactories: [makeTelegramCompactionExtension((event) => (rt as any).handleBeforeCompact(event))],
+		});
+		await loader.reload();
+		const modelRuntime = {
+			getModel: () => fakeModel(),
+			hasConfiguredAuth: () => true,
+			getAuth: async () => ({ auth: { apiKey: "fixture" } }),
+		} as unknown as ModelRuntime;
+		const manager = SessionManager.inMemory(root);
+		manager.appendMessage({ role: "user", content: "earlier turn", timestamp: 1 });
+		manager.appendMessage(assistantResult());
+		const { session } = await createAgentSession({
+			cwd: root,
+			model: fakeModel() as never,
+			modelRuntime,
+			sessionManager: manager,
+			resourceLoader: loader,
+			settingsManager: SettingsManager.inMemory({
+				compaction: { enabled: true, reserveTokens: 32768, keepRecentTokens: 1 },
+				retry: { enabled: false },
+			}),
+			noTools: "all",
+		});
+		(rt as any).session = session;
+		(rt as any).subscribeEvents();
+		let summaries = 0;
+		(rt as any).generateCompactionSummary = async () => {
+			summaries++;
+			return { summary: "summary", usage: assistantResult().usage };
+		};
+		let calls = 0;
+		session.agent.streamFunction = () => {
+			const stream = createAssistantMessageEventStream();
+			if (++calls === 1 || failure === "auth") {
+				stream.push({
+					type: "error",
+					reason: "error",
+					error: {
+						...assistantResult(0),
+						content: [],
+						stopReason: "error",
+						errorMessage: failure === "auth" ? "401 Unauthorized" : "maximum context length exceeded",
+					},
+				});
+			} else stream.push({ type: "done", reason: "stop", message: assistantResult() });
+			return stream;
+		};
+		try {
+			await session.prompt("x".repeat(140_000));
+			expect(summaries).toBe(failure === "auth" ? 0 : 1);
+			expect(calls).toBe(failure === "auth" ? 1 : 2);
+			if (failure === "auth") {
+				// The next prompt's preflight must also avoid retrying a failed threshold summary.
+				await session.prompt("retry");
+				expect(summaries).toBe(0);
+				expect(calls).toBe(2);
+			}
+		} finally {
+			await session.dispose();
+			db.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+test("failed summary attempts do not create zero-usage rows, but preserve reported usage", async () => {
+	const { rt, db } = setup();
+	(rt as any).compactionModel = fakeModel();
+	(rt as any).bot.providerRetries = 0;
+	let inputTokens = 0;
+	(rt as any).modelRuntime = {
+		streamSimple: () => {
+			const stream = createAssistantMessageEventStream();
+			const message = assistantResult(inputTokens);
+			stream.push({
+				type: "error",
+				reason: "error",
+				error: {
+					...message,
+					content: [],
+					stopReason: "error",
+					errorMessage: "401 Unauthorized",
+					usage: { ...message.usage, output: 0, totalTokens: inputTokens },
+				},
+			});
+			return stream;
+		},
+	};
+	try {
+		for (const tokens of [0, 100]) {
+			inputTokens = tokens;
+			const result = await (rt as any).generateCompactionSummary(
+				{ messagesToSummarize: [], turnPrefixMessages: [] },
+				new AbortController().signal,
+			);
+			expect(result).toEqual({ failure: "summary generation error" });
+			expect(db.query("SELECT cache_miss FROM llm_runs").all()).toEqual(tokens ? [{ cache_miss: 100 }] : []);
+		}
+	} finally {
+		db.close();
+	}
+});
+
 test("an oversized summary input is refused before any paid request and records a bounded diagnostic", async () => {
 	const { rt, db } = setup();
 	(rt as any).compactionModel = { ...fakeModel(), contextWindow: 8192 };

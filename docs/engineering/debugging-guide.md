@@ -40,6 +40,8 @@ bun run debug -- --bot A --show-provider-content  # 敏感：显式读取完整�
 
 provider-context 的 `images` 统计引用、可用、缺失数量及文件字节；可用图片出现在对应消息的 content types 中，但即使显式显示正文也只输出图片占位，不读出 base64。主聊天 API/tools 元数据排除摘要 run。`compaction_input` 记录 vision capability、图片附带/缺失计数和输入估算；`compaction_input_rejected{category:model_window_exceeded}` 表示尚未调用 provider。`reply_repair_started` 表示明确寻址的一次补答；`provider_turn_settled.send_outcome` 区分 none/sent/unknown，不能把 unknown 当已确认送达。所有新增诊断保持零正文、零图片字节、零路径，业务判断不依赖日志。
 
+`auto_compact_skipped{reason:threshold,last_turn_failed:true}` 表示最近 assistant 失败后主动取消阈值压缩，没有摘要调用；它不更新最近手动压缩结果。真正的 overflow 仍允许 Pi 压缩恢复。全零摘要尝试不再产生 `llm_runs`，错误与重试看既有日志；历史零用量行保留，不能据其数量推断成功压缩或实际账单。
+
 ## 响应链证据梯
 
 按顺序停止在第一处缺失/失败：

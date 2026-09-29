@@ -777,6 +777,14 @@ export class BotRuntime {
 
 	/** Successful compaction rotates only provider visibility; the business cursor is monotonic. */
 	private onCompactionEnd(event: Extract<AgentSessionEvent, { type: "compaction_end" }>): void {
+		if (event.aborted && this.skipFailedThresholdCompaction(event.reason)) {
+			log.info("agent_runtime", "auto_compact_skipped", {
+				bot_id: this.bot.id,
+				reason: event.reason,
+				last_turn_failed: true,
+			});
+			return;
+		}
 		if (event.aborted || !event.result) {
 			const category = classifyPiProviderFailure(event.errorMessage ?? "compaction failed");
 			this.recordEvent("error", { stage: "compaction", reason: event.reason, aborted: event.aborted, category });
@@ -813,10 +821,20 @@ export class BotRuntime {
 		}
 	}
 
+	/** Pi also checks thresholds before a new prompt, so inspect the persisted last response. */
+	private skipFailedThresholdCompaction(reason: SessionBeforeCompactEvent["reason"]): boolean {
+		if (reason !== "threshold") return false;
+		const last = this.session?.messages.findLast((message) => message.role === "assistant");
+		return last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted");
+	}
+
 	/** session_before_compact handler: empty summary is refused via cancel, never persisted. */
 	private async handleBeforeCompact(
 		event: SessionBeforeCompactEvent,
 	): Promise<{ cancel: true } | { compaction: CompactionResult }> {
+		// Preserve Pi's overflow recovery and explicit compaction; other failed turns must
+		// not multiply an outage into repeated chat + summary provider attempts.
+		if (this.skipFailedThresholdCompaction(event.reason)) return { cancel: true };
 		try {
 			const branchEntries = event.branchEntries;
 			const prep = event.preparation;
@@ -1886,6 +1904,7 @@ export class BotRuntime {
 		model: NonNullable<ReturnType<ModelRuntime["getModel"]>>,
 	): void {
 		const contextTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+		if (contextTokens + usage.output + (usage.reasoning ?? 0) === 0 && usage.cost.total === 0) return;
 		const result = this.db
 			.query(`
 			INSERT INTO llm_runs (

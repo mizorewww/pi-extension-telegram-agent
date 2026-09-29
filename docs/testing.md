@@ -32,7 +32,7 @@
 
 ## 测试选择规则
 
-`runtime-obligation.test.ts` 另覆盖真实 Telegram 首轮与连续请求包含相同完整 prompt，认证 preflight 失败后重试不重复消费或丢弃本轮上下文。
+`runtime-obligation.test.ts` 另覆盖 Pi 原生失败 turn 与下一 prompt preflight 不触发 threshold 摘要、overflow 仍可恢复、摘要失败只记录实际报告的非零用量，以及真实 Telegram 首轮与连续请求包含相同完整 prompt，认证 preflight 失败后重试不重复消费或丢弃本轮上下文。
 
 - **鼓励 TDD**：新行为先写失败的测试再实现。但脚手架测试在功能稳定后必须删除——测试集只保护长期 invariant 与安全边界，不锁实现细节，不为覆盖率保留一次性验收测试。
 - 能确定性复现的 bug fix 必须有回归测试。
