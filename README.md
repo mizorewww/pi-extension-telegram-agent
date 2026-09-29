@@ -56,4 +56,4 @@ bun run stop       # 停止
 
 ## 参与开发
 
-从 [AGENTS.md](AGENTS.md) 和[开发指南](docs/engineering/development-guide.md)开始；文档总索引在 [docs/index.md](docs/index.md)。项目采用 MIT 协议，见 [LICENSE](LICENSE)。
+从 [AGENTS.md](AGENTS.md) 和[开发指南](docs/engineering/development-guide.md)开始；文档总索引在 [docs/index.md](docs/index.md)。项目采用 BSD 2-Clause 协议，见 [LICENSE](LICENSE)。
