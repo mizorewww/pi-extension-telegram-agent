@@ -62,7 +62,7 @@ bun run debug -- --bot A --show-provider-content  # 敏感，本机单bot取证
 默认输出不含消息正文/secret/path，聚合daemon、cursor/obligation、routing claim、LLM run、安全事件、结构化log与完整provider结构元数据，并标记route无run、模型沉默、tool preflight失败和send degraded。显式`--show-provider-content`会在stdout显示完整system/当前session投影，可能包含群正文、tool result与thinking，只可本机短暂取证。`daemon.log`为JSONL，受控start/restart前按8 MiB轮转保留3代且mode 0600；不要把整个文件贴到issue。字段与判断方法见[Debug指南](../engineering/debugging-guide.md)。
 
 ```bash
-bun run pi                          # 从项目依赖启动 Pi，自动加载 Telegram extension
+bun run pi                          # 启动 PATH 中的本机 Pi，自动加载 Telegram extension
 ```
 
 进入 Pi 后：

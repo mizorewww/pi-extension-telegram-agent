@@ -1,36 +1,15 @@
-import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 
-export const PI_CLI_RELATIVE_PATH = "node_modules/@earendil-works/pi-coding-agent/dist/cli.js";
-
-export class PiBootstrapError extends Error {}
-
-/** Install the exact lockfile only when the project-local Pi CLI is absent. */
-export async function ensurePiDependencies(rootDir: string): Promise<boolean> {
-	const cliPath = join(rootDir, PI_CLI_RELATIVE_PATH);
-	if (existsSync(cliPath)) return false;
-
-	const status = await run([process.execPath, "install", "--frozen-lockfile"], rootDir);
-	if (status !== 0) {
-		throw new PiBootstrapError(
-			`Dependency bootstrap failed with exit code ${status}. Run: bun install --frozen-lockfile`,
-		);
-	}
-	if (!existsSync(cliPath)) {
-		throw new PiBootstrapError(`Dependency bootstrap completed but ${PI_CLI_RELATIVE_PATH} is missing.`);
-	}
-	return true;
-}
-
-/** Bootstrap once, then run the version pinned by this project's lockfile under Bun. */
-export async function launchProjectPi(rootDir: string, args: readonly string[]): Promise<number> {
-	await ensurePiDependencies(rootDir);
-	return run([process.execPath, join(rootDir, PI_CLI_RELATIVE_PATH), ...args], rootDir);
-}
-
-async function run(command: readonly string[], cwd: string): Promise<number> {
-	const child = Bun.spawn([...command], {
-		cwd,
+/** Bun prepends node_modules/.bin; skip those entries to use the operator's installed Pi. */
+export async function launchPi(rootDir: string, args: readonly string[]): Promise<number> {
+	const path = (process.env.PATH ?? "")
+		.split(delimiter)
+		.filter((entry) => !resolve(entry).endsWith(join("node_modules", ".bin")))
+		.join(delimiter);
+	const executable = Bun.which("pi", { PATH: path });
+	if (!executable) throw new Error("Pi is not installed on PATH. Install Pi, then run bun run pi again.");
+	const child = Bun.spawn([executable, ...args], {
+		cwd: rootDir,
 		stdin: "inherit",
 		stdout: "inherit",
 		stderr: "inherit",
@@ -41,9 +20,9 @@ async function run(command: readonly string[], cwd: string): Promise<number> {
 if (import.meta.main) {
 	const rootDir = resolve(import.meta.dir, "..");
 	try {
-		process.exitCode = await launchProjectPi(rootDir, process.argv.slice(2));
+		process.exitCode = await launchPi(rootDir, process.argv.slice(2));
 	} catch (error) {
-		console.error(error instanceof Error ? error.message : "Unable to start project Pi.");
+		console.error(error instanceof Error ? error.message : "Unable to start Pi.");
 		process.exitCode = 1;
 	}
 }

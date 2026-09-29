@@ -8,10 +8,11 @@ Run:
 
 ```bash
 bun install --frozen-lockfile
+pi --version
 bun run pi --version
 ```
 
-The expected version is the project-locked Pi 0.84.1. If installation fails, retain the error and fix registry/network access. Do not hide the problem by switching to an unlocked global Pi.
+Both version commands should show the same locally installed version. If `pi` is missing, install Pi and check PATH; the launcher skips `node_modules/.bin` and does not install the CLI. If dependency installation fails, retain the error and fix registry/network access.
 
 ## `/tg config` is missing
 

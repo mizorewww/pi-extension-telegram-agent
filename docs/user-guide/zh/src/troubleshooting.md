@@ -8,10 +8,11 @@
 
 ```bash
 bun install --frozen-lockfile
+pi --version
 bun run pi --version
 ```
 
-预期版本是项目锁定的 Pi 0.84.1。若安装失败，保留错误输出并修复registry/network；不要改成未锁定的全局 Pi 来掩盖问题。
+两个 version 命令应显示本机安装的同一版本。若找不到 `pi`，先安装 Pi 并确认它在 PATH 中；启动器会跳过 `node_modules/.bin`，不自动安装 CLI。依赖安装失败时保留错误输出并修复 registry/network。
 
 ## `/tg config` 不在菜单中
 

@@ -27,7 +27,7 @@
 ## 运行时与依赖
 
 - 运行时：**Bun**（Pi SDK × Bun 兼容性已经 smoke 验证）
-- Pi：registry `@earendil-works/pi-coding-agent`、`pi-ai`、`pi-agent-core`、`pi-tui` 精确锁定为 v0.84.1；`scripts/pi-launcher.ts` 在 project-local CLI 缺失时执行 `bun install --frozen-lockfile`，随后始终以 Bun 启动 lockfile 对应版本。运行与构建不读取 sibling `../pi`。
+- daemon 的 Pi SDK：registry `@earendil-works/pi-coding-agent`、`pi-ai`、`pi-agent-core`、`pi-tui` 精确锁定为 v0.84.1。交互入口 `bun run pi` 使用 PATH 中本机安装的 Pi，排除 Bun 注入的 `node_modules/.bin`；不安装依赖、不固定 CLI 版本。首次运行先执行 `bun install --frozen-lockfile`。运行与构建不读取 sibling `../pi`。
 - Telegram：raw Bot API（fetch long polling），无第三方 SDK
 
 ## Telegram ingestion

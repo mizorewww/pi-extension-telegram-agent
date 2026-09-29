@@ -6,15 +6,16 @@
 
 ## 1. 准备本机环境
 
-安装 Bun，然后 clone 仓库并进入项目目录：
+安装 Bun 和 Pi（确认 `pi --version` 可运行），然后 clone 仓库并进入项目目录：
 
 ```bash
 git clone <repository-url> pi-extension-telegram-agent
 cd pi-extension-telegram-agent
+bun install --frozen-lockfile
 bun run pi
 ```
 
-`bun run pi` 会在项目 Pi CLI 不存在时执行 frozen-lockfile 安装，再启动锁定的 Pi 0.84.1。它不读取相邻的 `../pi` 源码。若你需要显式预安装，可运行 `bun install --frozen-lockfile`。
+`bun run pi` 启动 PATH 中本机安装的 Pi，并转发命令行参数；也可以在仓库根直接运行 `pi`。daemon 使用项目锁定的 Pi SDK，交互式 CLI 版本由本机安装决定。启动器不自动安装依赖，也不读取相邻的 `../pi` 源码。
 
 ## 2. 准备 Telegram
 

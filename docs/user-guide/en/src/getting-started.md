@@ -6,15 +6,16 @@ There is exactly one configuration track: `telegram.config.ts` for non-secret se
 
 ## 1. Prepare the local environment
 
-Install Bun, clone the repository, and enter the project directory:
+Install Bun and Pi (check that `pi --version` works), clone the repository, and enter the project directory:
 
 ```bash
 git clone <repository-url> pi-extension-telegram-agent
 cd pi-extension-telegram-agent
+bun install --frozen-lockfile
 bun run pi
 ```
 
-`bun run pi` performs a frozen-lockfile install only when the project Pi CLI is missing, then starts the locked Pi 0.84.1. It does not read a sibling `../pi` checkout. Run `bun install --frozen-lockfile` when you need an explicit installation step.
+`bun run pi` starts the Pi installed on PATH and forwards command-line arguments; you can also run `pi` directly from the repository root. The daemon uses the project's pinned Pi SDK, while the interactive CLI version comes from your local installation. The launcher does not install dependencies or read a sibling `../pi` checkout.
 
 ## 2. Prepare Telegram
 

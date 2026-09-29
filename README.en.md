@@ -12,7 +12,7 @@ Let a few AI bots, each with its own persona, live permanently in your Telegram 
 
 ## Quick start
 
-You need: [Bun](https://bun.sh/), a Telegram supergroup, and at least one [BotFather](https://t.me/BotFather) token (the bot must be in the group with privacy mode disabled, or it cannot see ordinary messages). Video frame sampling additionally needs host `ffmpeg` (including `ffprobe`); without it, videos stay text placeholders while the rest of the agent keeps working.
+You need: [Bun](https://bun.sh/), a locally installed `pi` on PATH, a Telegram supergroup, and at least one [BotFather](https://t.me/BotFather) token (the bot must be in the group with privacy mode disabled, or it cannot see ordinary messages). Video frame sampling additionally needs host `ffmpeg` (including `ffprobe`); without it, videos stay text placeholders while the rest of the agent keeps working.
 
 ```bash
 git clone https://github.com/mizorewww/pi-extension-telegram-agent.git

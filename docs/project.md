@@ -37,7 +37,7 @@
 
 ## 用户体验
 
-- 新 clone 运行 `bun run pi` 即可安装 lockfile 对应的项目 Pi；配置不存在时 `/tg config` 仍可用，并用 Pi 原生 dialogs 建立 typed config、private `.env` 与 persona。
+- 新 clone 先运行 `bun install --frozen-lockfile`，再用 `bun run pi` 启动本机安装的 Pi；配置不存在时 `/tg config` 仍可用，并用 Pi 原生 dialogs 建立 typed config、private `.env` 与 persona。
 - 向导只有在受控 daemon restart 明确 ready 后才自动打开 all-bots feed；credential/network 失败会保留已验证配置并给出 status/retry，不伪报连接成功。
 - 启动 daemon → 配置的 bots 长期在线 → 消息落库 → Agent 按规则运行
 - 用户随时在项目目录运行 `bun run pi`，用 `/tg attach [bot-id]` 在 Pi 原生 transcript 查看完整群聊、LOCAL 事件，并在与 Pi 原生同构的 attached footer 查看数据库 telemetry 保留期 usage；此时隐藏无关的 Pi operator usage 行，detach 后恢复；关闭 Pi 不影响 daemon，累计值不归零
