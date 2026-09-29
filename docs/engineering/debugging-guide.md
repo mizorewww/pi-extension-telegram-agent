@@ -83,6 +83,8 @@ provider-context 的 `images` 统计引用、可用、缺失数量及文件字�
 - 新event必须说明它区分了哪个相邻状态；如果现有event/DB已能回答，就不要新增。
 - `data/daemon.log`在受控spawn前按8 MiB轮转，保留`.1`–`.3`，mode 0600。foreground也输出同一JSONL。
 
+Telegram `/model` 复用 `telegram_control` 审计的 command/target/authorized/outcome；busy、permission_denied、stale_menu、image_input_unsupported 与 config_write_failed 可区分。成功切换另有 `agent_runtime/model_changed` 的 bot/provider/model/reasoning/epoch，准备或本地提交失败为 `model_change_failed` 的固定category；菜单远端失败复用 `telegram_control/operation_failed` 的 callback_answer/menu_edit operation，不重试远端创建。模型身份、epoch与现有manifest足以关联，无callback data、凭据或异常原文进入日志。
+
 ## 新功能强制 Debug impact 检查
 
 每个新功能/行为改动在实现前回答，并写进任务说明：

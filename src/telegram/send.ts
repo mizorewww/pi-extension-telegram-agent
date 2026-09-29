@@ -1,13 +1,18 @@
 // Shared Telegram send -> canonical DB transaction used by agent tools and operator IPC.
 
 import type { Database } from "bun:sqlite";
-import { TelegramApiError } from "./api.ts";
+import { TelegramApiError, type InlineKeyboardMarkup } from "./api.ts";
 import { insertSentMessage } from "./ingest.ts";
 import { formatTelegramMarkdown, TelegramMarkdownError, type TelegramMessageEntity } from "./markdown.ts";
 import type { CanonicalMessage } from "./normalize.ts";
 
 export interface TextSendApi {
-	sendMessage(chatId: number, text: string, replyToMessageId?: number): Promise<Record<string, unknown>>;
+	sendMessage(
+		chatId: number,
+		text: string,
+		replyToMessageId?: number,
+		replyMarkup?: InlineKeyboardMarkup,
+	): Promise<Record<string, unknown>>;
 }
 
 export interface MarkdownTextSendApi extends TextSendApi {
@@ -124,8 +129,9 @@ export async function sendTextAndPersist(
 	chatId: number,
 	text: string,
 	replyToMessageId?: number,
+	replyMarkup?: InlineKeyboardMarkup,
 ): Promise<{ raw: Record<string, unknown>; canonical: CanonicalMessage }> {
-	const raw = await api.sendMessage(chatId, text, replyToMessageId);
+	const raw = await api.sendMessage(chatId, text, replyToMessageId, replyMarkup);
 	return { raw, canonical: await persistSentMessageWithRetry(db, botId, raw, "plain") };
 }
 

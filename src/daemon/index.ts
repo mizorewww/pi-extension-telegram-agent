@@ -13,7 +13,11 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { CACHE_SCHEMA_VERSION } from "../agent/prompt.ts";
 import { ManualSendService } from "./manual-send.ts";
-import { parseTelegramControlCommand, TelegramControlCommandService } from "../telegram/control-command.ts";
+import {
+	parseTelegramControlCommand,
+	parseTelegramControlCallback,
+	TelegramControlCommandService,
+} from "../telegram/control-command.ts";
 import { publishTelegramControlMenus, TelegramControlCoordinator } from "../telegram/control-integration.ts";
 import { createSharedModelRuntime, PiModelConfigurationError, piAuthSource } from "../agent/model-runtime.ts";
 import { parsePiModelReference } from "../agent/model-ref.ts";
@@ -247,7 +251,15 @@ for (const [botId, rt] of runtimes) {
 const mediaBackfillCount = mediaCache.scheduleBackfill();
 log.info("media_cache", "startup_scheduled", { scheduled: mediaBackfillCount, limit: 100, concurrency: 2 });
 
-const telegramControl = new TelegramControlCommandService(db, config.bots, rootDir, runtimes, config.telegramAdmins);
+const telegramControl = new TelegramControlCommandService(
+	db,
+	config.bots,
+	rootDir,
+	runtimes,
+	config.telegramAdmins,
+	undefined,
+	sharedModelRuntime,
+);
 const telegramControlCoordinator = new TelegramControlCoordinator(
 	db,
 	telegramControl,
@@ -316,25 +328,33 @@ function route(result: IngestResult, row: MessageRow): void {
 
 // Routing and control both run inside the poller's durable handoff: the pending dispatch is
 // only deleted after this handler returns, so a crash before claim/handle replays the update.
-const pollers = composePollers(db, config, async (result, update, botId) => {
-	log.info("telegram_ingest", "update_committed", {
-		bot_id: botId,
-		kind: result.kind,
-		chat_id: result.chatId,
-		message_id: result.messageId,
-	});
-	if (result.chatId == null || result.messageId == null) return;
-	const row = db
-		.query("SELECT * FROM messages WHERE chat_id = ? AND message_id = ?")
-		.get(result.chatId, result.messageId) as MessageRow | null;
-	if (!row) return;
-	const command = parseTelegramControlCommand(update, botId, identities);
-	if (command) await telegramControlCoordinator.handle(command);
-	else route(result, row);
-	ipc.broadcast(ipc.msgToItem(row));
-	// Poller offset + canonical row are durable before this non-blocking side effect.
-	mediaCache.scheduleMessage(botId, row);
-});
+const pollers = composePollers(
+	db,
+	config,
+	async (result, update, botId) => {
+		log.info("telegram_ingest", "update_committed", {
+			bot_id: botId,
+			kind: result.kind,
+			chat_id: result.chatId,
+			message_id: result.messageId,
+		});
+		if (result.chatId == null || result.messageId == null) return;
+		const row = db
+			.query("SELECT * FROM messages WHERE chat_id = ? AND message_id = ?")
+			.get(result.chatId, result.messageId) as MessageRow | null;
+		if (!row) return;
+		const command = parseTelegramControlCommand(update, botId, identities);
+		if (command) await telegramControlCoordinator.handle(command);
+		else route(result, row);
+		ipc.broadcast(ipc.msgToItem(row));
+		// Poller offset + canonical row are durable before this non-blocking side effect.
+		mediaCache.scheduleMessage(botId, row);
+	},
+	async (update, botId) => {
+		const command = parseTelegramControlCallback(update, botId, config.groupChatId);
+		if (command) await telegramControlCoordinator.handle(command);
+	},
+);
 
 let stopping = false;
 async function shutdown(signal: string, exitCode = 0) {

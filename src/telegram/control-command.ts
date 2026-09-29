@@ -1,8 +1,11 @@
 import type { Database } from "bun:sqlite";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { log } from "../observability/log.ts";
 import type { BotConfig, TelegramAdmin } from "../config.ts";
-import type { ManualCompactResult } from "../agent/runtime.ts";
-import { updateBotConfigField } from "../onboarding/config-core.ts";
+import type { ManualCompactResult, ModelControlResult, ModelControlSelection } from "../agent/runtime.ts";
+import { updateBotConfigField, updateBotModelConfig } from "../onboarding/config-core.ts";
+import type { InlineKeyboardMarkup } from "./api.ts";
+import { modelMenuKey, renderModelMenu } from "./model-menu.ts";
 import { loadBotStats } from "../db/usage.ts";
 import type { RuntimeControlSnapshot } from "../ipc.ts";
 import {
@@ -34,12 +37,13 @@ export type TelegramControlAction =
 	| { kind: "help" }
 	| { kind: "status" }
 	| { kind: "compact" }
+	| { kind: "model"; data?: string }
 	| { kind: "set"; parameter: "routing_p" | "cooldown_ms"; value: number }
 	| { kind: "usage" };
 
-export type TelegramControlCommandToken = "help" | "status" | "compact" | "set";
+export type TelegramControlCommandToken = "help" | "status" | "compact" | "set" | "model";
 
-const COMMAND_TOKENS: ReadonlySet<string> = new Set(["help", "status", "compact", "set"]);
+const COMMAND_TOKENS: ReadonlySet<string> = new Set(["help", "status", "compact", "set", "model"]);
 
 export interface ParsedTelegramControlCommand {
 	chatId: number;
@@ -49,12 +53,18 @@ export interface ParsedTelegramControlCommand {
 	replyBotId: string;
 	sender: ControlSender;
 	action: TelegramControlAction;
+	callbackQueryId?: string;
 }
 
 export interface TelegramControlRuntime {
 	controlSnapshot(): RuntimeControlSnapshot;
 	compactForControl(): Promise<ManualCompactResult>;
 	consumeControlMessage(messageId: number): void;
+	changeModelForControl(
+		provider: string,
+		model: string,
+		persist: (selection: ModelControlSelection) => { finalize(): void; rollback(): void },
+	): Promise<ModelControlResult>;
 }
 
 export interface TelegramControlResult {
@@ -64,12 +74,54 @@ export interface TelegramControlResult {
 	text: string | null;
 	/** Telegram InputRichMessage Markdown; text remains the independent safe fallback projection. */
 	richText?: string;
+	replyMarkup?: InlineKeyboardMarkup;
+	callbackNotice?: string;
 }
 
 interface ControlExecutionResult {
 	text: string;
 	richText?: string;
+	replyMarkup?: InlineKeyboardMarkup;
+	callbackNotice?: string;
 	outcome: string;
+}
+
+/** Callback messages never enter canonical ingestion or routing. Accept only this deployment's group. */
+export function parseTelegramControlCallback(
+	update: unknown,
+	botId: string,
+	groupChatId: number,
+): ParsedTelegramControlCommand | null {
+	const query = (update as { callback_query?: Record<string, any> } | null)?.callback_query;
+	if (
+		!query ||
+		typeof query.id !== "string" ||
+		typeof query.data !== "string" ||
+		!query.data.startsWith("model:") ||
+		Buffer.byteLength(query.data) > 64
+	)
+		return null;
+	const message = query.message;
+	if (message?.chat?.id !== groupChatId || !Number.isSafeInteger(message.message_id) || message.message_id <= 0)
+		return null;
+	return {
+		chatId: groupChatId,
+		messageId: message.message_id,
+		edited: false,
+		receivedByBotId: botId,
+		replyBotId: botId,
+		callbackQueryId: query.id,
+		sender: {
+			id: Number.isSafeInteger(query.from?.id) && query.from.id > 0 ? query.from.id : null,
+			username:
+				typeof query.from?.username === "string" && /^[a-z0-9_]{5,32}$/i.test(query.from.username)
+					? `@${query.from.username.toLowerCase()}`
+					: null,
+			isBot: query.from?.is_bot === true,
+			hasSenderChat: message.sender_chat != null && message.from?.is_bot !== true,
+		},
+		action: { kind: "model", data: query.data },
+	};
 }
 
 /**
@@ -170,6 +222,7 @@ function parseControlValue(parameter: "routing_p" | "cooldown_ms", raw: string):
 
 export class TelegramControlCommandService {
 	private mutationTail: Promise<void> = Promise.resolve();
+	private mutations = 0;
 
 	constructor(
 		private readonly db: Database,
@@ -178,9 +231,11 @@ export class TelegramControlCommandService {
 		private readonly runtimes: ReadonlyMap<string, TelegramControlRuntime>,
 		private readonly admins: readonly TelegramAdmin[],
 		private readonly now: () => number = () => Date.now(),
+		private readonly models?: Pick<ModelRuntime, "getAvailableSnapshot">,
 	) {}
 
 	async handle(command: ParsedTelegramControlCommand): Promise<TelegramControlResult> {
+		if (command.callbackQueryId) return this.handleModelCallback(command);
 		const claimed = this.claim(command);
 		this.consumeEveryRuntime(command.messageId);
 		if (!claimed) return this.result(command, null);
@@ -205,12 +260,38 @@ export class TelegramControlCommandService {
 			return await this.enqueueMutation(async () => {
 				const executed = await this.execute(command);
 				this.audit(command, true, executed.outcome, startedAt);
-				return this.result(command, executed.text, executed.richText);
+				return { ...this.result(command, executed.text, executed.richText), replyMarkup: executed.replyMarkup };
 			});
 		}
 		const executed = await this.execute(command);
 		this.audit(command, true, executed.outcome, startedAt);
 		return this.result(command, executed.text, executed.richText);
+	}
+
+	private async handleModelCallback(command: ParsedTelegramControlCommand): Promise<TelegramControlResult> {
+		const startedAt = this.now();
+		const authorized = isHuman(command.sender) && this.isAdmin(command.sender);
+		const owned = this.db
+			.query(`SELECT 1 FROM telegram_control_messages c JOIN messages m USING (chat_id, message_id)
+			WHERE c.chat_id = ? AND c.message_id = ? AND m.first_seen_by = ? AND m.is_bot = 1`)
+			.get(command.chatId, command.messageId, command.replyBotId);
+		let executed: ControlExecutionResult;
+		if (!authorized)
+			executed = {
+				text: "",
+				callbackNotice: "权限不足：此操作仅限 telegram_admins 白名单。",
+				outcome: "permission_denied",
+			};
+		else if (!owned) executed = { text: "", callbackNotice: "菜单已失效，请重新发送 /model。", outcome: "stale_menu" };
+		else if (this.mutations > 0)
+			executed = { text: "", callbackNotice: "有管理操作正在执行，请稍后重试。", outcome: "busy" };
+		else executed = await this.enqueueMutation(() => this.execute(command));
+		this.audit(command, authorized, executed.outcome, startedAt);
+		return {
+			...this.result(command, executed.text || null),
+			replyMarkup: executed.replyMarkup,
+			callbackNotice: executed.callbackNotice,
+		};
 	}
 
 	/** Persist and expose a sent control reply so it remains outside every future provider epoch. */
@@ -239,9 +320,48 @@ export class TelegramControlCommandService {
 				return this.set(command.replyBotId, command.action.parameter, command.action.value);
 			case "compact":
 				return await this.compact(command.replyBotId);
+			case "model":
+				return await this.model(command.replyBotId, command.action.data);
 			case "usage":
 				return { text: USAGE_TEXT, outcome: "usage" };
 		}
+	}
+
+	private async model(botId: string, data?: string): Promise<ControlExecutionResult> {
+		const bot = this.bots.find((candidate) => candidate.id === botId);
+		if (!bot || !this.models) return { text: "模型目录暂不可用。", outcome: "unavailable" };
+		const models = this.models.getAvailableSnapshot();
+		const selection = data ? /^model:s:([a-f0-9]{24})$/.exec(data) : null;
+		if (selection) {
+			const model = models.find((candidate) => modelMenuKey(candidate.provider, candidate.id) === selection[1]);
+			if (!model) return { text: "", callbackNotice: "模型已不可用，请重新发送 /model。", outcome: "unknown_model" };
+			const runtime = this.runtimes.get(botId);
+			const result = runtime
+				? await runtime.changeModelForControl(model.provider, model.id, (value) =>
+						updateBotModelConfig(this.rootDir, botId, value),
+					)
+				: { ok: false as const, code: "unavailable" as const };
+			if (!result.ok) {
+				const message =
+					result.code === "image_input_unsupported"
+						? "当前为图片上下文模式，此模型不支持图片输入。"
+						: result.code === "busy"
+							? "Bot 正忙，请稍后重试。"
+							: result.code === "config_write_failed"
+								? "配置保存失败，原模型保持不变。"
+								: `切换失败（${result.code}），请稍后重试。`;
+				return { text: "", callbackNotice: message, outcome: result.code };
+			}
+			return {
+				text: `已选择 ${model.provider}/${model.id}\nReasoning：${result.reasoningEffort}\n已保存，重启后仍然生效。`,
+				replyMarkup: { inline_keyboard: [[{ text: "选择模型", callback_data: "model:r:0" }]] },
+				outcome: "ok",
+			};
+		}
+		const view = renderModelMenu(bot, models, data);
+		return view
+			? { ...view, outcome: "ok" }
+			: { text: "", callbackNotice: "菜单已失效，请重新发送 /model。", outcome: "stale_menu" };
 	}
 
 	private formatStatus(botId: string): ControlExecutionResult {
@@ -311,7 +431,7 @@ export class TelegramControlCommandService {
 	}
 
 	private audit(command: ParsedTelegramControlCommand, authorized: boolean, outcome: string, startedAt: number): void {
-		const target = ["status", "compact", "set"].includes(command.action.kind) ? command.replyBotId : null;
+		const target = ["status", "compact", "set", "model"].includes(command.action.kind) ? command.replyBotId : null;
 		const finishedAt = this.now();
 		this.db.query("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES (?, ?, ?, ?)").run(
 			command.replyBotId,
@@ -340,10 +460,15 @@ export class TelegramControlCommandService {
 	}
 
 	private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+		this.mutations++;
 		const result = this.mutationTail.then(operation, operation);
 		this.mutationTail = result.then(
-			() => {},
-			() => {},
+			() => {
+				this.mutations--;
+			},
+			() => {
+				this.mutations--;
+			},
 		);
 		return result;
 	}
@@ -362,7 +487,7 @@ function isHuman(sender: ControlSender): boolean {
 }
 
 function isMutation(action: TelegramControlAction): boolean {
-	return action.kind === "compact" || action.kind === "set";
+	return action.kind === "compact" || action.kind === "set" || action.kind === "model";
 }
 
 function compactFailureText(code: Exclude<ManualCompactResult, { ok: true }>["code"]): string {
@@ -416,6 +541,7 @@ const USAGE_TEXT = [
 	"用法：",
 	"/help",
 	"/status",
+	"/model（管理员）",
 	"/compact（管理员）",
 	"/set <routing_p|cooldown_ms> <value>（管理员）",
 ].join("\n");
@@ -423,7 +549,8 @@ const USAGE_TEXT = [
 const HELP_TEXT = [
 	"Telegram Agent 控制",
 	"查看：/help、/status",
-	"管理员：/compact、/set",
+	"管理员：/model、/compact、/set",
+	"/model 用按钮选择 Pi 可用模型，保存后立即开启新会话。",
 	"命令默认作用于接收消息的 bot；带 @bot_username 后缀时定向到对应 bot。",
 	"手动 compact 会使用既有摘要模型并产生相应费用。",
 	"/set 写穿 telegram.config.ts，新值重启后仍然生效。",

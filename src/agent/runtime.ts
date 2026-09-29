@@ -5,7 +5,7 @@ import type { Database } from "bun:sqlite";
 import { readFileSync, mkdirSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { contentText, retryAssistantCall } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, contentText, retryAssistantCall, type Api, type Model } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
@@ -96,13 +96,34 @@ import {
 	type ProviderPayloadObservation,
 	type TelegramContextDetails,
 } from "./extensions/index.ts";
-import { buildContextFingerprint, canResumeContextSession, sha256 } from "./context-fingerprint.ts";
+import {
+	buildContextFingerprint,
+	canResumeContextSession,
+	sha256,
+	type ContextFingerprintInput,
+} from "./context-fingerprint.ts";
 import { contextStateFromEntries } from "./context-state.ts";
 import { parsePiModelReference, type PiRequestThinkingLevel } from "./model-ref.ts";
 import type { VideoTranscoderAvailability } from "../media/video-frames.ts";
 import { errorCategory, log } from "../observability/log.ts";
 import { fitContextBreakdown } from "../observability/usage.ts";
 import { AgentActivityCollector } from "./activity.ts";
+
+export type ModelControlSelection = Pick<BotConfig, "provider" | "model" | "reasoningEffort">;
+export type ModelControlResult =
+	| { ok: true; epoch: number; reasoningEffort: BotConfig["reasoningEffort"] }
+	| {
+			ok: false;
+			code:
+				| "busy"
+				| "stopping"
+				| "unavailable"
+				| "unknown_model"
+				| "unauthenticated_provider"
+				| "image_input_unsupported"
+				| "config_write_failed"
+				| "failed";
+	  };
 
 const MAX_EVENT_SCAN = 256;
 const MAX_OBLIGATION_SCAN = 64;
@@ -179,6 +200,13 @@ export class BotRuntime {
 	private cooldownUntil = 0;
 	private cooldownAfterFlush = false;
 	private controlCompacting = false;
+	private controlChangingModel = false;
+	private contextFingerprintInput!: ContextFingerprintInput;
+	private createModelSession!: (
+		model: Model<Api>,
+		thinking: BotConfig["reasoningEffort"],
+		manager: SessionManager,
+	) => Promise<AgentSession>;
 	/** Last assistant message ended in error/abort; auto-compaction waits for a healthy turn. */
 	private lastTurnFailed = false;
 	/** Set by the irreversible send boundary, not by provider health or usage telemetry. */
@@ -347,8 +375,6 @@ export class BotRuntime {
 
 		// Custom compaction: chat-oriented summary (state, not replay), threshold from config.
 		// Pi's trigger formula is contextTokens > contextWindow - reserveTokens, so reserve = window - threshold.
-		const threshold = this.bot.compactionThreshold;
-		const reserveTokens = Math.max(MIN_COMPACTION_RESERVE, model.contextWindow - threshold);
 		// Tool order is cache-visible protocol: never reorder (docs/cache.md, REQ-TEST-0001 R2).
 		// Per-bot tool toggles (REQ-CONF-0001): filter the fixed-order tool list. send off
 		// means the bot cannot speak in-group (observer-only); search/run_js off saves tokens.
@@ -359,7 +385,7 @@ export class BotRuntime {
 		this.staticPrefixTokenEstimate = estimateProviderTokensUpperBound(
 			`${systemPrompt}\n${JSON.stringify(activeTools.map(({ name, description, parameters }) => ({ name, description, parameters })))}`,
 		);
-		this.contextFingerprint = buildContextFingerprint({
+		this.contextFingerprintInput = {
 			piVersion: PI_VERSION,
 			provider: this.bot.provider,
 			api: model.api,
@@ -381,7 +407,8 @@ export class BotRuntime {
 				description: tool.description,
 				parameters: tool.parameters,
 			})),
-		});
+		};
+		this.contextFingerprint = buildContextFingerprint(this.contextFingerprintInput);
 
 		const sessionsDir = join(this.config.dataDir, "sessions", this.bot.id);
 		mkdirSync(sessionsDir, { recursive: true });
@@ -426,49 +453,58 @@ export class BotRuntime {
 				(message) => this.captureAssistantActivity(message),
 			),
 		];
-		const loader = new DefaultResourceLoader({
-			cwd: this.config.dataDir,
-			agentDir: join(this.config.dataDir, "pi-agent"),
-			systemPrompt,
-			noExtensions: true,
-			noSkills: true,
-			noPromptTemplates: true,
-			noContextFiles: true,
-			extensionFactories: extensions,
-		});
-		await loader.reload();
+		this.createModelSession = async (selectedModel, thinking, manager) => {
+			const loader = new DefaultResourceLoader({
+				cwd: this.config.dataDir,
+				agentDir: join(this.config.dataDir, "pi-agent"),
+				systemPrompt,
+				noExtensions: true,
+				noSkills: true,
+				noPromptTemplates: true,
+				noContextFiles: true,
+				extensionFactories: extensions,
+			});
+			await loader.reload();
 
-		const { session } = await createAgentSession({
-			cwd: this.config.dataDir,
-			model,
-			thinkingLevel: this.bot.reasoningEffort,
-			modelRuntime: this.modelRuntime,
-			sessionManager,
-			settingsManager: SettingsManager.inMemory({
-				compaction: { enabled: true, reserveTokens, keepRecentTokens: this.bot.compactionKeepRecent },
-				retry: { ...providerRetryPolicy(this.bot.providerRetries), provider: { maxRetries: 0 } },
-			}),
-			resourceLoader: loader,
-			noTools: "builtin",
-			customTools: activeTools,
-		});
-		this.session = session;
-		const streamFunction = session.agent.streamFunction;
-		session.agent.streamFunction = (requestModel, context, options) =>
-			guardProviderCall(
-				(signal) =>
-					streamFunction(requestModel, context, {
-						...options,
-						signal,
-						cacheRetention: this.bot.cacheRetention,
+			const { session } = await createAgentSession({
+				cwd: this.config.dataDir,
+				model: selectedModel,
+				thinkingLevel: thinking,
+				modelRuntime: this.modelRuntime,
+				sessionManager: manager,
+				settingsManager: SettingsManager.inMemory({
+					compaction: {
+						enabled: true,
+						reserveTokens: Math.max(MIN_COMPACTION_RESERVE, selectedModel.contextWindow - this.bot.compactionThreshold),
+						keepRecentTokens: this.bot.compactionKeepRecent,
+					},
+					retry: { ...providerRetryPolicy(this.bot.providerRetries), provider: { maxRetries: 0 } },
+				}),
+				resourceLoader: loader,
+				noTools: "builtin",
+				customTools: activeTools,
+			});
+			const streamFunction = session.agent.streamFunction;
+			session.agent.streamFunction = (requestModel, context, options) => {
+				return guardProviderCall(
+					(signal) =>
+						streamFunction(requestModel, context, {
+							...options,
+							signal,
+							cacheRetention: this.bot.cacheRetention,
+							timeoutMs: this.bot.providerTimeoutMs,
+						}),
+					requestModel,
+					options?.signal,
+					{
 						timeoutMs: this.bot.providerTimeoutMs,
-					}),
-				requestModel,
-				options?.signal,
-				{
-					timeoutMs: this.bot.providerTimeoutMs,
-				},
-			);
+					},
+				);
+			};
+			return session;
+		};
+		const session = await this.createModelSession(model, this.bot.reasoningEffort, sessionManager);
+		this.session = session;
 		const sessionFile = session.sessionFile;
 		if (!sessionFile) throw new Error(`persistent session file unavailable for bot ${this.bot.id}`);
 		setSessionManifest(this.db, {
@@ -941,7 +977,7 @@ export class BotRuntime {
 	/** Lifecycle state used by deterministic scheduling and the Telegram control plane. */
 	samplingState(now = this.monotonicNow()): "idle" | "busy" | "cooldown" | "stopping" {
 		if (this.stopping) return "stopping";
-		if (this.flushing || this.controlCompacting) return "busy";
+		if (this.flushing || this.controlCompacting || this.controlChangingModel) return "busy";
 		if (now < this.cooldownUntil) return "cooldown";
 		return "idle";
 	}
@@ -970,7 +1006,7 @@ export class BotRuntime {
 		if (source === "probability" && state !== "idle") {
 			return state === "busy" ? "skipped_busy" : "skipped_cooldown";
 		}
-		if (this.controlCompacting) {
+		if (this.controlCompacting || this.controlChangingModel) {
 			this.pendingTrigger = true;
 			this.pendingTriggerMessageId = routingTrigger?.messageId ?? this.pendingTriggerMessageId;
 			return "coalesced";
@@ -1377,7 +1413,13 @@ export class BotRuntime {
 	async compactForControl(): Promise<ManualCompactResult> {
 		if (this.stopping) return { ok: false, code: "stopping" };
 		if (!this.session) return { ok: false, code: "unavailable" };
-		if (this.flushing || this.running || this.controlCompacting || this.session.isStreaming) {
+		if (
+			this.flushing ||
+			this.running ||
+			this.controlCompacting ||
+			this.controlChangingModel ||
+			this.session.isStreaming
+		) {
 			return { ok: false, code: "busy" };
 		}
 		// Pi's prepareCompaction returns nothing when the branch already ends in a compaction or
@@ -1396,6 +1438,116 @@ export class BotRuntime {
 			return { ok: false, code: "failed" };
 		} finally {
 			this.controlCompacting = false;
+			if (this.pendingTrigger && !this.stopping) {
+				this.pendingTrigger = false;
+				this.trigger("explicit");
+			}
+		}
+	}
+
+	/** Prepare a fresh Pi session before committing config; existing session bytes remain untouched. */
+	async changeModelForControl(
+		provider: string,
+		modelId: string,
+		persist: (selection: ModelControlSelection) => { finalize(): void; rollback(): void },
+	): Promise<ModelControlResult> {
+		if (this.stopping) return { ok: false, code: "stopping" };
+		if (!this.session) return { ok: false, code: "unavailable" };
+		if (
+			this.flushing ||
+			this.running ||
+			this.controlCompacting ||
+			this.controlChangingModel ||
+			this.session.isStreaming
+		)
+			return { ok: false, code: "busy" };
+		const catalog = this.modelRuntime.getModel(provider, modelId);
+		if (!catalog) return { ok: false, code: "unknown_model" };
+		if (!this.modelRuntime.hasConfiguredAuth(provider)) return { ok: false, code: "unauthenticated_provider" };
+		if (this.config.media.mode === "context" && !catalog.input.includes("image"))
+			return { ok: false, code: "image_input_unsupported" };
+		const reasoningEffort = clampThinkingLevel(catalog, this.bot.reasoningEffort);
+		if (provider === this.bot.provider && modelId === this.bot.model && reasoningEffort === this.bot.reasoningEffort)
+			return { ok: true, epoch: this.epoch, reasoningEffort };
+		this.controlChangingModel = true;
+		let nextSession: AgentSession | null = null;
+		let write: ReturnType<typeof persist> | undefined;
+		let stage: "failed" | "config_write_failed" = "failed";
+		try {
+			const nextModel = { ...catalog, contextWindow: Math.min(catalog.contextWindow, this.config.contextWindow) };
+			const identity = {
+				...this.contextFingerprintInput,
+				provider,
+				model: modelId,
+				api: nextModel.api,
+				contextWindow: nextModel.contextWindow,
+				reasoningEffort,
+			};
+			const fingerprint = buildContextFingerprint(identity);
+			nextSession = await this.createModelSession(
+				nextModel,
+				reasoningEffort,
+				SessionManager.create(this.config.dataDir, join(this.config.dataDir, "sessions", this.bot.id)),
+			);
+			if (this.stopping) return { ok: false, code: "stopping" };
+			if (!nextSession.sessionFile) throw new Error("persistent session unavailable");
+			stage = "config_write_failed";
+			write = persist({ provider, model: modelId, reasoningEffort });
+			stage = "failed";
+			const epoch = this.epoch + 1;
+			this.db.transaction(() => {
+				setBotState(this.db, this.bot.id, EPOCH_KEY, String(epoch));
+				replaceVisibleMessageIds(this.db, this.bot.id, this.config.groupChatId, epoch, []);
+				setSessionManifest(this.db, {
+					botId: this.bot.id,
+					sessionId: nextSession!.sessionId,
+					sessionFile: nextSession!.sessionFile!,
+					contextFingerprint: fingerprint,
+					createdAt: Date.now(),
+				});
+			})();
+			write.finalize();
+			write = undefined;
+			const previous = this.session;
+			this.session = nextSession;
+			nextSession = null;
+			Object.assign(this.bot, { provider, model: modelId, reasoningEffort });
+			this.model = nextModel;
+			this.contextFingerprintInput = identity;
+			this.contextFingerprint = fingerprint;
+			this.epoch = epoch;
+			this.visibleMessageIds.clear();
+			this.lastTurnFailed = false;
+			this.pendingPayloadObservations = [];
+			this.subscribeEvents();
+			// Disposal cannot undo an already committed selection.
+			try {
+				await previous.dispose();
+			} catch {
+				log.warn("agent_runtime", "previous_session_dispose_failed", {
+					bot_id: this.bot.id,
+					category: "local_failure",
+				});
+			}
+			log.info("agent_runtime", "model_changed", {
+				bot_id: this.bot.id,
+				provider,
+				model: modelId,
+				reasoning: reasoningEffort,
+				epoch,
+			});
+			return { ok: true, epoch, reasoningEffort };
+		} catch {
+			write?.rollback();
+			log.warn("agent_runtime", "model_change_failed", { bot_id: this.bot.id, category: stage });
+			return { ok: false, code: stage };
+		} finally {
+			try {
+				await nextSession?.dispose();
+			} catch {
+				/* An uncommitted, empty session owns no work. */
+			}
+			this.controlChangingModel = false;
 			if (this.pendingTrigger && !this.stopping) {
 				this.pendingTrigger = false;
 				this.trigger("explicit");

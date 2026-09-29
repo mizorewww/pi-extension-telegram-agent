@@ -143,6 +143,9 @@ describe("Telegram rich control status", () => {
 				lastCompact: { at: 1_786_251_069_000, outcome: "ok" as const },
 			}),
 			compactForControl: async () => ({ ok: false as const, code: "busy" as const }),
+			changeModelForControl: async () => {
+				throw new Error("unexpected model change");
+			},
 			consumeControlMessage: () => {},
 		};
 		const service = new TelegramControlCommandService(
@@ -206,6 +209,12 @@ describe("Telegram rich control status", () => {
 				[
 					"A",
 					{
+						answerCallbackQuery: async () => {
+							throw new Error("unexpected callback");
+						},
+						editMessageText: async () => {
+							throw new Error("unexpected edit");
+						},
 						sendRichMessage: async () => {
 							calls.push("rich");
 							return telegramMessage(100, true);

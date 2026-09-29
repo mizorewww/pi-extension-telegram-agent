@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { AppConfig, BotConfig } from "../config.ts";
 import { setBotState } from "../db/db.ts";
 import type { BotIdentity } from "../agent/router.ts";
-import { Poller, type MessageHandler } from "../telegram/poller.ts";
+import { Poller, type MessageHandler, type CallbackHandler } from "../telegram/poller.ts";
 
 export interface IdentityApi {
 	getMe(): Promise<{ id: number; username: string }>;
@@ -56,9 +56,12 @@ export function composePollers(
 	db: Database,
 	config: Pick<AppConfig, "bots" | "groupChatId" | "media">,
 	onMessage: MessageHandler,
+	onCallback?: CallbackHandler,
 ): Poller[] {
 	// media_update deltas (persisted vision descriptions) exist only in vision mode; context mode
 	// attaches image blocks to the message event itself and never injects description text.
 	const emitMediaUpdates = config.media.mode === "vision";
-	return config.bots.map((bot) => new Poller(db, bot.id, bot.token, config.groupChatId, onMessage, emitMediaUpdates));
+	return config.bots.map(
+		(bot) => new Poller(db, bot.id, bot.token, config.groupChatId, onMessage, emitMediaUpdates, onCallback),
+	);
 }

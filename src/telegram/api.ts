@@ -33,6 +33,10 @@ interface ApiResponse<T> {
 	parameters?: { retry_after?: number };
 }
 
+export interface InlineKeyboardMarkup {
+	inline_keyboard: { text: string; callback_data: string }[][];
+}
+
 export class BotApi {
 	token: string;
 	constructor(token: string) {
@@ -81,7 +85,7 @@ export class BotApi {
 			{
 				offset,
 				timeout: timeoutSec,
-				allowed_updates: ["message", "edited_message"],
+				allowed_updates: ["message", "edited_message", "callback_query"],
 			},
 			timeoutSec * 1000 + LONG_POLL_GRACE_MS,
 			signal,
@@ -92,12 +96,31 @@ export class BotApi {
 		return this.call<true>("setMyCommands", { commands });
 	}
 
-	sendMessage(chatId: number, text: string, replyToMessageId?: number): Promise<Record<string, unknown>> {
+	sendMessage(
+		chatId: number,
+		text: string,
+		replyToMessageId?: number,
+		replyMarkup?: InlineKeyboardMarkup,
+	): Promise<Record<string, unknown>> {
 		return this.call("sendMessage", {
 			chat_id: chatId,
 			text,
+			...(replyMarkup ? { reply_markup: replyMarkup } : {}),
 			...(replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {}),
 		});
+	}
+
+	answerCallbackQuery(id: string, text?: string): Promise<true> {
+		return this.call("answerCallbackQuery", { callback_query_id: id, ...(text ? { text, show_alert: true } : {}) });
+	}
+
+	editMessageText(
+		chatId: number,
+		messageId: number,
+		text: string,
+		replyMarkup: InlineKeyboardMarkup,
+	): Promise<Record<string, unknown>> {
+		return this.call("editMessageText", { chat_id: chatId, message_id: messageId, text, reply_markup: replyMarkup });
 	}
 
 	sendMessageWithEntities(

@@ -10,7 +10,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
-import { defaultConfigPath, loadConfig, normalizePeerId, type AppConfig } from "../config.ts";
+import { defaultConfigPath, loadConfig, normalizePeerId, type AppConfig, type BotConfig } from "../config.ts";
 
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const BOT_ID = /^[A-Za-z0-9_-]+$/;
@@ -266,29 +266,58 @@ export function updateBotConfigField(
 	return replaceExistingConfigSource(root, path, edited, { confirmed: true }).summary;
 }
 
+/** One validated file replacement for the entire model selection; caller commits its runtime next. */
+export function updateBotModelConfig(
+	rootDir: string,
+	botId: string,
+	selection: Pick<BotConfig, "provider" | "model" | "reasoningEffort">,
+): Pick<AtomicInstall, "finalize" | "rollback"> {
+	const root = resolve(rootDir);
+	const { path, source } = readExistingConfigSource(root);
+	let edited = source;
+	for (const [field, value] of Object.entries({
+		provider: selection.provider,
+		model: selection.model,
+		reasoning_effort: selection.reasoningEffort,
+	}))
+		edited = replaceBotFieldValue(edited, botId, field, value);
+	validateEditedConfigSource(root, path, edited);
+	return installAtomically([{ path, contents: edited, mode: PRIVATE_MODE }], "backup-replace");
+}
+
 /**
  * Text-edit one bot field inside its object block. Assumes the wizard/example config shape:
  * each bot is an object literal inside `bots: [...]` anchored by an `id: "X"` line, with
  * scalar fields rendered one per line.
  */
-function replaceBotFieldValue(source: string, botId: string, field: BotControlConfigField, value: number): string {
-	const idLine = /^[ \t]*id:[ \t]*["']([A-Za-z0-9_-]+)["'][ \t]*,?[ \t]*$/gm;
+function replaceBotFieldValue(source: string, botId: string, field: string, value: number | string): string {
+	const idLine = /^[ \t]*id:[ \t]*["']([A-Za-z0-9_-]+)["'][ \t]*,?[ \t]*(?:\/\/[^\r\n]*)?$/gm;
 	const anchors = [...source.matchAll(idLine)];
 	const anchor = anchors.filter((match) => match[1] === botId);
 	if (anchor.length !== 1)
 		throw new OnboardingWriteError(`config source must contain exactly one id anchor for bot "${botId}"`);
 	const start = anchor[0]!.index!;
-	const rest = anchors.find((match) => match.index > start);
-	const end = rest?.index ?? source.length;
+	const indent = anchor[0]![0].match(/^[ \t]*/)![0];
+	const closing = new RegExp(`^[ \\t]{0,${Math.max(0, indent.length - 1)}}\\}`, "m").exec(source.slice(start));
+	if (!closing) throw new OnboardingWriteError(`config source has no closing object for bot "${botId}"`);
+	const end = start + closing.index;
 	const block = source.slice(start, end);
-	const fieldPattern = new RegExp(`(\\b${field}:[ \t]*)[0-9][0-9_.]*`);
-	const rendered = String(value);
+	const fieldPattern = new RegExp(
+		`^(${indent}${field}:[ \\t]*)(?:"(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*'|[0-9][0-9_.]*)(?=[ \\t]*[,\\r\\n])`,
+		"m",
+	);
+	const rendered = JSON.stringify(value);
 	if (fieldPattern.test(block)) {
-		return source.slice(0, start) + block.replace(fieldPattern, `$1${rendered}`) + source.slice(end);
+		return (
+			source.slice(0, start) +
+			block.replace(fieldPattern, (_match, prefix: string) => prefix + rendered) +
+			source.slice(end)
+		);
 	}
+	if (new RegExp(`^${indent}${field}:`, "m").test(block))
+		throw new OnboardingWriteError(`config field ${field} must be a scalar literal`);
 	// Field absent (e.g. bot-level sampling_cooldown_ms falling back to the global value):
 	// insert it right after the id line, matching its indent.
-	const indent = anchor[0]![0].match(/^[ \t]*/)![0];
 	const lineEnd = block.indexOf("\n");
 	if (lineEnd < 0) throw new OnboardingWriteError(`config source is truncated after the id anchor for bot "${botId}"`);
 	const inserted = `${block.slice(0, lineEnd + 1)}${indent}${field}: ${rendered},\n${block.slice(lineEnd + 1)}`;

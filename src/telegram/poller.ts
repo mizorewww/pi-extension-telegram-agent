@@ -12,6 +12,7 @@ const OFFSET_KEY = "update_offset";
 const INGEST_FAILURE_WARN_THRESHOLD = 5;
 
 export type MessageHandler = (result: IngestResult, update: unknown, botId: string) => void | Promise<void>;
+export type CallbackHandler = (update: unknown, botId: string) => Promise<void>;
 
 export class Poller {
 	private api: BotApi;
@@ -31,6 +32,7 @@ export class Poller {
 		onMessage: MessageHandler,
 		/** Vision mode only: replay persisted media descriptions as media_update events. */
 		emitMediaUpdates: boolean,
+		private readonly onCallback?: CallbackHandler,
 	) {
 		this.db = db;
 		this.botId = botId;
@@ -96,6 +98,10 @@ export class Poller {
 				if (this.stopped) break;
 				const updateId = (update as { update_id: number }).update_id;
 				try {
+					// Model selection is idempotent. A crash before offset commit replays the same
+					// selection; callbacks never become chat messages or route to an LLM.
+					if ((update as { callback_query?: unknown }).callback_query && updateId >= this.offset())
+						await this.onCallback?.(update, this.botId);
 					this.db.transaction(() => {
 						const result = ingestUpdate(this.db, this.botId, update, this.groupChatId, this.emitMediaUpdates);
 						if (result.kind === "inserted" || result.kind === "edited" || result.kind === "enriched") {

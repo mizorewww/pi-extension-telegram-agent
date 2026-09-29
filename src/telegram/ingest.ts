@@ -201,6 +201,12 @@ function editMessage(db: Database, m: CanonicalMessage, emitMediaUpdates = true)
 	};
 }
 
+/** Persist a known control-menu edit through the same canonical/revision path as Telegram edits. */
+export function persistEditedControlMessage(db: Database, raw: Record<string, unknown>): void {
+	const canonical = normalizeMessage(raw, typeof raw.edit_date === "number" ? raw.edit_date : null);
+	db.transaction(() => editMessage(db, canonical))();
+}
+
 /** Insert a message we just sent via Bot API (send tool). Dedupes against the later poller echo. */
 export function insertSentMessage(
 	db: Database,

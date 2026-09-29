@@ -11,7 +11,7 @@
 
 ## 当前测试集
 
-`test/` 只保留长期 invariant 与安全边界的守卫，共 14 个测试文件：
+`test/` 只保留长期 invariant 与安全边界的守卫，共 16 个测试文件：
 
 - `cache.test.ts` — cache golden：锁定 cache-visible protocol 的 hash（system prompt、tool schema 与顺序、消息/compaction 序列化 grammar、extension 顺序、sticker catalog block）。任何 provider-visible 变化都会在这里报警。
 - `context-protocol.test.ts` — context fingerprint / extension / model capability 契约：恢复 session 的 cache-identity 判断、structured context 协议、相邻 raw payload 严格前缀的本地 cache estimate、用户级已安装provider extension进入daemon shared runtime，以及不允许 Pi 静默 clamp 不支持的 reasoning 档位。
@@ -21,8 +21,10 @@
 - `db.test.ts` — SQLite migration：旧库迁移幂等且保留历史 telemetry；本地 cache estimate 只回填同 cohort 的严格 payload 前缀，不覆盖 provider usage 或 `cache_retention=none`。
 - `media.test.ts` — 跨bot Telegram media source配对、static/animated/video sticker metadata与原始file_id发送、vision模式（描述singleflight/persistent cache跨bot复用、视频固定代表帧单次vision调用、deployment全视频流水线并发门、缺FFmpeg时下载前no-op且不持久化terminal结果）与context模式（photo/static sticker转换、video抽帧singleflight与`context_files`持久化复用、失败可重试）、TGS/voice/audio不产出上下文图片、部署路径迁移、static sticker展示缓存、compaction后跨bot引用保护/派生文件清理/失败重试/启动不复活回收文件、媒体引用查询按身份索引查找的执行计划，以及Pi attach filter握手、activity单卡/原生thinking/完整正文、username与视觉描述乱序合并。
 - `telegram-control.test.ts` — `/status` 的 InputRichMessage Markdown、统计数字千位分隔与缓存命中率、独立 plain projection、create→canonical persistence，以及仅在确定性rich拒绝时单次fallback的exactly-once边界。
+- `model-menu.test.ts` — Pi 全目录分页与64-byte callback上限、管理员/群/Bot菜单归属边界、callback不进入消息路由、配置原子写入/回滚、模型切换的会话与epoch隔离及重启恢复。
 - `telemetry.test.ts` — Pi/Telegram status共享读模型：latest排除compaction、lifetime/live totals包含compaction、切换provider/model后的immutable per-run cost累计、本地 estimate 的 `≈` 标记、统一费用精度、runtime snapshot、统一字段顺序、context/window与`CH = R/(↑+R+W)`派生口径。
 - `provider-guard.test.ts` — stream 创建与消费 deadline、主动取消、成功后清理，以及 Pi 原生零重试配置。
+- `reaction.test.ts` — reaction 白名单、幂等失败边界，以及 reaction-only 不结清公开回复 obligation。
 - `visibility.test.ts` — active context 的完整消息可见性与 compaction 边界。
 - `telegram-delivery.test.ts` — 全局 mention 优先级与 caption、乱序 edit、manual send unknown outcome、control retention 与 pending handoff 跨重启交付。
 - `daemon-control.test.ts` — 临时假 daemon 的精确进程归属与含空格路径，拒绝其他部署与测试进程。
