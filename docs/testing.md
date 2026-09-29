@@ -38,6 +38,7 @@
 
 - **鼓励 TDD**：新行为先写失败的测试再实现。但脚手架测试在功能稳定后必须删除——测试集只保护长期 invariant 与安全边界，不锁实现细节，不为覆盖率保留一次性验收测试。
 - 能确定性复现的 bug fix 必须有回归测试。
+- 旧消息引用由 `telegram-delivery`、`db`、`cache` 和 `runtime-obligation` 联合保护：嵌入正文随 event 留存、不额外路由父消息、长正文与 selected quote 共享预算、旧库 trigger 升级不改历史，以及真实 Pi prompt preflight 压缩后正文仍到达 provider。
 - 契约变化（IPC 协议 / schema / 序列化 grammar）需要跨边界测试。
 - Agent 行为测可观察轨迹与结果，不断言 prompt 字符串。
 - provider cache 相关改动必须跑 `test/cache.test.ts` golden；golden 失败是报警，先查原因，确认是有意变更后按 `docs/cache.md` 流程 bump version 再更新 golden，不要随手改 expected value。

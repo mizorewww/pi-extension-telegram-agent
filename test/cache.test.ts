@@ -42,11 +42,11 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 23,
+	schemaVersion: 24,
 	systemZhTemplate: "a4c784e00a37",
 	systemEnTemplate: "b89a39b52e87",
 	serialize: "68a17d6e5c05",
-	eventSerialize: "4a57de738bf9",
+	eventSerialize: "a05c0584eb08",
 	tools: "98440e1b8d0c",
 	compactionPrompt: "045a5241fdd7",
 	multimodalCompaction: "e2da2b8b68fa",
@@ -380,7 +380,20 @@ test("immutable event and extension protocol grammar stable", () => {
 				revision: 1,
 				kind: "metadata",
 				eventDate: 1754612401,
-				payload: { ...row, reply_to_message_id: 199, reply_to_sender_id: 222 },
+				payload: {
+					...row,
+					reply_to_message_id: 199,
+					reply_to_sender_id: 222,
+					reply_snapshot: JSON.stringify({
+						display_name: "Bob",
+						username: "bob",
+						text: "An archived parent whose full text exceeds forty characters: keep this ending.",
+						media: null,
+					}),
+					quote: JSON.stringify({
+						text: "A selected quote exceeding the former sixty-character limit: retain the final words.",
+					}),
+				},
 			},
 			{
 				ingestSeq: 4,

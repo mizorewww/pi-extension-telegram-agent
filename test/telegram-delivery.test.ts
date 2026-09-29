@@ -5,6 +5,9 @@ import { buildDebugReport } from "../src/observability/debug-report.ts";
 import { applyRetention, pruneUnconfiguredBotState } from "../src/db/retention.ts";
 import { routeMessageDecision } from "../src/agent/router.ts";
 import type { MessageRow } from "../src/agent/serialize.ts";
+import { serializeMessageEvents } from "../src/agent/serialize.ts";
+import { packMessageEvents } from "../src/agent/token-packer.ts";
+import { listRecentMessageEvents, messageEventHighWater } from "../src/db/message-events.ts";
 import { ingestUpdate } from "../src/telegram/ingest.ts";
 import { ManualSendService } from "../src/daemon/manual-send.ts";
 import { TelegramControlCommandService, consumedControlMessageIds } from "../src/telegram/control-command.ts";
@@ -26,6 +29,79 @@ beforeEach(() => {
 	db = openDb(":memory:");
 });
 afterEach(() => db.close());
+
+test("old replies preserve the embedded body without ingesting or routing the parent", () => {
+	const oldText =
+		"An archived announcement with enough detail to exceed the old forty-character snippet. The launch is October 12.";
+	const reply = {
+		...message,
+		date: 2_000_000,
+		text: "Which date was announced?",
+		reply_to_message: { ...message, message_id: 99, date: 1, text: oldText },
+	};
+	expect(ingestUpdate(db, "A", { update_id: 1, message: reply }, chatId, false)).toMatchObject({
+		kind: "inserted",
+		messageId: 1,
+	});
+	expect(ingestUpdate(db, "B", { update_id: 1, message: reply }, chatId, false).kind).toBe("duplicate");
+	expect(db.query("SELECT message_id FROM messages").all()).toEqual([{ message_id: 1 }]);
+	db.exec("DELETE FROM raw_updates");
+	const events = listRecentMessageEvents(db, chatId, 0, messageEventHighWater(db, chatId), 10);
+	expect(events).toHaveLength(1);
+	const packed = packMessageEvents(db, events, [], 12_000, { visibleIds: new Set() });
+	expect(packed.text).toContain(oldText);
+	expect(packed.text).toContain(reply.text);
+	expect(packed.visibleMessageIds).toEqual([1]);
+	// A later delivery/edit of the parent must not change the reply snapshot.
+	ingestUpdate(
+		db,
+		"A",
+		{ update_id: 2, message: { ...reply.reply_to_message, text: "changed afterwards" } },
+		chatId,
+		false,
+	);
+	expect(serializeMessageEvents(db, events, { visibleIds: new Set() })).toBe(packed.text);
+});
+
+test("quoted captions and selected text share the bounded suffix budget with the new message", () => {
+	const reply = {
+		...message,
+		text: "Explain the ending.",
+		quote: { text: "引用的关键句。".repeat(3000), position: 0 },
+		reply_to_message: {
+			...message,
+			message_id: 99,
+			text: undefined,
+			caption: "开始。" + "很长的旧文。".repeat(10000) + "结尾。",
+			photo: [{ file_id: "fixture", file_unique_id: "fixture", width: 1, height: 1 }],
+		},
+	};
+	ingestUpdate(db, "A", { update_id: 1, message: reply }, chatId, false);
+	const events = listRecentMessageEvents(db, chatId, 0, messageEventHighWater(db, chatId), 10);
+	const original = JSON.stringify(events);
+	const packed = packMessageEvents(db, events, [], 512, { visibleIds: new Set() });
+	expect(packed.deferredMandatory).toBe(0);
+	expect(packed.estimatedTokens).toBeLessThanOrEqual(512);
+	expect(packed.text).toContain(reply.text);
+	expect(packed.text).toContain("开始。");
+	expect(packed.text).toContain("结尾。");
+	expect(packed.text).toContain("[truncated original_chars=");
+	expect(JSON.stringify(events)).toBe(original);
+});
+
+test("a later bot copy can append missing reply content without routing the child twice", () => {
+	const partial = { ...message, reply_to_message: { message_id: 99, from: message.from } };
+	ingestUpdate(db, "A", { update_id: 1, message: partial }, chatId, false);
+	const first = db.query("SELECT payload_json FROM message_events").get();
+	const complete = { ...partial, reply_to_message: { ...message, message_id: 99, text: "The archived body." } };
+	expect(ingestUpdate(db, "B", { update_id: 1, message: complete }, chatId, false).kind).toBe("duplicate");
+	expect(db.query("SELECT payload_json FROM message_events WHERE kind = 'message'").get()).toEqual(first);
+	const events = listRecentMessageEvents(db, chatId, 0, messageEventHighWater(db, chatId), 10);
+	expect(events.map((event) => event.kind)).toEqual(["message", "metadata"]);
+	expect(serializeMessageEvents(db, events.slice(1), { visibleIds: new Set() })).toContain("The archived body.");
+	expect(ingestUpdate(db, "C", { update_id: 1, message: complete }, chatId, false).kind).toBe("duplicate");
+	expect(messageEventHighWater(db, chatId)).toBe(events.at(-1)!.ingestSeq);
+});
 
 test("all mentions outrank replies regardless of bot ordering, including captions", () => {
 	for (const caption of [false, true]) {

@@ -23,11 +23,15 @@ export interface CanonicalMessage {
 	rich_truncated: boolean;
 	reply_to_message_id: number | null;
 	reply_to_sender_id: number | null;
+	reply_snapshot: ReplySnapshot | null;
 	quote: unknown | null;
 	forward_origin: unknown | null;
 	edit_date: number | null;
 	media: MediaInfo | null;
 }
+
+/** One-hop reply content supplied by Telegram, independent of locally retained history. */
+export type ReplySnapshot = Pick<CanonicalMessage, "display_name" | "username" | "text" | "media">;
 
 export interface MediaInfo {
 	kind: "photo" | "sticker" | "animation" | "video" | "video_note" | "document" | "voice" | "audio";
@@ -45,6 +49,10 @@ export function normalizeMessage(msg: any, editDate: number | null = null): Cano
 	const senderChat = msg.sender_chat ?? null;
 	const media = extractMedia(msg);
 	const rich = msg.rich_message == null ? null : normalizeRichMessage(msg.rich_message);
+	// Telegram embeds only one parent. Do not recursively import a conversation as new messages.
+	const parent = msg.reply_to_message
+		? normalizeMessage({ ...msg.reply_to_message, chat: msg.chat, reply_to_message: undefined })
+		: null;
 	return {
 		chat_id: msg.chat.id,
 		message_id: msg.message_id,
@@ -63,6 +71,15 @@ export function normalizeMessage(msg: any, editDate: number | null = null): Cano
 		rich_truncated: Boolean(rich?.truncated || rich?.rawTruncated),
 		reply_to_message_id: msg.reply_to_message?.message_id ?? null,
 		reply_to_sender_id: msg.reply_to_message?.from?.id ?? msg.reply_to_message?.sender_chat?.id ?? null,
+		reply_snapshot:
+			parent && (parent.text || parent.caption || parent.media)
+				? {
+						display_name: parent.display_name,
+						username: parent.username,
+						text: parent.text ?? parent.caption,
+						media: parent.media,
+					}
+				: null,
 		quote: msg.quote ?? null,
 		forward_origin: msg.forward_origin ?? null,
 		edit_date: editDate ?? msg.edit_date ?? null,

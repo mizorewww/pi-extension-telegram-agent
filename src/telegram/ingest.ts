@@ -92,8 +92,8 @@ function insertMessage(db: Database, botId: string, m: CanonicalMessage, emitMed
 			`INSERT OR IGNORE INTO messages (
 				chat_id, message_id, date, thread_id, sender_id, display_name, username,
 				sender_tag, sender_chat, is_bot, text, caption, entities, rich_message,
-				reply_to_message_id, reply_to_sender_id, quote, forward_origin, edit_date, media, first_seen_by
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				reply_to_message_id, reply_to_sender_id, reply_snapshot, quote, forward_origin, edit_date, media, first_seen_by
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			m.chat_id,
@@ -112,6 +112,7 @@ function insertMessage(db: Database, botId: string, m: CanonicalMessage, emitMed
 			m.rich_message,
 			m.reply_to_message_id,
 			m.reply_to_sender_id,
+			m.reply_snapshot ? JSON.stringify(m.reply_snapshot) : null,
 			m.quote ? JSON.stringify(m.quote) : null,
 			m.forward_origin ? JSON.stringify(m.forward_origin) : null,
 			m.edit_date,
@@ -119,6 +120,12 @@ function insertMessage(db: Database, botId: string, m: CanonicalMessage, emitMed
 			botId,
 		);
 	if (res.changes === 0) {
+		// Content enrichment appends a metadata delta, but cannot trigger another reply.
+		if (m.reply_snapshot) {
+			db.query(
+				"UPDATE messages SET reply_snapshot = ? WHERE chat_id = ? AND message_id = ? AND reply_snapshot IS NULL",
+			).run(JSON.stringify(m.reply_snapshot), m.chat_id, m.message_id);
+		}
 		// A second bot's copy may carry the embedded reply sender snapshot that the first
 		// update omitted. Enrich once so the direct reply can still be routed durably.
 		if (m.reply_to_sender_id != null) {
@@ -182,13 +189,14 @@ function editMessage(db: Database, m: CanonicalMessage, emitMediaUpdates = true)
 		existing.rich_message,
 	);
 	db.query(
-		"UPDATE messages SET text = ?, caption = ?, entities = ?, rich_message = ?, reply_to_sender_id = COALESCE(?, reply_to_sender_id), edit_date = ? WHERE chat_id = ? AND message_id = ?",
+		"UPDATE messages SET text = ?, caption = ?, entities = ?, rich_message = ?, reply_to_sender_id = COALESCE(?, reply_to_sender_id), reply_snapshot = COALESCE(reply_snapshot, ?), edit_date = ? WHERE chat_id = ? AND message_id = ?",
 	).run(
 		m.text,
 		m.caption,
 		m.entities ? JSON.stringify(m.entities) : null,
 		m.rich_message,
 		m.reply_to_sender_id,
+		m.reply_snapshot ? JSON.stringify(m.reply_snapshot) : null,
 		m.edit_date,
 		m.chat_id,
 		m.message_id,

@@ -14,7 +14,9 @@
 
 ## CACHE_SCHEMA_VERSION
 
-当前：**23**。
+当前：**24**。
+
+v24：Telegram 的嵌入父消息正文作为 `reply_snapshot` 随当前消息及不可变 event 保存，包含 text/caption 或 Rich Message 的 plain projection；旧 event 仍可按主键读取本地父消息。引用不再只显示 40 字，selected quote 不再只显示 60 字，两者与当前正文共同受单 event 和 suffix token 预算约束，超长内容保留首尾及截断标记。只有同一新 batch 内已提供的父消息才省略重复正文，防止 `prompt()` preflight 压缩旧窗口后只剩 ID。父消息不会作为新消息入库或路由；不额外调用模型，不回写已持久化的 provider prefix。serializer 升为 v5，更新 event grammar golden；重启按 fingerprint 创建新 epoch，旧 session 保留。
 
 v23：Telegram turn 经 `session.prompt()` 原生 preflight 启动，`before_agent_start` 注入本轮 `telegram_context_v2`，保证第一次请求已包含完整 system/persona/tools。Pi 0.86 的 `sendCustomMessage(triggerTurn)` 绕过该 preflight，冷启动首轮会遗漏 prompt；不再使用这个入口。每轮增加一条固定短触发消息 `Process the new Telegram context.`，单独锁定 golden；群消息、摘要、工具 grammar 不变，不增加模型调用次数。触发消息在持久历史中只追加，前缀不回写；异常时清理尚未提交的本轮引用，避免污染下一次请求。新 epoch 不恢复旧的缺失前缀。
 
@@ -114,7 +116,8 @@ tools: [{ name, description, parameters }] in fixed order
 `media_update` 行只出现在 vision 模式（描述持久化后追加的 delta）；context 模式没有独立 delta 事件，媒体事件首次追加时占位符文本段之后即紧跟该媒体的 image 内容块（准备好时）。
 
 - message event 保留原有日期、时间、sender、reply、quote、forward 与媒体占位符语义。
-- 引用父消息不在可见集时渲染短引用：文字父消息引 `@who "snippet"`（≤40 字）；纯媒体父消息引媒体占位（`[图片]`/`[sticker 😺]`/`[video]` 等，事件日志路径 `resolveVision:false` 不触发 vision 表 live lookup，fresh-batch 路径可渲染已持久化描述）；父消息缺失（含 external_reply 跨群引用）追加 `(原消息不可见)`。父消息在可见集时保持裸 `↪ #id`。
+- 引用父消息优先使用当前 event 的 `reply_snapshot`，旧 event 可读取本地父消息；输出 `↪ #id @who "正文"`。纯媒体父消息输出媒体占位（`[图片]`/`[sticker 😺]`/`[video]` 等，事件路径禁用 vision live lookup）。两种来源都缺失时追加 `(原消息不可见)`；Telegram 的跨群 `external_reply` 不提供原文时，只能展示随消息提供的 selected quote。
+- runtime 只对同一新 batch 中已提供的父消息保留裸 `↪ #id`，不依赖可能被 prompt preflight 压缩掉的旧可见集。edit/metadata delta 同样带引用正文。引用快照本身不将父消息 ID 标为完整可见，也不增加媒体下载或模型调用。
 - message/event bytes 一旦写入 session 就不重算；后续变化使用 `edit`、`metadata`、`media_update`（vision 模式）delta。
 - `telegram_context_v2.details` 同时保存 `consumedSeq`、本 entry 的 event refs、`visibleMessageIds`、固定消息 projection 与独立 sticker candidates。
 - session 写入成功或启动 reconcile 能从 structured details 证明写入后，SQLite cursor 才前进。provider 失败不会靠文本猜测状态。
@@ -122,7 +125,7 @@ tools: [{ name, description, parameters }] in fixed order
 ## 有界 suffix 与 sticker catalog
 
 - runtime 每轮最多索引读取 256 条近期 event，并额外读取最多 64 条 direct-address obligation event；不扫描整张 `messages` 表。
-- direct-address obligation 优先打包；普通 event 从最新端选择后恢复时间顺序。默认 suffix 上限 12,000 tokens，单 event 上限 4,096 tokens，并为输出、reasoning 与 tool follow-up 预留空间。
+- direct-address obligation 优先打包；普通 event 从最新端选择后恢复时间顺序。默认 suffix 上限 12,000 tokens，单 event 正文上限 4,096 tokens，当前正文、父消息正文与 selected quote 共享此预算；短文本优先保全，长文本保留首尾及截断标记。最终 suffix 计入 sender、引用等格式开销，并为输出、reasoning 与 tool follow-up 预留空间。
 - 普通溢出 event 可以被 cursor 消费但不标 visible；direct-address obligation 只有在结构化 commit marker 证明交付后才删除。
 - sticker catalog 在启动时同步进 DB 后以 `s<id>: <emoji> <描述>` 行（描述为持久化 vision 文本，缺失时逐级降级为 `s<id>: <emoji>`、`s<id>`；按 set 名 + rowid 排序，set 名本身不渲染）固化在 system prompt 尾部；prefix 由配置 + DB catalog 唯一决定，重启间稳定。catalog identity 或描述变化通过 fingerprint snapshot 开新 epoch。
 - runtime 另从 `bot_visible_messages` 与本轮新打包消息的并集取最近 8 个不同的用户 sticker；只保留当前 bot 有 mapping 的项。候选只存于 structured details，持久化 content 是纯消息字节；provider projection 从所有旧 Telegram entry 移除候选，只在当前最后一批消息后追加一次；预算不足时不追加。

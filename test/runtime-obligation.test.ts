@@ -23,6 +23,7 @@ import {
 import { makeTelegramCompactionExtension, observeProviderPayload } from "../src/agent/extensions/index.ts";
 import { setLogSink } from "../src/observability/log.ts";
 import { fitContextBreakdown } from "../src/observability/usage.ts";
+import { ingestUpdate } from "../src/telegram/ingest.ts";
 
 const CHAT_ID = -1004402809405;
 const BOT_ID = "A";
@@ -628,6 +629,81 @@ test("Telegram turns initialize the native prompt and use only the latest reques
 		expect(batches.flatMap((entry: any) => entry.details.events.map((event: any) => event.messageId))).toEqual([
 			9101, 9102, 9103, 9104,
 		]);
+	} finally {
+		await rt.stop();
+		restoreLog();
+		db.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("reply bodies survive native prompt preflight dropping the old parent from context", async () => {
+	const root = mkdtempSync(join(tmpdir(), "tg-reply-preflight-"));
+	const db = new Database(":memory:");
+	db.exec(readFileSync("src/db/schema.sql", "utf8"));
+	const bot = { ...makeBot(), personaPath: join(root, "persona.md"), compactionModel: "test/test-model:low" };
+	writeFileSync(bot.personaPath, "Fixture persona.");
+	const requests: string[] = [];
+	const modelRuntime = {
+		getModel: () => fakeModel(),
+		hasConfiguredAuth: () => true,
+		getAuth: async () => ({ auth: { apiKey: "fixture" } }),
+		streamSimple: (_model: unknown, context: any) => {
+			requests.push(JSON.stringify(context.messages.at(-1)));
+			const stream = createAssistantMessageEventStream();
+			stream.push({ type: "done", reason: "stop", message: assistantResult(requests.length < 3 ? 10_000 : 100) });
+			return stream;
+		},
+	} as unknown as ModelRuntime;
+	const rt = new BotRuntime(db, bot, { ...makeConfig(bot), dataDir: root }, modelRuntime, {
+		videoTranscoder: { ffmpeg: false, ffprobe: false },
+		chatActionSender: async () => {},
+	});
+	const restoreLog = setLogSink(() => {});
+	const oldBody = "An old announcement whose important detail is beyond forty characters: launch on October 12.";
+	try {
+		await rt.init();
+		for (const [id, text] of [
+			[1, oldBody],
+			[2, "An unrelated later turn."],
+		] as const) {
+			insertMessage(db, id, text);
+			rt.trigger("probability", { reason: "probability", chatId: CHAT_ID, messageId: id });
+			await (rt as any).flushPromise;
+		}
+		const session = (rt as any).session;
+		expect((rt as any).visibleMessageIds.has(1)).toBe(true);
+		let summaries = 0;
+		(rt as any).generateCompactionSummary = async () => {
+			summaries++;
+			return { summary: "Earlier conversation summarized.", usage: assistantResult().usage };
+		};
+		session.settingsManager.applyOverrides({ compaction: { reserveTokens: 60_000 } });
+		ingestUpdate(
+			db,
+			"A",
+			{
+				update_id: 3,
+				message: {
+					chat: { id: CHAT_ID },
+					message_id: 3,
+					date: 1_754_612_350,
+					from: { id: 111, first_name: "Alice" },
+					text: "Which launch date?",
+					// Legacy/delayed copy: resolve the already stored parent when no snapshot is supplied.
+					reply_to_message: { message_id: 1, from: { id: 111 } },
+				},
+			},
+			CHAT_ID,
+			false,
+		);
+		rt.trigger("probability", { reason: "probability", chatId: CHAT_ID, messageId: 3 });
+		await (rt as any).flushPromise;
+		expect(summaries).toBe(1);
+		expect(requests).toHaveLength(3);
+		expect((rt as any).visibleMessageIds.has(1)).toBe(false);
+		expect(requests[2]).toContain(oldBody);
+		expect(requests[2]).toContain("Which launch date?");
 	} finally {
 		await rt.stop();
 		restoreLog();

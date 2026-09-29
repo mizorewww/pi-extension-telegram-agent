@@ -25,6 +25,16 @@ function migrate(db: Database): void {
 	if (!messageCols.includes("reply_to_sender_id")) {
 		db.exec("ALTER TABLE messages ADD COLUMN reply_to_sender_id INTEGER");
 	}
+	if (!messageCols.includes("reply_snapshot")) {
+		db.transaction(() => {
+			db.exec("ALTER TABLE messages ADD COLUMN reply_snapshot TEXT");
+			// Replace the old trigger definitions; existing event payloads stay untouched.
+			db.exec(`DROP TRIGGER IF EXISTS trg_messages_event_insert;
+				DROP TRIGGER IF EXISTS trg_messages_event_edit;
+				DROP TRIGGER IF EXISTS trg_messages_event_metadata;`);
+			db.exec(readFileSync(SCHEMA_PATH, "utf8"));
+		})();
+	}
 	const revisionCols = (db.query("PRAGMA table_info(message_revisions)").all() as { name: string }[]).map(
 		(c) => c.name,
 	);
@@ -107,6 +117,7 @@ function messagePayloadSql(prefix: "NEW" | "m"): string {
 		'rich_message', ${prefix}.rich_message,
 		'reply_to_message_id', ${prefix}.reply_to_message_id,
 		'reply_to_sender_id', ${prefix}.reply_to_sender_id,
+		'reply_snapshot', ${prefix}.reply_snapshot,
 		'quote', ${prefix}.quote,
 		'forward_origin', ${prefix}.forward_origin,
 		'edit_date', ${prefix}.edit_date,

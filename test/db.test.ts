@@ -4,6 +4,7 @@ import { unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/db/db.ts";
+import { ingestUpdate } from "../src/telegram/ingest.ts";
 
 const cleanup = new Set<string>();
 
@@ -19,6 +20,64 @@ afterEach(() => {
 });
 
 describe("database migrations", () => {
+	test("reply snapshots upgrade old triggers without rewriting existing events", () => {
+		const path = join(tmpdir(), `tg-reply-migration-${process.pid}-${Date.now()}.db`);
+		cleanup.add(path);
+		const legacy = openDb(path);
+		legacy.exec(`DROP TRIGGER trg_messages_event_insert;
+			DROP TRIGGER trg_messages_event_edit;
+			DROP TRIGGER trg_messages_event_metadata;
+			ALTER TABLE messages DROP COLUMN reply_snapshot;
+			INSERT INTO messages (chat_id, message_id, date, text, first_seen_by) VALUES (-1, 1, 1, 'old', 'A');
+			INSERT INTO message_events (event_key, chat_id, message_id, revision, kind, event_date, payload_json)
+			VALUES ('message:-1:1', -1, 1, 0, 'message', 1, '{"text":"old"}');`);
+		// Existing trigger names must be replaced, not skipped by CREATE IF NOT EXISTS.
+		for (const name of ["insert", "edit", "metadata"]) {
+			legacy.exec(`CREATE TRIGGER trg_messages_event_${name} AFTER INSERT ON messages BEGIN SELECT 1; END;`);
+		}
+		const history = legacy.query("SELECT * FROM message_events").get();
+		legacy.close();
+		for (let pass = 0; pass < 2; pass++) {
+			const db = openDb(path);
+			try {
+				expect(db.query("SELECT * FROM message_events WHERE message_id = 1").get()).toEqual(history);
+				const message = {
+					chat: { id: -1 },
+					message_id: pass + 2,
+					date: 10,
+					from: { id: 42, first_name: "Human" },
+					text: "question",
+					reply_to_message: { message_id: 99, from: { id: 42 }, text: "archived body" },
+				};
+				ingestUpdate(db, "A", { update_id: 10 + pass * 3, message }, -1, false);
+				ingestUpdate(
+					db,
+					"A",
+					{ update_id: 11 + pass * 3, edited_message: { ...message, text: "edited", edit_date: 20 } },
+					-1,
+					false,
+				);
+				db.query("UPDATE messages SET reply_snapshot = ? WHERE message_id = 1").run(JSON.stringify({ text: "filled" }));
+				const events = db
+					.query(
+						"SELECT kind, json_extract(payload_json, '$.reply_snapshot') snapshot FROM message_events WHERE message_id = ? ORDER BY ingest_seq",
+					)
+					.all(message.message_id) as { kind: string; snapshot: string }[];
+				expect(events.map((event) => event.kind)).toEqual(["message", "edit"]);
+				for (const event of events) expect(JSON.parse(event.snapshot).text).toBe("archived body");
+				expect(
+					db
+						.query(
+							"SELECT json_extract(payload_json, '$.reply_snapshot') snapshot FROM message_events WHERE kind = 'metadata'",
+						)
+						.all(),
+				).toEqual([{ snapshot: '{"text":"filled"}' }]);
+			} finally {
+				db.close();
+			}
+		}
+	});
+
 	test("REQ-UI-0009 adds cache_write once and preserves legacy telemetry", () => {
 		const path = join(tmpdir(), `tg-legacy-telemetry-${process.pid}-${Date.now()}.db`);
 		cleanup.add(path);

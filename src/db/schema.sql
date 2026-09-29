@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS messages (
 	rich_message TEXT, -- bounded JSON source; text contains deterministic plain projection
 	reply_to_message_id INTEGER,
 	reply_to_sender_id INTEGER, -- bounded snapshot from reply_to_message.from/sender_chat
+	reply_snapshot TEXT, -- JSON: embedded parent display_name, username, text/caption projection, media
 	quote TEXT, -- JSON, selected quote if any
 	forward_origin TEXT, -- JSON
 	edit_date INTEGER,
@@ -102,7 +103,7 @@ BEGIN
 			'is_bot', NEW.is_bot, 'text', NEW.text,
 			'caption', NEW.caption, 'entities', NEW.entities, 'rich_message', NEW.rich_message,
 			'reply_to_message_id', NEW.reply_to_message_id,
-			'reply_to_sender_id', NEW.reply_to_sender_id, 'quote', NEW.quote,
+			'reply_to_sender_id', NEW.reply_to_sender_id, 'reply_snapshot', NEW.reply_snapshot, 'quote', NEW.quote,
 			'forward_origin', NEW.forward_origin, 'edit_date', NEW.edit_date, 'media', NEW.media
 		)
 	);
@@ -125,20 +126,22 @@ BEGIN
 			'is_bot', NEW.is_bot, 'text', NEW.text,
 			'caption', NEW.caption, 'entities', NEW.entities, 'rich_message', NEW.rich_message,
 			'reply_to_message_id', NEW.reply_to_message_id,
-			'reply_to_sender_id', NEW.reply_to_sender_id, 'quote', NEW.quote,
+			'reply_to_sender_id', NEW.reply_to_sender_id, 'reply_snapshot', NEW.reply_snapshot, 'quote', NEW.quote,
 			'forward_origin', NEW.forward_origin, 'edit_date', NEW.edit_date, 'media', NEW.media
 		)
 	);
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_messages_event_metadata
-AFTER UPDATE OF reply_to_sender_id ON messages
-WHEN OLD.reply_to_sender_id IS NULL AND NEW.reply_to_sender_id IS NOT NULL
+AFTER UPDATE OF reply_to_sender_id, reply_snapshot ON messages
+WHEN (OLD.reply_to_sender_id IS NULL AND NEW.reply_to_sender_id IS NOT NULL)
+  OR (OLD.reply_snapshot IS NULL AND NEW.reply_snapshot IS NOT NULL)
 BEGIN
 	INSERT OR IGNORE INTO message_events
 		(event_key, chat_id, message_id, revision, kind, event_date, payload_json)
 	VALUES (
-		'metadata:' || NEW.chat_id || ':' || NEW.message_id || ':reply-sender',
+		'metadata:' || NEW.chat_id || ':' || NEW.message_id ||
+			CASE WHEN OLD.reply_snapshot IS NULL AND NEW.reply_snapshot IS NOT NULL THEN ':reply-content' ELSE ':reply-sender' END,
 		NEW.chat_id, NEW.message_id, 1, 'metadata', CAST(strftime('%s','now') AS INTEGER),
 		json_object(
 			'chat_id', NEW.chat_id, 'message_id', NEW.message_id, 'date', NEW.date,
@@ -148,7 +151,7 @@ BEGIN
 			'is_bot', NEW.is_bot, 'text', NEW.text,
 			'caption', NEW.caption, 'entities', NEW.entities, 'rich_message', NEW.rich_message,
 			'reply_to_message_id', NEW.reply_to_message_id,
-			'reply_to_sender_id', NEW.reply_to_sender_id, 'quote', NEW.quote,
+			'reply_to_sender_id', NEW.reply_to_sender_id, 'reply_snapshot', NEW.reply_snapshot, 'quote', NEW.quote,
 			'forward_origin', NEW.forward_origin, 'edit_date', NEW.edit_date, 'media', NEW.media
 		)
 	);

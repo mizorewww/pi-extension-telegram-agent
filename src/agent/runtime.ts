@@ -1177,7 +1177,9 @@ export class BotRuntime {
 			mandatory,
 			normal,
 			suffixBudget,
-			{ visibleIds: new Set(this.visibleMessageIds) },
+			// Native prompt preflight may compact the old window after packing. References
+			// can omit their body only when the parent is included in this same new batch.
+			{ visibleIds: new Set() },
 			this.bot.maxMessageTokens,
 			this.config.media.mode === "context"
 				? {

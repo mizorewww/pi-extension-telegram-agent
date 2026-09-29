@@ -2,7 +2,8 @@ import type { Database } from "bun:sqlite";
 import type { MediaUpdatePayload, MessageEvent } from "../db/message-events.ts";
 import type { ContextMediaImage } from "../media/context-media.ts";
 import type { MessageRow, SerializeOptions, SerializedEventSegment } from "./serialize.ts";
-import { serializeMessageEvents, serializeMessageEventSegments } from "./serialize.ts";
+import { replySnapshot, serializeMessageEvents, serializeMessageEventSegments } from "./serialize.ts";
+import type { ReplySnapshot } from "../telegram/normalize.ts";
 
 export const DEFAULT_SUFFIX_TOKEN_BUDGET = 12_000;
 export const DEFAULT_MESSAGE_TOKEN_CAP = 4_096;
@@ -49,11 +50,15 @@ export function availableSuffixBudget(input: SuffixBudgetInput): number {
 }
 
 function truncateBody(value: string, maxTokens: number): string {
+	if (maxTokens <= 0) return "";
 	if (estimateProviderTokensUpperBound(value) <= maxTokens) return value;
 	const points = [...value];
 	const originalChars = points.length;
 	const originalTokens = estimateProviderTokensUpperBound(value);
 	const marker = `\n[truncated original_chars=${originalChars} estimated_tokens=${originalTokens}]\n`;
+	if (estimateProviderTokensUpperBound(marker) > maxTokens) {
+		return maxTokens >= estimateProviderTokensUpperBound("[truncated]") ? "[truncated]" : "";
+	}
 	let low = 0;
 	let high = points.length;
 	while (low < high) {
@@ -75,9 +80,31 @@ export function capMessageEvent(event: MessageEvent, maxTokens = DEFAULT_MESSAGE
 		return { ...event, payload: { ...payload, text: truncateBody(payload.text, maxTokens) } };
 	}
 	const row = event.payload as MessageRow;
-	if (row.text) return { ...event, payload: { ...row, text: truncateBody(row.text, maxTokens) } };
-	if (row.caption) return { ...event, payload: { ...row, caption: truncateBody(row.caption, maxTokens) } };
-	return event;
+	const parent = row.reply_snapshot ? (JSON.parse(row.reply_snapshot) as ReplySnapshot) : null;
+	const quote = row.quote ? (JSON.parse(row.quote) as { text?: string }) : null;
+	const bodyField = row.text != null ? "text" : "caption";
+	const texts = [row[bodyField] ?? "", parent?.text ?? "", quote?.text ?? ""];
+	// Short questions keep their complete body; the remaining budget is shared by long
+	// reply/selected-quote text. No quoted content can bypass the per-message cap.
+	const order = texts
+		.map((text, index) => ({ index, tokens: text ? estimateProviderTokensUpperBound(text) : 0 }))
+		.filter((part) => part.tokens > 0)
+		.sort((a, b) => a.tokens - b.tokens);
+	let remaining = maxTokens;
+	for (const [position, part] of order.entries()) {
+		const cap = Math.floor(remaining / (order.length - position));
+		texts[part.index] = truncateBody(texts[part.index]!, cap);
+		remaining -= texts[part.index] ? estimateProviderTokensUpperBound(texts[part.index]!) : 0;
+	}
+	return {
+		...event,
+		payload: {
+			...row,
+			[bodyField]: row[bodyField] == null ? null : texts[0],
+			reply_snapshot: parent ? JSON.stringify({ ...parent, text: parent.text == null ? null : texts[1] }) : null,
+			quote: quote ? JSON.stringify({ ...quote, text: quote.text == null ? undefined : texts[2] }) : null,
+		},
+	};
 }
 
 export interface PackedEventSegment {
@@ -136,6 +163,11 @@ export function packMessageEvents(
 	const trySelect = (source: MessageEvent, required: boolean): boolean => {
 		const key = eventKey(source);
 		if (selectedKeys.has(key)) return true;
+		if (source.kind !== "media_update") {
+			const row = source.payload as MessageRow;
+			const parent = replySnapshot(db, row);
+			if (parent) source = { ...source, payload: { ...row, reply_snapshot: JSON.stringify(parent) } };
+		}
 		let event = capMessageEvent(source, messageTokenCap);
 		let rendered = serializeMessageEvents(db, [event], { visibleIds: new Set(serializeOptions.visibleIds) });
 		let tokens = estimateProviderTokensUpperBound(rendered);
@@ -154,7 +186,12 @@ export function packMessageEvents(
 			images = [];
 		}
 		if (required && selected.length === 0 && tokens > remaining) {
-			event = capMessageEvent(source, Math.max(128, remaining - 64));
+			const header = serializeMessageEvents(db, [capMessageEvent(source, 0)], {
+				visibleIds: new Set(serializeOptions.visibleIds),
+			});
+			// Empty bodies omit the surrounding quote/separator syntax; leave room for it.
+			const bodyBudget = Math.max(0, remaining - estimateProviderTokensUpperBound(header) - 16);
+			event = capMessageEvent(source, Math.min(messageTokenCap, bodyBudget));
 			rendered = serializeMessageEvents(db, [event], { visibleIds: new Set(serializeOptions.visibleIds) });
 			tokens = estimateProviderTokensUpperBound(rendered);
 			// A force-capped mandatory event is already degraded; keep it text-only so the

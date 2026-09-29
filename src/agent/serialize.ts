@@ -11,8 +11,9 @@
 
 import type { Database } from "bun:sqlite";
 import type { MediaUpdatePayload, MessageEvent } from "../db/message-events.ts";
+import type { ReplySnapshot } from "../telegram/normalize.ts";
 
-export const TELEGRAM_SERIALIZER_VERSION = 4;
+export const TELEGRAM_SERIALIZER_VERSION = 5;
 
 export interface MessageRow {
 	chat_id: number;
@@ -31,6 +32,7 @@ export interface MessageRow {
 	rich_message?: string | null;
 	reply_to_message_id: number | null;
 	reply_to_sender_id?: number | null;
+	reply_snapshot?: string | null;
 	quote: string | null;
 	forward_origin?: string | null;
 	edit_date: number | null;
@@ -97,22 +99,22 @@ function fmtDate(dateSec: number): string {
 	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-function shortQuote(db: Database, chatId: number, messageId: number, resolveVision = true): string | null {
+/** Prefer the immutable embedded parent; old rows can still resolve locally retained history. */
+export function replySnapshot(db: Database, row: MessageRow): ReplySnapshot | null {
+	if (row.reply_snapshot) return JSON.parse(row.reply_snapshot) as ReplySnapshot;
+	if (row.reply_to_message_id == null) return null;
 	const parent = db
 		.query(
 			"SELECT text, caption, media, display_name, username, sender_id FROM messages WHERE chat_id = ? AND message_id = ?",
 		)
-		.get(chatId, messageId) as MessageRow | null;
+		.get(row.chat_id, row.reply_to_message_id) as MessageRow | null;
 	if (!parent) return null;
-	const body = (parent.text ?? parent.caption ?? "").replace(/\s+/g, " ").trim();
-	const snippet = body.length > 40 ? `${body.slice(0, 40)}…` : body;
-	const who = parent.username ? `@${parent.username}` : (parent.display_name ?? "?");
-	if (snippet) return `${who} "${snippet}"`;
-	// Pure-media parent: render the same placeholder as the body path so the model sees
-	// the media kind instead of a bare sender name (RC2). Text+media parents keep quoting
-	// only the text to bound tokens.
-	if (parent.media) return `${who} ${mediaPlaceholder(db, parent.media, resolveVision)}`;
-	return who;
+	return {
+		display_name: parent.display_name,
+		username: parent.username,
+		text: parent.text ?? parent.caption,
+		media: parent.media ? JSON.parse(parent.media) : null,
+	};
 }
 
 export interface SerializeOptions {
@@ -122,21 +124,29 @@ export interface SerializeOptions {
 	resolveVision?: boolean;
 }
 
-/** Render one message row (no date separator). */
-function renderMessageLine(db: Database, m: MessageRow, opts: SerializeOptions): string {
-	let line = `[${fmtTime(m.date)}] #${m.message_id} ${senderLabel(db, m)}`;
+function renderReply(db: Database, m: MessageRow, opts: SerializeOptions): string {
+	let line = "";
 	if (m.reply_to_message_id != null) {
 		line += ` ↪ #${m.reply_to_message_id}`;
 		if (!opts.visibleIds.has(m.reply_to_message_id)) {
-			const ref = shortQuote(db, m.chat_id, m.reply_to_message_id, opts.resolveVision);
-			if (ref) line += ` ${ref}`;
-			else line += ` (原消息不可见)`;
+			const parent = replySnapshot(db, m);
+			if (parent) {
+				line += ` ${parent.username ? `@${parent.username}` : (parent.display_name ?? "?")}`;
+				if (parent.text) line += ` "${parent.text.replace(/\s+/g, " ").trim()}"`;
+				else if (parent.media) line += ` ${mediaPlaceholder(db, JSON.stringify(parent.media), opts.resolveVision)}`;
+			} else line += ` (原消息不可见)`;
 		}
 	}
 	if (m.quote) {
 		const q = JSON.parse(m.quote) as { text?: string };
-		if (q.text) line += ` quote="${q.text.replace(/\s+/g, " ").slice(0, 60)}"`;
+		if (q.text) line += ` quote="${q.text.replace(/\s+/g, " ")}"`;
 	}
+	return line;
+}
+
+/** Render one message row (no date separator). */
+function renderMessageLine(db: Database, m: MessageRow, opts: SerializeOptions): string {
+	let line = `[${fmtTime(m.date)}] #${m.message_id} ${senderLabel(db, m)}${renderReply(db, m, opts)}`;
 	line += ":";
 	const body = m.text ?? m.caption ?? (m.media ? mediaPlaceholder(db, m.media, opts.resolveVision) : "");
 	if (body) line += ` ${body}`;
@@ -206,9 +216,13 @@ export function serializeMessageEventSegments(
 		const row = event.payload as MessageRow;
 		if (event.kind === "edit") {
 			const body = row.text ?? row.caption ?? "";
-			segments.push({ event, text: `[message_edit #${event.messageId}]${body ? ` ${body}` : " [empty]"}` });
+			const reply = renderReply(db, row, { ...opts, resolveVision: false });
+			segments.push({
+				event,
+				text: `[message_edit #${event.messageId}]${reply ? `${reply}:` : ""}${body ? ` ${body}` : " [empty]"}`,
+			});
 		} else {
-			const reply = row.reply_to_message_id == null ? "reply metadata updated" : `↪ #${row.reply_to_message_id}`;
+			const reply = renderReply(db, row, { ...opts, resolveVision: false }).trim() || "reply metadata updated";
 			segments.push({ event, text: `[message_metadata #${event.messageId}] ${reply}` });
 		}
 	}

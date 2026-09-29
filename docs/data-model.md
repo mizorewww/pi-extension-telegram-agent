@@ -26,6 +26,7 @@
 - `(chat_id, message_id)` 主键；多个 bot 看到同一群消息只保留一条 canonical 最新投影。
 - 保存 sender、reply/quote/forward、text/caption/entities、bounded Rich Message source、edit time 与 media identity。仅更新更大的 edit_date，跨 bot 乱序或同时间副本不会倒退 canonical 或追加 edit event。
 - `reply_to_sender_id` 是 Telegram 嵌入父消息 sender 的有界 snapshot；缺失时 router 可查询 canonical parent。
+- `reply_snapshot` 是 Telegram 嵌入父消息的一层 JSON 快照，保存 display_name、username、text（含 caption / Rich Message 的 plain projection）和 media。与当前消息的 event 一起持久化，即使父消息早于 bot 入群或 raw update 已清理，正文仍可用；不将父消息插入 `messages`，也不为它创建路由任务。副本只补空缺快照并追加 metadata event，正文补全本身不重复触发回复。
 - Rich Message source 上限 256 KiB；`text` 是确定性、最多 32,768 code points 的 plain projection。IPC/Pi/provider 不接收 raw source。
 
 - `idx_messages_media_identity` 对非空 media 的 `CAST(json_extract(media, '$.file_unique_id') AS TEXT)` 建部分表达式索引；media lifecycle 使用完全相同的 TEXT 表达式按身份查找，避免每个文件重扫消息历史。
@@ -42,6 +43,7 @@
 - kind 为 `message | edit | metadata | media_update`。payload 是该事件发生时的 bounded snapshot；旧 event 不因 canonical row、vision 或 edit 改写。
 - message insert、edit 和 reply metadata enrichment 由事务内 trigger 追加；vision 模式下非空 vision completion 追加独立 `media_update`，context 模式不追加媒体 event——图片以 image 内容块随所属 message event 一起进入 provider context。schema v16 migration 是纯 additive（只增列），不删除或改写任何历史 event。
 - 旧库 migration 从 canonical `messages` backfill baseline event，并把已知 bot cursor 初始化到 backfill high-water，避免把历史当 fresh context 重放。
+- reply snapshot 迁移只增 `messages.reply_snapshot` 列，并在同一事务内替换 insert/edit/metadata trigger；保留已有 event 字节与 cursor。后续 event 带快照，旧 event 缺失的引用可从本地父消息解析，已有 session 文本不重写。
 
 ## 每 bot context 与 routing 状态
 
