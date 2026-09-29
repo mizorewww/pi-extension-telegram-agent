@@ -33,13 +33,14 @@ function tokenEstimate(value: unknown): number {
 	return Math.max(0, Math.round(Buffer.byteLength(canonicalJson(value), "utf8") / 2));
 }
 
-// Pi serializes images as image_url (chat completions), input_image (responses), or
-// image + base64 source (Anthropic messages) parts.
+// Image parts may use Pi data/mimeType, image_url (chat completions),
+// input_image (responses), or image + base64 source (Anthropic messages).
 function isImageContentPart(value: unknown): boolean {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 	const record = value as Record<string, unknown>;
 	if (record.type === "image_url" || record.type === "input_image") return true;
 	if (record.type !== "image") return false;
+	if (typeof record.data === "string") return true;
 	const source = record.source;
 	return (
 		source != null &&

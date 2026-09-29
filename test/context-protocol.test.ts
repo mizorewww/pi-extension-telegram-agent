@@ -12,6 +12,7 @@ import {
 	type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
+import { COMPACTION_SUMMARY_PREFIX } from "@earendil-works/pi-agent-core";
 import {
 	buildContextFingerprint,
 	canResumeContextSession,
@@ -378,6 +379,33 @@ export default function (pi) {
 		);
 		expect(anthropic.tokenEstimate.messages).toBeLessThan(CONTEXT_IMAGE_TOKEN_ESTIMATE + 64);
 		expect(anthropic.tokenEstimate.messages).toBeGreaterThanOrEqual(CONTEXT_IMAGE_TOKEN_ESTIMATE);
+	});
+
+	test("payload estimates separate prompt, tools, summary and Pi image parts without rewriting them", () => {
+		const payload = {
+			system: "fixture protocol",
+			tools: [{ name: "send", description: "Fixture send", parameters: { type: "object" } }],
+			messages: [
+				{ role: "user", content: `${COMPACTION_SUMMARY_PREFIX}fixture summary`, timestamp: 1 },
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "fixture message" },
+						{ type: "image", data: "A".repeat(400_000), mimeType: "image/png" },
+					],
+					timestamp: 2,
+				},
+			],
+		};
+		const before = structuredClone(payload);
+		const { tokenEstimate: estimate } = observeProviderPayload(payload, "fixture");
+		expect(estimate.system).toBeGreaterThan(0);
+		expect(estimate.tools).toBeGreaterThan(0);
+		expect(estimate.compactedHistory).toBeGreaterThan(0);
+		expect(estimate.messages).toBeGreaterThanOrEqual(CONTEXT_IMAGE_TOKEN_ESTIMATE);
+		expect(estimate.messages).toBeLessThan(CONTEXT_IMAGE_TOKEN_ESTIMATE + 64);
+		expect(Object.values(estimate).every((value) => typeof value === "number")).toBe(true);
+		expect(payload).toEqual(before);
 	});
 
 	test("a developer-role system prompt is attributed to the system segment", () => {

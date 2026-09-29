@@ -166,12 +166,9 @@ function formatContextBreakdown(view: BotStatusView, visual: boolean): string {
 	// No fenced code block: the emoji bar and the per-line emoji markers stay as plain text so
 	// they render in color, while only the label/percentage column is inline-code (monospace).
 	// Every legend line starts with exactly one emoji, so the inline-code spans all align.
-	// System/tool rows are hidden when 0 (no system prompt or tools in this payload).
 	return [
 		bar,
-		...values
-			.filter(({ short, tokens }) => tokens > 0 || (short !== "S" && short !== "T"))
-			.map(({ square, label, percentage }) => `${square} \`${label.padEnd(17)}${percentage.padStart(6)}\``),
+		...values.map(({ square, label, percentage }) => `${square} \`${label.padEnd(17)}${percentage.padStart(6)}\``),
 	].join("\n");
 }
 

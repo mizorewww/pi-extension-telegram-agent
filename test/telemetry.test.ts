@@ -171,7 +171,7 @@ describe("unified usage telemetry", () => {
 		);
 	});
 
-	test("hides empty system/tool legend rows, sums percents to 100.0, and renders local time", () => {
+	test("keeps all context legend rows, sums percents to 100.0, and renders local time", () => {
 		const stats: BotStats = {
 			runs: 1,
 			contextTokens: 3_000,
@@ -221,10 +221,10 @@ describe("unified usage telemetry", () => {
 				.find((field) => field.key === "context_breakdown")
 				?.value.split("\n")
 				.slice(1) ?? [];
-		expect(legend.map((line) => line.slice(0, 2))).toEqual(["🟫", "🟦", "🟩"]);
+		expect(legend.map((line) => line.slice(0, 2))).toEqual(["🟥", "🟪", "🟫", "🟦", "🟩"]);
 		const percents = legend.map((line) => Number(/([\d.]+)%`$/.exec(line)?.[1]));
 		// Exact thirds are 11.1 / 22.2 / 66.7 only after largest-remainder rounding (naive rounding gives 100.0 - 0.1).
-		expect(percents).toEqual([11.1, 22.2, 66.7]);
+		expect(percents).toEqual([0, 0, 11.1, 22.2, 66.7]);
 		expect(percents.reduce((sum, value) => sum + value, 0)).toBeCloseTo(100, 6);
 		expect(botStatusFields(view).find((field) => field.key === "context_breakdown")?.value).toBe(
 			"S 0.0% · T 0.0% · C 11.1% · M 22.2% · F 66.7%",

@@ -226,7 +226,7 @@ export class BotRuntime {
 	private contextFingerprint = "";
 	private telemetryHmacKey = "";
 	private staticPrefixTokenEstimate = 0;
-	private pendingPayloadObservations: ProviderPayloadObservation[] = [];
+	private pendingPayloadObservation: ProviderPayloadObservation | null = null;
 	private pendingTurnContext: TelegramContextDetails | null = null;
 	private currentTriggerMessageId: number | null = null;
 	private pendingInputMetrics = {
@@ -445,8 +445,7 @@ export class BotRuntime {
 			),
 			makeTelegramCompactionExtension((event) => this.handleBeforeCompact(event)),
 			makeCachePayloadObserverExtension(payloadKey, (observation) => {
-				this.pendingPayloadObservations.push(observation);
-				if (this.pendingPayloadObservations.length > 8) this.pendingPayloadObservations.shift();
+				this.pendingPayloadObservation = observation;
 			}),
 			makeAssistantPersistencePolicyExtension(
 				(text) => {
@@ -489,6 +488,7 @@ export class BotRuntime {
 			});
 			const streamFunction = session.agent.streamFunction;
 			session.agent.streamFunction = (requestModel, context, options) => {
+				this.pendingPayloadObservation = null;
 				return guardProviderCall(
 					(signal) =>
 						streamFunction(requestModel, context, {
@@ -580,7 +580,7 @@ export class BotRuntime {
 					this.thinkingStartedAt = 0;
 					this.thinkingMs = 0;
 					this.thinkingFinished = false;
-					this.pendingPayloadObservations = [];
+					this.pendingPayloadObservation = null;
 					break;
 				case "message_start":
 					if (event.message.role === "assistant") {
@@ -1539,7 +1539,7 @@ export class BotRuntime {
 			this.epoch = epoch;
 			this.visibleMessageIds.clear();
 			this.lastTurnFailed = false;
-			this.pendingPayloadObservations = [];
+			this.pendingPayloadObservation = null;
 			this.subscribeEvents();
 			// Disposal cannot undo an already committed selection.
 			try {
@@ -1735,7 +1735,7 @@ export class BotRuntime {
 		const contextTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 		const reasoningTokens = usage.reasoning ?? 0;
 		const latencyMs = this.runStartTs ? now - this.runStartTs : null;
-		const observation = this.pendingPayloadObservations.shift();
+		const observation = this.pendingPayloadObservation;
 		const contextBreakdown = fitContextBreakdown(
 			observation?.tokenEstimate ?? { system: 0, tools: 0, compactedHistory: 0, messages: contextTokens },
 			contextTokens,

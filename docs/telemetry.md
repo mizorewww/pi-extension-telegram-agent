@@ -50,13 +50,15 @@ daemon 的 runtime snapshot 是 provider/model、**实际生效 reasoning effort
 | Send | `send` | `send` tool从执行到settle的wall time平均 | 包含Telegram create与本地commit |
 | Cost | `$` | `cost` | latest 取单行；lifetime 跨 provider/model 求和 |
 
-`context_tokens` 是一次provider请求的prompt tokens，即 `↑ + R + W`；`output_tokens` 单列。主对话有效window = min(Pi catalog `contextWindow`, 顶层 `context_window` 配置，默认 65,536)。payload observer按provider请求中的system、tools、compaction summary、其他messages估算相对占比，再归一到provider返回的`context_tokens`；同epoch的实时session usage增加量归入messages，free为window减四段。跨epoch或实时usage未知时不展示旧分段。Telegram先按provider顺序单独显示红/紫/棕/蓝/绿方块条，再在下面逐行显示图例；每个方块代表四舍五入后的1,024 tokens。Pi用`S/T/C/M/F`文字简写。
+`context_tokens` 是一次provider请求的prompt tokens，即 `↑ + R + W`；`output_tokens` 单列。主对话有效window = min(Pi catalog `contextWindow`, 顶层 `context_window` 配置，默认 65,536)。payload observer按provider请求中的system、tools、compaction summary、其他messages估算相对占比，再归一到provider返回的`context_tokens`。分段依赖 provider 实现 Pi 标准 `onPayload` 钩子；缺少钩子时只有总量可用，不伪造 system/tools 分项或 raw payload/cache 证据。图片按固定 token 估算，不按 base64 字节计数。每次 stream 都清除上次观察；同一 stream 多次触发 payload hook 时采用最后一次，避免重试错配。
+
+同epoch的实时session usage增加量归入messages，free为window减四段。跨epoch或实时usage未知时不展示旧分段。Telegram先按provider顺序单独显示红/紫/棕/蓝/绿方块条，再在下面逐行显示图例；每个方块代表四舍五入后的1,024 tokens。Pi用`S/T/C/M/F`文字简写。
 
 本地 fallback 仅在以下条件全部成立时启用：当前 provider 原始 `cache_read = 0` 且 `cache_write = 0`、cache retention 不是 `none`；上一条主对话 run 与当前 run 的 bot/provider/api/model/epoch/session/cache retention 相同；两次 raw payload 的 system 与 tools HMAC 相同，上一条完整 message HMAC 列表是当前列表的逐项严格前缀；且当前 `context_tokens` 不小于上一条。此时 `cache_read_estimated = previous.context_tokens`。首次请求、任一旧 message 被改写、模型或 session/epoch 切换、compaction、无缓存策略以及 provider 已报告 read/write 时都不估算。旧库 migration 对保留行使用完全相同的相邻双 payload 规则回填。
 
 `≈` 表示“按 raw payload 结构推导的理论可复用前缀”，不是 provider 实际命中或账单证明。费用仍使用 response 到达时固化的原始 provider usage/catalog 估价，绝不按本地估算重算。这样既能在 Ollama-compatible API 不返回 cache token 细项时显示趋势，也不会污染原始取证数据。
 
-分段百分比按最大余数法取一位小数，五段严格相加为 100.0%；Telegram 图例在 system / tool 段为 0 时省略这两行（方块条与 Pi 的 `S/T/C/M/F` 文字不省略）。详细 status 中的时间戳（最近请求、since、最近压缩）按本地时区渲染为 `YYYY-MM-DD HH:MM:SS`，与 attached feed 卡片时钟一致；生产时区为 Asia/Singapore，测试必须 pin `TZ`。
+分段百分比按最大余数法取一位小数，五段严格相加为 100.0%；Telegram 图例始终保留五项，包括零值项。详细 status 中的时间戳（最近请求、since、最近压缩）按本地时区渲染为 `YYYY-MM-DD HH:MM:SS`，与 attached feed 卡片时钟一致；生产时区为 Asia/Singapore，测试必须 pin `TZ`。
 
 若没有 latest 主对话请求，当前上下文显示 `— / <window>`；若模型目录也没有有效 `contextWindow`，window 与百分比均显示 `—`。上下文上限 MUST 来自 daemon runtime snapshot 中已解析模型的 `contextWindow`（Pi catalog 值被顶层 `context_window` 配置钳制后的生效值），界面不自行查 catalog，也不维护第二份常量。
 
@@ -84,6 +86,6 @@ attached feed 的 footer 与 Pi 原生 `FooterComponent` 保持相同信息顺�
 
 ## 验证与更新触发条件
 
-测试 MUST 守卫：latest 排除 compaction、lifetime 包含 compaction、模型切换前后的 immutable per-run cost 跨 provider/model 累加、live compaction totals 不替换 latest、`CH` 分母包含 `W`、无 cache 样本显示 `—`、严格双 payload 前缀才产生本地 cache estimate、原始 cache/cost 不被估算改写、估算值在三个界面均显示 `≈`、当前 context 使用runtime session而非latest/lifetime、compact后unknown不回退旧epoch（`/tg status` 经 runtime `currentContextTokens`，footer 经 `lastRunId > last.id`）、live push `id <= lastId` 不重复折叠、分段百分比相加为 100.0 且空 S/T 图例行省略、status 时间戳为本地时区、Telegram status只显示目标bot且方块图例分行、三个界面共享费用精度、attached footer 保持 Pi 的信息顺序与 model 右对齐、compose guidance 留在单行 feed header，以及两个详细状态投影拥有完全相同的字段 key/顺序。
+测试 MUST 守卫：latest 排除 compaction、lifetime 包含 compaction、模型切换前后的 immutable per-run cost 跨 provider/model 累加、live compaction totals 不替换 latest、`CH` 分母包含 `W`、无 cache 样本显示 `—`、严格双 payload 前缀才产生本地 cache estimate、原始 cache/cost 不被估算改写、估算值在三个界面均显示 `≈`、当前 context 使用runtime session而非latest/lifetime、compact后unknown不回退旧epoch（`/tg status` 经 runtime `currentContextTokens`，footer 经 `lastRunId > last.id`）、live push `id <= lastId` 不重复折叠、无 payload hook 时不复用旧分项或伪造 raw cache 证据、分段百分比相加为 100.0 且五项图例保留、status 时间戳为本地时区、Telegram status只显示目标bot且方块图例分行、三个界面共享费用精度、attached footer 保持 Pi 的信息顺序与 model 右对齐、compose guidance 留在单行 feed header，以及两个详细状态投影拥有完全相同的字段 key/顺序。
 
 修改 `llm_runs` 字段、IPC `UsageRun` / `BotStats`、`/tg status` 或 Telegram `/status` 时必须同步本文。该模块的 Cache impact 为 **NONE**：它只读取既有 telemetry 并生成 UI/control side-channel。

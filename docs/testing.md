@@ -32,7 +32,7 @@
 
 ## 测试选择规则
 
-`runtime-obligation.test.ts` 另覆盖 Pi 原生失败 turn 与下一 prompt preflight 不触发 threshold 摘要、overflow 仍可恢复、摘要失败只记录实际报告的非零用量，以及真实 Telegram 首轮与连续请求包含相同完整 prompt，认证 preflight 失败后重试不重复消费或丢弃本轮上下文。
+`runtime-obligation.test.ts` 另覆盖 Pi 原生失败 turn 与下一 prompt preflight 不触发 threshold 摘要、overflow 仍可恢复、摘要失败只记录实际报告的非零用量，以及真实 Telegram 首轮与连续请求包含相同完整 prompt、认证 preflight 失败后重试不重复消费或丢弃上下文、缺少 payload hook 时不伪造分项或缓存证据、重试观察不会串到后续请求。
 
 `smoke-pi.ts` 使用有 deadline、无自动重试的单次真实请求，必须收到新的完整正确答案才退出成功；不输出 thinking 或 provider 错误原文。
 

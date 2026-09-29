@@ -20,8 +20,9 @@ import {
 	SettingsManager,
 	type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
-import { makeTelegramCompactionExtension } from "../src/agent/extensions/index.ts";
+import { makeTelegramCompactionExtension, observeProviderPayload } from "../src/agent/extensions/index.ts";
 import { setLogSink } from "../src/observability/log.ts";
+import { fitContextBreakdown } from "../src/observability/usage.ts";
 
 const CHAT_ID = -1004402809405;
 const BOT_ID = "A";
@@ -535,13 +536,18 @@ function assistantResult(input = 100) {
 	};
 }
 
-test("Telegram turns initialize the native prompt without duplicating deferred context", async () => {
+test("Telegram turns initialize the native prompt and use only the latest request observation", async () => {
 	const root = mkdtempSync(join(tmpdir(), "tg-context-usage-"));
 	const db = new Database(":memory:");
 	db.exec(readFileSync("src/db/schema.sql", "utf8"));
 	const bot = { ...makeBot(), personaPath: join(root, "persona.md"), compactionModel: "test/test-model:low" };
 	writeFileSync(bot.personaPath, "Fixture persona.");
 	const config = { ...makeConfig(bot), dataDir: root };
+	const payload = {
+		system: "adapter system",
+		tools: [{ name: "send", description: "adapter tool" }],
+		messages: [{ role: "user", content: "adapter user" }],
+	};
 	let calls = 0;
 	const requestPrompts: string[] = [];
 	let authAvailable = true;
@@ -551,11 +557,18 @@ test("Telegram turns initialize the native prompt without duplicating deferred c
 		checkAuth: async () => undefined,
 		isUsingOAuth: () => false,
 		getAuth: async () => ({ auth: { apiKey: "fixture" } }),
-		streamSimple: (_model: unknown, context: any) => {
+		streamSimple: (_model: unknown, context: any, options: any) => {
 			requestPrompts.push(getCurrentSystemPrompt(context.messages));
 			const stream = createAssistantMessageEventStream();
-			calls++;
-			stream.push({ type: "done", reason: "stop", message: assistantResult(10_000) });
+			const call = ++calls;
+			void (async () => {
+				if (call === 2) {
+					// An adapter can retry within one stream; only the successful request belongs to this usage.
+					await options.onPayload({ ...payload, system: "earlier failed attempt ".repeat(100) }, fakeModel());
+					await options.onPayload(payload, fakeModel());
+				}
+				stream.push({ type: "done", reason: "stop", message: assistantResult(10_000) });
+			})();
 			return stream;
 		},
 	} as unknown as ModelRuntime;
@@ -575,6 +588,29 @@ test("Telegram turns initialize the native prompt without duplicating deferred c
 			await (rt as any).flushPromise;
 			// First Telegram turn must already have the same complete Pi-owned prompt as later requests.
 			expect(requestPrompts.at(-1)).toBe(session.systemPrompt);
+			const row = db
+				.query(`SELECT system_tokens, tools_tokens, compacted_history_tokens, message_tokens,
+				full_payload_hash, cache_read_estimated FROM llm_runs ORDER BY id DESC LIMIT 1`)
+				.get() as any;
+			expect(row.message_tokens).toBeGreaterThan(0);
+			expect(row.system_tokens + row.tools_tokens + row.compacted_history_tokens + row.message_tokens).toBe(10_000);
+			if (call === 2) {
+				expect(row.system_tokens).toBeGreaterThan(0);
+				expect(row.tools_tokens).toBeGreaterThan(0);
+				const estimate = fitContextBreakdown(observeProviderPayload(payload, "fixture").tokenEstimate, 10_000);
+				expect(row).toMatchObject({
+					system_tokens: estimate.system,
+					tools_tokens: estimate.tools,
+					message_tokens: estimate.messages,
+				});
+				expect(row.full_payload_hash).not.toBeNull();
+			} else {
+				// Missing hooks must not reuse another request's breakdown or fabricate cache evidence.
+				expect(row.system_tokens).toBe(0);
+				expect(row.tools_tokens).toBe(0);
+				expect(row.full_payload_hash).toBeNull();
+				expect(row.cache_read_estimated).toBeNull();
+			}
 		}
 		expect(calls).toBe(3);
 		// A native preflight failure must leave the batch unconsumed and out of future repair turns.
