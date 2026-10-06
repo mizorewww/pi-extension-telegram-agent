@@ -81,7 +81,8 @@ Telegram create 不可回滚，所以：
 
 - **威胁**：群成员通过 prompt injection 让 bot 执行任意 JS；最坏情况是读到 daemon 同 uid 可读的 `.env` 并外发。
 - **防护**：vm context 由 `Object.create(null)` 创建并禁止字符串/wasm 代码生成，context 内没有任何 host realm 对象；结果只以字符串跨界。子进程 env 只保留 PATH、独立 tmp cwd、`--smol`、同步代码 3 s vm timeout、进程 5 s SIGKILL、输出 4 KB 上限。
-- **残余风险**：node:vm 不是官方安全边界，引擎 0day 可打穿 realm；`--smol` 不是硬内存上限；SIGKILL 只杀直接子进程。OS 级隔离是后续增强，不在当前威胁模型内。默认关闭。
+- **第二层（Linux + bubblewrap）**：子进程运行在新的 namespace 里，没有网络，文件系统只有只读 `/usr`、解释器和自己的工作目录；即使引擎漏洞打穿 vm，也看不到项目目录、`.env` 和 home。没有 `bwrap` 的平台只有第一层。
+- **残余风险**：没有 bubblewrap 时，node:vm 不是官方安全边界，引擎 0day 可打穿 realm 读到 daemon 能读的文件；`--smol` 不是硬内存上限。默认关闭。
 
 ## Telegram 控制命令
 

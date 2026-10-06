@@ -14,12 +14,15 @@
 //   promises are bounded by the parent-side SIGKILL at TIMEOUT_MS
 // - hard timeout; per-line / total log caps; the parent only ever forwards the
 //   wrapper's structured JSON line — unparseable stdout becomes a fixed failure
+// - on Linux with bubblewrap installed, the child additionally runs in fresh namespaces with no
+//   network and a filesystem of read-only /usr, the interpreter and its own work dir only, so
+//   even an engine-level vm escape cannot read the project, .env or the user's home
 // Tests: test/sandbox.test.ts (must re-run after any change to the sandbox model).
 
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const TIMEOUT_MS = 5000; // parent-side SIGKILL backstop (covers async blowups)
 const VM_TIMEOUT_MS = 3000; // vm timeout; only bounds synchronous execution
@@ -142,6 +145,54 @@ try {
 }
 `;
 
+export const BWRAP = process.platform === "linux" ? Bun.which("bwrap") : null;
+
+/** The child command: bubblewrap-confined when available, otherwise the plain interpreter. */
+export function sandboxCommand(execPath: string, dir: string): { command: string; args: string[]; workDir: string } {
+	const script = (workDir: string) => ["--smol", join(workDir, "wrapper.mjs"), join(workDir, "code.js")];
+	if (!BWRAP) return { command: execPath, args: script(dir), workDir: dir };
+	const interpreter = execPath.startsWith("/usr/") ? [] : ["--ro-bind", dirname(execPath), dirname(execPath)];
+	return {
+		command: BWRAP,
+		args: [
+			"--unshare-all",
+			"--die-with-parent",
+			"--new-session",
+			"--clearenv",
+			"--setenv",
+			"PATH",
+			"/usr/bin",
+			"--ro-bind",
+			"/usr",
+			"/usr",
+			"--symlink",
+			"usr/lib",
+			"/lib",
+			"--symlink",
+			"usr/lib64",
+			"/lib64",
+			"--symlink",
+			"usr/bin",
+			"/bin",
+			...interpreter,
+			"--proc",
+			"/proc",
+			"--dev",
+			"/dev",
+			"--tmpfs",
+			"/tmp",
+			"--bind",
+			dir,
+			"/work",
+			"--chdir",
+			"/work",
+			execPath,
+			...script("/work"),
+		],
+		workDir: dir,
+	};
+}
+
 export interface RunJsResult {
 	ok: boolean;
 	output: string; // console output + final expression value (or error message)
@@ -157,8 +208,9 @@ export async function runJs(code: string, execPath: string = process.execPath): 
 		writeFileSync(join(dir, "wrapper.mjs"), WRAPPER);
 		writeFileSync(join(dir, "code.js"), code);
 		return await new Promise<RunJsResult>((resolve) => {
-			const child = spawn(execPath, ["--smol", join(dir, "wrapper.mjs"), join(dir, "code.js")], {
-				cwd: dir,
+			const sandbox = sandboxCommand(execPath, dir);
+			const child = spawn(sandbox.command, sandbox.args, {
+				cwd: sandbox.workDir,
 				env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, // empty except PATH: no secrets
 				stdio: ["ignore", "pipe", "ignore"], // stderr (runtime crash dumps) never reaches the model
 			});

@@ -2,7 +2,7 @@
 // search never fetches a non-public target or leaks queries/URLs/keys into telemetry.
 
 import { expect, test } from "bun:test";
-import { runJs } from "../src/tools/run-js.ts";
+import { BWRAP, runJs, sandboxCommand } from "../src/tools/run-js.ts";
 import { runTinyFishTool, validatePublicHttpUrl } from "../src/tools/search.ts";
 
 test("run_js exposes no host globals", async () => {
@@ -78,3 +78,30 @@ test("search marks pages untrusted and keeps secrets out of telemetry", async ()
 	for (const secret of ["query-secret", "url-secret", "body-secret", "api-secret"])
 		expect(telemetry).not.toContain(secret);
 });
+
+// Defense in depth below the vm: even raw code (no vm) inside the confinement must not see the
+// project, .env or the network. Only runs where bubblewrap exists (production Linux hosts).
+test.skipIf(!BWRAP)(
+	"run_js confinement hides the project and the network from raw code",
+	async () => {
+		const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+		const { tmpdir } = await import("node:os");
+		const { join, resolve } = await import("node:path");
+		const dir = mkdtempSync(join(tmpdir(), "runjs-confine-"));
+		try {
+			const probe = `const fs = require("node:fs");
+let file = "hidden"; try { fs.readFileSync(${JSON.stringify(resolve("package.json"))}); file = "visible"; } catch {}
+let net = "blocked"; try { await fetch("http://1.1.1.1", { signal: AbortSignal.timeout(2000) }); net = "open"; } catch {}
+console.log(JSON.stringify({ file, net }));`;
+			writeFileSync(join(dir, "wrapper.mjs"), probe);
+			writeFileSync(join(dir, "code.js"), "");
+			const { command, args } = sandboxCommand(process.execPath, dir);
+			const child = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "ignore" });
+			const out = await new Response(child.stdout).text();
+			expect(JSON.parse(out.trim())).toEqual({ file: "hidden", net: "blocked" });
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	},
+	15000,
+);

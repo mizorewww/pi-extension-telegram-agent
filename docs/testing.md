@@ -32,7 +32,7 @@ bun run scripts/e2e-compaction.ts --bot <id>   # 通过公开 control 入口压�
 | `session-control.test.ts` | `/model` 与 `/new` 原子切换 session/epoch、失败不改旧状态、重启后恢复；变更类命令只允许人类管理员，命令消息不进 provider context。 |
 | `telegram.test.ts` | mention 优先于 reply；路由交接在 handler 失败并重启后仍送达；manual send 结果未知不重发；未配置 bot 的 cursor 不阻塞保留期清理。 |
 | `provider-guard.test.ts` | 请求创建/消费 deadline 中止且不重试；HTTP 413 进入 Pi overflow 恢复。 |
-| `sandbox.test.ts` | run_js 拿不到 host realm、超时与输出有界；search 只访问公网 HTTP(S)，遥测不含 query/URL/正文/key。 |
+| `sandbox.test.ts` | run_js 拿不到 host realm、超时与输出有界；有 bubblewrap 时原始代码也看不到项目文件和网络（仅 Linux）；search 只访问公网 HTTP(S)，遥测不含 query/URL/正文/key。 |
 | `daemon-control.test.ts` | 进程归属识别（含空格路径）、拒绝其他部署与无法验证的 pid。 |
 | `network-isolation.test.ts` | `network-guard.ts` preload 机械拒绝外网，即使存在真实 `.env`。 |
 
