@@ -14,7 +14,7 @@
 //   promises are bounded by the parent-side SIGKILL at TIMEOUT_MS
 // - hard timeout; per-line / total log caps; the parent only ever forwards the
 //   wrapper's structured JSON line — unparseable stdout becomes a fixed failure
-// Tests: test/runjs.test.ts (must re-run after any change to the sandbox model).
+// Tests: test/sandbox.test.ts (must re-run after any change to the sandbox model).
 
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";

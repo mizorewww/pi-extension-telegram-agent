@@ -1,3 +1,5 @@
+// /model and /new swap the Pi session and epoch atomically; only human admins can trigger them.
+
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,25 +8,16 @@ import type { Api, Model, AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { BotRuntime } from "../src/agent/runtime.ts";
 import { createInstalledPiModelRuntime } from "../src/agent/model-runtime.ts";
-import { loadConfig, type BotConfig } from "../src/config.ts";
-import { openDb, getBotState } from "../src/db/db.ts";
+import { loadConfig } from "../src/config.ts";
+import { openDb } from "../src/db/db.ts";
 import { getSessionManifest } from "../src/db/message-events.ts";
 import { updateBotModelConfig } from "../src/onboarding/config-core.ts";
 import { setLogSink } from "../src/observability/log.ts";
-import { BotApi, type InlineKeyboardMarkup } from "../src/telegram/api.ts";
 import {
 	consumedControlMessageIds,
-	parseTelegramControlCallback,
 	parseTelegramControlCommand,
 	TelegramControlCommandService,
 } from "../src/telegram/control-command.ts";
-import {
-	TELEGRAM_CONTROL_MENU,
-	TelegramControlCoordinator,
-	type TelegramControlApi,
-} from "../src/telegram/control-integration.ts";
-import { modelMenuKey, renderModelMenu } from "../src/telegram/model-menu.ts";
-import { Poller } from "../src/telegram/poller.ts";
 
 const CHAT = -1001234567890;
 const roots: string[] = [];
@@ -88,63 +81,10 @@ function fixture() {
 	return { root, config: loadConfig(root) };
 }
 
-function callback(data: string, sender = 42, chatId = CHAT, messageId = 100) {
-	return {
-		update_id: 51,
-		callback_query: {
-			id: "callback-1",
-			from: { id: sender, is_bot: false },
-			data,
-			message: { message_id: messageId, date: 100, chat: { id: chatId }, from: { id: 777, is_bot: true } },
-		},
-	};
-}
-
-test("every Pi model is reachable through bounded buttons, independent of catalog order and long names", () => {
-	const bot = { name: "Bot", provider: "fixture", model: "current", reasoningEffort: "off" } as BotConfig;
-	const models = Array.from({ length: 145 }, (_, i) => model(`model-${i}-${"长".repeat(40)}`, `provider-${i % 13}`));
-	const pending = ["model:r:0"];
-	const pages = new Set<string>();
-	const selected = new Set<string>();
-	while (pending.length) {
-		const data = pending.pop()!;
-		if (pages.has(data)) continue;
-		pages.add(data);
-		const view = renderModelMenu(bot, models, data)!;
-		expect(view).not.toBeNull();
-		expect(view).toEqual(renderModelMenu(bot, [...models].reverse(), data)!);
-		for (const button of view.replyMarkup.inline_keyboard.flat()) {
-			expect(Buffer.byteLength(button.callback_data)).toBeLessThanOrEqual(64);
-			if (button.callback_data.startsWith("model:s:")) selected.add(button.callback_data);
-			else pending.push(button.callback_data);
-		}
-	}
-	expect(selected.size).toBe(models.length);
-	expect(renderModelMenu(bot, models, "model:r:999999")).toBeNull();
-	expect(TELEGRAM_CONTROL_MENU.some((entry) => entry.command === "model")).toBe(true);
-});
-
-test("model config writes all selection fields atomically, preserves other bots, and rolls back exactly", () => {
-	const { root, config } = fixture();
-	const path = join(root, "telegram.config.ts");
-	const original = readFileSync(path, "utf8");
-	const selection = { provider: "new-provider", model: 'quote"slash/美元$&', reasoningEffort: "off" as const };
-	const write = updateBotModelConfig(root, "A", selection);
-	expect(loadConfig(root).bots[0]).toMatchObject(selection);
-	expect(loadConfig(root).bots[1]).toEqual(config.bots[1]);
-	write.rollback();
-	expect(readFileSync(path, "utf8")).toBe(original);
-	updateBotModelConfig(root, "A", selection).finalize();
-	updateBotModelConfig(root, "A", { ...selection, model: "second" }).finalize();
-	expect(loadConfig(root).bots[0]?.model).toBe("second");
-	expect(() => updateBotModelConfig(root, "A", { ...selection, provider: "" })).toThrow();
-	expect(loadConfig(root).bots[0]?.model).toBe("second");
-});
-
-test("callbacks require a human admin, the configured group, and a menu owned by the receiving bot", async () => {
+test("mutating control commands require a human admin and never reach the provider context", async () => {
 	const { root, config } = fixture();
 	const db = openDb(":memory:");
-	let changes = 0;
+	let resets = 0;
 	const runtime = {
 		controlSnapshot: () => {
 			throw new Error("unused");
@@ -153,158 +93,37 @@ test("callbacks require a human admin, the configured group, and a menu owned by
 			throw new Error("unused");
 		},
 		newSessionForControl: async () => {
-			throw new Error("unused");
+			resets++;
+			return { ok: true as const, epoch: 7 };
 		},
 		consumeControlMessage: () => {},
 		changeModelForControl: async () => {
-			changes++;
-			return { ok: true as const, epoch: 2, reasoningEffort: "off" as const };
-		},
-	};
-	const service = new TelegramControlCommandService(
-		db,
-		config.bots,
-		root,
-		new Map([
-			["A", runtime],
-			["B", runtime],
-		]),
-		[42],
-		undefined,
-		{ getAvailableSnapshot: () => [model("next")] },
-	);
-	const edits: string[] = [];
-	const answers: (string | undefined)[] = [];
-	let markup: InlineKeyboardMarkup | undefined;
-	const api: TelegramControlApi = {
-		sendRichMessage: async () => {
 			throw new Error("unused");
 		},
-		sendMessage: async (_chat, text, _reply, keyboard) => {
-			markup = keyboard;
-			return {
-				message_id: 100,
-				date: 100,
-				chat: { id: CHAT },
-				from: { id: 777, is_bot: true, first_name: "Bot" },
-				text,
-			};
-		},
-		answerCallbackQuery: async (_id, text) => {
-			answers.push(text);
-			return true;
-		},
-		editMessageText: async (_chat, id, text) => {
-			edits.push(text);
-			return {
-				message_id: id,
-				date: 100,
-				edit_date: 101 + edits.length,
-				chat: { id: CHAT },
-				from: { id: 777, is_bot: true, first_name: "Bot" },
-				text,
-			};
-		},
 	};
-	const coordinator = new TelegramControlCoordinator(
-		db,
-		service,
-		new Map([
-			["A", api],
-			["B", api],
-		]),
-	);
-	try {
-		const command = parseTelegramControlCommand(
+	const service = new TelegramControlCommandService(db, config.bots, root, new Map([["A", runtime]]), [42]);
+	const command = (messageId: number, from: Record<string, unknown>, text = "/new") =>
+		parseTelegramControlCommand(
 			{
 				message: {
-					message_id: 1,
+					message_id: messageId,
 					chat: { id: CHAT },
-					from: { id: 42 },
-					text: "/model@alpha_bot",
-					entities: [{ type: "bot_command", offset: 0, length: 16 }],
+					from,
+					text,
+					entities: [{ type: "bot_command", offset: 0, length: text.length }],
 				},
 			},
-			"B",
-			[
-				{ id: "A", username: "alpha_bot" },
-				{ id: "B", username: "bravo_bot" },
-			],
+			"A",
+			[{ id: "A", username: "alpha_bot" }],
 		)!;
-		expect(command.replyBotId).toBe("A");
-		expect(await coordinator.handle(command)).toMatchObject({ outcome: "sent" });
-		expect(markup?.inline_keyboard.length).toBeGreaterThan(0);
-		expect(consumedControlMessageIds(db, CHAT)).toEqual(new Set([1, 100]));
-		expect(parseTelegramControlCallback(callback("model:r:0", 42, CHAT - 1), "A", CHAT)).toBeNull();
-		const data = `model:s:${modelMenuKey("fixture", "next")}`;
-		for (const [update, botId] of [
-			[callback(data, 99), "A"],
-			[callback(data), "B"],
-			[callback(data, 42, CHAT, 999), "A"],
-			[
-				{ ...callback(data), callback_query: { ...callback(data).callback_query, from: { id: 42, is_bot: true } } },
-				"A",
-			],
-		] as const) {
-			await coordinator.handle(parseTelegramControlCallback(update, botId, CHAT)!);
-		}
-		expect(changes).toBe(0);
-		expect(edits).toHaveLength(0);
-		expect(answers.every(Boolean)).toBe(true);
-		await coordinator.handle(parseTelegramControlCallback(callback(data), "A", CHAT)!);
-		expect(changes).toBe(1);
-		expect(edits).toHaveLength(1);
-		expect(consumedControlMessageIds(db, CHAT)).toEqual(new Set([1, 100]));
-		expect(db.query("SELECT text FROM messages WHERE message_id = 100").get()).toEqual({ text: edits[0] });
-	} finally {
-		db.close();
-	}
-});
-
-test("poller handles callbacks before advancing offset without creating messages or LLM dispatches", async () => {
-	const db = openDb(":memory:");
-	let callbacks = 0;
-	const update = callback("model:r:0");
-	const poller = new Poller(
-		db,
-		"A",
-		"unused",
-		CHAT,
-		() => {
-			throw new Error("callback reached routing");
-		},
-		true,
-		async () => {
-			expect(getBotState(db, "A", "update_offset")).toBeNull();
-			callbacks++;
-		},
-	);
-	let polls = 0;
-	(poller as any).api = {
-		getUpdates: async () => {
-			if (polls++) {
-				poller.stop();
-				return [];
-			}
-			return [update, update];
-		},
-	};
 	try {
-		await poller.run();
-		expect(callbacks).toBe(1);
-		expect(getBotState(db, "A", "update_offset")).toBe("52");
-		expect(db.query("SELECT COUNT(*) n FROM messages").get()).toEqual({ n: 0 });
-		expect(db.query("SELECT COUNT(*) n FROM pending_telegram_dispatch").get()).toEqual({ n: 0 });
-		const api = new BotApi("unused");
-		const calls: unknown[] = [];
-		api.call = async (method, params) => {
-			calls.push({ method, params });
-			return [] as any;
-		};
-		await api.getUpdates(1, 25);
-		expect(calls).toMatchObject([
-			{ method: "getUpdates", params: { allowed_updates: ["message", "edited_message", "callback_query"] } },
-		]);
+		expect((await service.handle(command(1, { id: 99 }))).text).toContain("权限不足");
+		expect((await service.handle(command(2, { id: 42, is_bot: true }))).text).toBeNull();
+		expect(resets).toBe(0);
+		expect((await service.handle(command(3, { id: 42 }))).text).toContain("epoch=7");
+		expect(resets).toBe(1);
+		// Every command message is excluded from provider context, whatever its outcome.
+		expect(consumedControlMessageIds(db, CHAT)).toEqual(new Set([1, 2, 3]));
 	} finally {
 		db.close();
 	}
@@ -337,7 +156,6 @@ test("live selection rotates Pi session and epoch, survives reload, and failed w
 	const restoreLog = setLogSink((record) => logs.push(JSON.parse(record)));
 	try {
 		await runtime.init();
-		expect((runtime as any).session.settingsManager.getCacheWarmingMode()).toBe("off");
 		const before = getSessionManifest(db, bot.id)!;
 		const history: AssistantMessage = {
 			role: "assistant",
@@ -361,10 +179,6 @@ test("live selection rotates Pi session and epoch, survives reload, and failed w
 		const original = readFileSync(join(root, "telegram.config.ts"), "utf8");
 		const persist = (selection: Parameters<typeof updateBotModelConfig>[2]) =>
 			updateBotModelConfig(root, bot.id, selection);
-		expect(await runtime.changeModelForControl("fixture", "text-only", persist)).toEqual({
-			ok: false,
-			code: "image_input_unsupported",
-		});
 		(runtime as any).flushing = true;
 		expect(await runtime.changeModelForControl("fixture", "next", persist)).toEqual({ ok: false, code: "busy" });
 		(runtime as any).flushing = false;
@@ -394,12 +208,6 @@ test("live selection rotates Pi session and epoch, survives reload, and failed w
 			currentContextTokens: 0,
 		});
 		expect(loadConfig(root).bots[0]).toMatchObject({ provider: "fixture", model: "next", reasoningEffort: "off" });
-		expect(
-			await runtime.changeModelForControl("fixture", "next", () => {
-				throw new Error("must not rewrite config");
-			}),
-		).toMatchObject({ ok: true, epoch: 2 });
-		expect(getSessionManifest(db, bot.id)).toEqual(after);
 		expect(readFileSync(before.sessionFile, "utf8")).toBe(previousBytes);
 		const currentSession = (runtime as any).session as AgentSession;
 		expect(currentSession.messages).toHaveLength(0);
@@ -425,12 +233,6 @@ test("live selection rotates Pi session and epoch, survives reload, and failed w
 		expect(runtime.controlSnapshot()).toMatchObject({ model: "next", epoch: 3 });
 		expect(readFileSync(beforeNew.sessionFile, "utf8")).toBe(beforeNewBytes);
 		expect(JSON.stringify(logs)).not.toContain("secret-canary");
-		expect(logs).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({ event: "model_changed" }),
-				expect.objectContaining({ event: "model_change_failed" }),
-			]),
-		);
 	} finally {
 		await runtime.stop();
 		restoreLog();

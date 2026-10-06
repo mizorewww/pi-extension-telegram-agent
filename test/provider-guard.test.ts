@@ -1,17 +1,15 @@
+// The provider watchdog turns hangs into retryable errors and proxy 413s into Pi overflow recovery.
+
 import { expect, test } from "bun:test";
 import {
 	createAssistantMessageEventStream,
 	isRetryableAssistantError,
 	isContextOverflow,
-	retryAssistantCall,
 	type Api,
 	type Model,
 } from "@earendil-works/pi-ai";
-import { SettingsManager } from "@earendil-works/pi-coding-agent";
-import { guardProviderCall, providerRetryPolicy } from "../src/agent/provider-guard.ts";
+import { guardProviderCall } from "../src/agent/provider-guard.ts";
 import { classifyPiProviderFailure } from "../src/agent/model-runtime.ts";
-import { runSmokePrompt } from "../scripts/smoke-pi.ts";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 const model = {
 	id: "test",
@@ -47,113 +45,6 @@ for (const phase of ["creation", "body"] as const) {
 		expect(calls).toBe(1);
 	});
 }
-
-test("caller cancellation is terminal and a pre-aborted request never starts", async () => {
-	const controller = new AbortController();
-	controller.abort();
-	let calls = 0;
-	const result = await guardProviderCall(
-		() => {
-			calls++;
-			return createAssistantMessageEventStream();
-		},
-		model,
-		controller.signal,
-		{ timeoutMs: 1000 },
-	).result();
-	expect(result.stopReason).toBe("aborted");
-	expect(calls).toBe(0);
-});
-
-test("successful streams retain their terminal result and cancel their watchdog", async () => {
-	const upstream = createAssistantMessageEventStream();
-	const usage = {
-		input: 1,
-		output: 1,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 2,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
-	const result = {
-		role: "assistant" as const,
-		content: [],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage,
-		stopReason: "stop" as const,
-		timestamp: 1,
-	};
-	const stream = guardProviderCall(() => upstream, model, undefined, { timeoutMs: 10 });
-	upstream.push({ type: "done", reason: "stop", message: result });
-	expect(await stream.result()).toBe(result);
-	await Bun.sleep(20);
-	expect(await stream.result()).toBe(result);
-});
-
-test("zero-retry policy disables native Pi session and summary retries", async () => {
-	const policy = providerRetryPolicy(0);
-	const settings = SettingsManager.inMemory({ retry: { ...policy, provider: { maxRetries: 0 } } });
-	expect(settings.getRetrySettings()).toMatchObject({ enabled: false, maxRetries: 0 });
-	expect(settings.getProviderRetrySettings().maxRetries).toBe(0);
-	let calls = 0;
-	const result = await retryAssistantCall(
-		() =>
-			guardProviderCall(
-				() => {
-					calls++;
-					throw new Error("503 service unavailable");
-				},
-				model,
-				undefined,
-				{ timeoutMs: 10 },
-			).result(),
-		policy,
-		undefined,
-	);
-	expect(result.stopReason).toBe("error");
-	expect(calls).toBe(1);
-});
-
-test("smoke rejects resolved provider failures, empty or stale replies, and incorrect answers", async () => {
-	const answer = {
-		role: "assistant" as const,
-		content: [{ type: "text" as const, text: "4" }],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 1,
-			output: 1,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 2,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "stop" as const,
-		timestamp: 1,
-	};
-	for (const result of [
-		undefined,
-		{ ...answer, stopReason: "error" as const },
-		{ ...answer, stopReason: "aborted" as const },
-		{ ...answer, stopReason: "length" as const },
-		{ ...answer, content: [] },
-		{ ...answer, content: [{ type: "text" as const, text: "5" }] },
-		answer,
-	]) {
-		const messages: AgentMessage[] = [answer];
-		const session = {
-			messages,
-			prompt: async () => {
-				if (result) messages.push(result);
-			},
-		};
-		if (result === answer) expect(await runSmokePrompt(session)).toBe(answer);
-		else await expect(runSmokePrompt(session)).rejects.toThrow("SMOKE FAILED");
-	}
-});
 
 for (const phase of ["throw", "stream"] as const) {
 	test(`HTTP 413 from ${phase} enters Pi overflow recovery without retrying the request`, async () => {

@@ -1,67 +1,44 @@
-# 测试策略与状态
+# 测试
 
-> 当前真实测试状态，不是计划书。本文件是测试与验证的唯一权威来源。
+`test/` 只保留长期 invariant 与安全边界的守卫。新功能可以先写失败测试驱动实现，稳定后删掉只锁实现细节的脚手架测试；能确定性复现的 bug 留一个回归测试。
 
-## 验证漏斗（由便宜到贵，按序跑到能覆盖改动的那层）
+## 验证漏斗
 
-1. **目标**：`bun test test/<相关文件>` —— 直接覆盖被改行为的最小测试
-2. **全量 unit**：`bun test`（不触网络）+ `bun run check`（tsc --noEmit）
-3. **e2e**：`bun run scripts/e2e-agent.ts --bot <id>` / `e2e-compaction.ts --bot <id>`（需 `.env`，触真实配置 provider / Telegram，opt-in）
-4. **真实群 / 长运行 smoke**：跨边界或稳定性改动才需要；观察 daemon.log、遥测、内存
-
-## 当前测试集
-
-`test/` 只保留长期 invariant 与安全边界的守卫，共 16 个测试文件：
-
-- `cache.test.ts` — cache golden：锁定 cache-visible protocol 的 hash（system prompt、tool schema 与顺序、消息/compaction 序列化 grammar、extension 顺序、sticker catalog block）。任何 provider-visible 变化都会在这里报警。
-- `context-protocol.test.ts` — context fingerprint / extension / model capability 契约：恢复 session 的 cache-identity 判断、structured context 协议、相邻 raw payload 严格前缀的本地 cache estimate、用户级已安装provider extension进入daemon shared runtime，以及不允许 Pi 静默 clamp 不支持的 reasoning 档位。
-- `network-isolation.test.ts` — 证明 `bun test` 在真实 `.env` 存在时也机械拒绝外网 / 付费 API fetch（配合 `network-guard.ts` preload，只放行 loopback）。
-- `runjs.test.ts` — run_js sandbox：正常计算可用，host realm 隔离与资源限制成立。
-- `search.test.ts` — TinyFish search/fetch 契约：参数边界、SSRF prefilter（public IP 表）、untrusted boundary、telemetry 脱敏；只用本地 Bun server。
-- `db.test.ts` — SQLite migration：旧库迁移幂等且保留历史 telemetry；本地 cache estimate 只回填同 cohort 的严格 payload 前缀，不覆盖 provider usage 或 `cache_retention=none`。
-- `media.test.ts` — 跨bot Telegram media source配对、static/animated/video sticker metadata与原始file_id发送、vision模式（描述singleflight/persistent cache跨bot复用、视频固定代表帧单次vision调用、deployment全视频流水线并发门、缺FFmpeg时下载前no-op且不持久化terminal结果）与context模式（photo/static sticker转换、video抽帧singleflight与`context_files`持久化复用、失败可重试）、TGS/voice/audio不产出上下文图片、部署路径迁移、static sticker展示缓存、compaction后跨bot引用保护/派生文件清理/失败重试/启动不复活回收文件、媒体引用查询按身份索引查找的执行计划，以及Pi attach filter握手、activity单卡/原生thinking/完整正文、username与视觉描述乱序合并。
-- `telegram-control.test.ts` — `/status` 的 InputRichMessage Markdown、统计数字千位分隔与缓存命中率、独立 plain projection、create→canonical persistence，以及仅在确定性rich拒绝时单次fallback的exactly-once边界。
-- `model-menu.test.ts` — Pi 全目录分页与64-byte callback上限、管理员/群/Bot菜单归属边界、callback不进入消息路由、配置原子写入/回滚、模型切换的会话与epoch隔离及重启恢复。
-- `telemetry.test.ts` — Pi/Telegram status共享读模型：latest排除compaction、lifetime/live totals包含compaction、切换provider/model后的immutable per-run cost累计、本地 estimate 的 `≈` 标记、统一费用精度、runtime snapshot、统一字段顺序、context/window与`CH = R/(↑+R+W)`派生口径。
-- `provider-guard.test.ts` — stream 创建与消费 deadline、主动取消、成功后清理、Pi 原生零重试配置、HTTP 413 抛异常与 error stream 的原生 overflow 识别，以及 smoke 对错误/截断/空/旧/错误答案的非成功判定。
-- `reaction.test.ts` — reaction 白名单、幂等失败边界，以及 reaction-only 不结清公开回复 obligation。
-- `visibility.test.ts` — active context 的完整消息可见性与 compaction 边界。
-- `telegram-delivery.test.ts` — 全局 mention 优先级与 caption、乱序 edit、manual send unknown outcome、control retention 与 pending handoff 跨重启交付。
-- `daemon-control.test.ts` — 临时假 daemon 的精确进程归属与含空格路径，拒绝其他部署与测试进程。
-- `runtime-obligation.test.ts` — 真实 Pi AgentSession 的图片多/文字少时自动、手动、取消压缩及设置恢复；视觉/纯文本摘要模型输入与图片顺序、窗口超限的零调用拒绝和日志脱敏；发送后遥测失败、turn 内/后可见性、split-turn 取消与共享图片保留；direct address 的真实 send 完成条件、沉默最多一次补答、unknown 禁止重发、busy trigger 身份不漂移，以及 coalesced obligation、普通 overflow 设计锁定与 flushLoop teardown 不滞留。
-
-## 测试选择规则
-
-`runtime-obligation.test.ts` 另覆盖 Pi 原生失败 turn 与下一 prompt preflight 不触发 threshold 摘要、overflow（含 nginx HTML 413）仍可恢复且持续 413 只压缩重试一次、图片预算 preflight 在摘要失败/无进展时阻止追加 batch 并保留 obligation、摘要图片字节预算缩放保留全部图片且失败零 provider 调用、摘要失败只记录实际报告的非零用量，以及真实 Telegram 首轮与连续请求包含相同完整 prompt、认证 preflight 失败后重试不重复消费或丢弃上下文、缺少 payload hook 时不伪造分项或缓存证据、重试观察不会串到后续请求。
-
-`smoke-pi.ts` 使用有 deadline、无自动重试的单次真实请求，必须收到新的完整正确答案才退出成功；不输出 thinking 或 provider 错误原文。
-
-- **鼓励 TDD**：新行为先写失败的测试再实现。但脚手架测试在功能稳定后必须删除——测试集只保护长期 invariant 与安全边界，不锁实现细节，不为覆盖率保留一次性验收测试。
-- 能确定性复现的 bug fix 必须有回归测试。
-- 旧消息引用由 `telegram-delivery`、`db`、`cache` 和 `runtime-obligation` 联合保护：嵌入正文随 event 留存、不额外路由父消息、长正文与 selected quote 共享预算、旧库 trigger 升级不改历史，以及真实 Pi prompt preflight 压缩后正文仍到达 provider。
-- 契约变化（IPC 协议 / schema / 序列化 grammar）需要跨边界测试。
-- Agent 行为测可观察轨迹与结果，不断言 prompt 字符串。
-- provider cache 相关改动必须跑 `test/cache.test.ts` golden；golden 失败是报警，先查原因，确认是有意变更后按 `docs/cache.md` 流程 bump version 再更新 golden，不要随手改 expected value。
-- 涉时间序列化的测试必须 pin TZ（`bun test` 强制 UTC，参考 `test/cache.test.ts`，生产为 Asia/Singapore）。
-- `bun test` 即使检测到真实 `.env` 也不得调用外网或付费 API；`bunfig.toml` 的 test preload 只放行 loopback。真实 TinyFish / provider / Telegram 验证只能用明确 opt-in 的 e2e 脚本或一次性脚手架，脚手架验收后立即删除，不能按 credential 存在自动启用。
-- 不得为了通过而删除或削弱断言、类型检查或安全控制。
-
-## 运行命令
+由便宜到贵，跑到能覆盖改动的那层为止：
 
 ```bash
-bun test                # 全量 unit（零外网、零付费调用）
-bun run check           # tsc --noEmit
-bun run lint            # Biome lint + format check（bun run format 自动修）
-bun run docs:check      # 文档站构建 + 链接检查
-bun run scripts/smoke-pi.ts --bot <id>              # 当前 bot 的 Pi provider/model smoke（需 .env）
-bun run scripts/e2e-agent.ts --bot <id>              # 真实链路 e2e（需 .env，opt-in）
-bun run scripts/e2e-compaction.ts --bot <id>         # 通过公开control入口验证compaction（需 .env，opt-in）
+bun test test/<相关文件>   # 1. 直接覆盖改动的测试
+bun test                  # 2. 全量（零外网、零付费调用）
+bun run check             # 3. tsc --noEmit
+bun run lint              # 4. Biome lint + format（bun run format 自动修）
+bun run docs:check        # 5. 文档站构建 + 链接检查
 ```
 
-## 失败诊断
+真实服务验证只能显式 opt-in（需要 `.env`，会产生费用或发群消息）：
 
-改源码前先定位失败来源：1) 被改的行为 2) 过期的生成物 / golden 3) 缺 bootstrap / build 产物 4) 环境或工具链不一致（TZ、bun 版本）5) flaky / 外部依赖（Telegram、DeepSeek、TinyFish、codex）6) 与本次改动无关的既有失败。外部 / 既有失败单独报告，不混入本次结论。
+```bash
+bun run scripts/smoke-pi.ts --bot <id>         # 单次真实 provider 请求
+bun run scripts/e2e-agent.ts --bot <id>        # 真实链路
+bun run scripts/e2e-compaction.ts --bot <id>   # 通过公开 control 入口压缩
+```
 
-## 已知 flaky
+## 守卫清单
 
-（暂无）
+| 文件 | 守护什么 |
+|---|---|
+| `cache.test.ts` | cache-visible 协议 golden：system prompt、tool schema 与顺序、event 序列化、摘要输入、extension 顺序；sticker 候选作为独立〔系统附注〕消息只跟在最后一批之后；摘要不含 thinking。 |
+| `context.test.ts` | fingerprint 变化或 session 文件缺失时不恢复；压缩切点计入图片；未发送的 assistant 文本不进入后续 context。 |
+| `runtime.test.ts` | 直接点名的回复义务：coalesce 不丢、失败 turn 保留且不记零用量、沉默只补答一次、结果未知不重发；真实 Pi 压缩在图片超预算时触发、失败 turn 不触发阈值摘要但保留 overflow 恢复。 |
+| `session-control.test.ts` | `/model` 与 `/new` 原子切换 session/epoch、失败不改旧状态、重启后恢复；变更类命令只允许人类管理员，命令消息不进 provider context。 |
+| `telegram.test.ts` | mention 优先于 reply；路由交接在 handler 失败并重启后仍送达；manual send 结果未知不重发；未配置 bot 的 cursor 不阻塞保留期清理。 |
+| `provider-guard.test.ts` | 请求创建/消费 deadline 中止且不重试；HTTP 413 进入 Pi overflow 恢复。 |
+| `sandbox.test.ts` | run_js 拿不到 host realm、超时与输出有界；search 只访问公网 HTTP(S)，遥测不含 query/URL/正文/key。 |
+| `daemon-control.test.ts` | 进程归属识别（含空格路径）、拒绝其他部署与无法验证的 pid。 |
+| `network-isolation.test.ts` | `network-guard.ts` preload 机械拒绝外网，即使存在真实 `.env`。 |
+
+## 规则
+
+- 测可观察轨迹与结果，不断言 prompt 字符串；cache golden 是唯一例外。golden 失败是报警：确认变化是有意的，按 [Cache 工程](cache.md) bump `CACHE_SCHEMA_VERSION` 后再改 expected。
+- 涉及时间序列化的测试先 pin `TZ`（`bun test` 强制 UTC，生产为 Asia/Singapore）。
+- 不得为通过而删除或削弱断言、类型检查或 sandbox 等安全控制。
+- 失败先定位来源：被改的行为、过期 golden、环境（TZ、bun 版本）、外部服务；与本次改动无关的既有失败单独报告。
