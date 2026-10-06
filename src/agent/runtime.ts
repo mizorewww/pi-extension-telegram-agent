@@ -181,6 +181,16 @@ function parseStoredMessageHashes(value: string | null): string[] | null {
 	}
 }
 
+/** Insert one row from column names; returns its rowid. */
+function insertRow(db: Database, table: string, row: Record<string, string | number | null>): number {
+	const columns = Object.keys(row);
+	return Number(
+		db
+			.query(`INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`)
+			.run(...Object.values(row)).lastInsertRowid,
+	);
+}
+
 function emptyInputMetrics() {
 	return { inputEvents: 0, estimatedTokens: 0, rowsScanned: 0, visionCalls: 0, imagesAttached: 0 };
 }
@@ -1871,59 +1881,46 @@ export class BotRuntime {
 				: null;
 		const effectiveCacheRead = cacheReadEstimated ?? usage.cacheRead;
 		const effectiveCacheMiss = cacheReadEstimated == null ? usage.input : contextTokens - cacheReadEstimated;
-		const res = this.db
-			.query(
-				`INSERT INTO llm_runs (
-					bot_id, ts, model, epoch, context_tokens, cache_read, cache_write,
-					cache_read_estimated, cache_miss,
-					output_tokens, reasoning_tokens, latency_ms, cost, compaction,
-					system_hash, tools_hash, messages_hash, provider, api, session_id_hash,
-					cache_retention, full_payload_hash, first_divergent_segment,
-					first_divergent_message_index, first_divergent_byte_offset, trigger_message_id,
-					public_send_count, vision_calls, images_attached, tool_followup_rounds, input_events,
-					input_tokens_estimated, rows_scanned, system_tokens, tools_tokens,
-					compacted_history_tokens, message_tokens, thinking_ms
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			)
-			.run(
-				this.bot.id,
-				now,
-				this.bot.model,
-				this.epoch,
-				contextTokens,
-				usage.cacheRead,
-				usage.cacheWrite,
-				cacheReadEstimated,
-				usage.input,
-				usage.output,
-				reasoningTokens,
-				latencyMs,
-				usage.cost.total,
-				observation?.systemHash ?? this.systemHash,
-				observation?.toolsHash ?? this.toolsHash,
-				observation ? JSON.stringify(observation.messageHashes) : null,
-				this.bot.provider,
-				this.model.api,
-				sessionIdHash,
-				this.bot.cacheRetention,
-				observation?.fullPayloadHash ?? null,
-				observation?.firstDivergentSegment ?? null,
-				observation?.firstDivergentMessageIndex ?? null,
-				observation?.firstDivergentByteOffset ?? null,
-				this.currentTriggerMessageId,
-				metrics.visionCalls,
-				metrics.imagesAttached,
-				this.providerCallsInRun > 1 ? 1 : 0,
-				metrics.inputEvents,
-				metrics.estimatedTokens,
-				metrics.rowsScanned,
-				contextBreakdown.system,
-				contextBreakdown.tools,
-				contextBreakdown.compactedHistory,
-				contextBreakdown.messages,
-				this.thinkingMs,
-			);
-		this.lastLlmRunId = Number(res.lastInsertRowid);
+		this.lastLlmRunId = insertRow(this.db, "llm_runs", {
+			bot_id: this.bot.id,
+			ts: now,
+			model: this.bot.model,
+			epoch: this.epoch,
+			context_tokens: contextTokens,
+			cache_read: usage.cacheRead,
+			cache_write: usage.cacheWrite,
+			cache_read_estimated: cacheReadEstimated,
+			cache_miss: usage.input,
+			output_tokens: usage.output,
+			reasoning_tokens: reasoningTokens,
+			latency_ms: latencyMs,
+			cost: usage.cost.total,
+			compaction: 0,
+			system_hash: observation?.systemHash ?? this.systemHash,
+			tools_hash: observation?.toolsHash ?? this.toolsHash,
+			messages_hash: observation ? JSON.stringify(observation.messageHashes) : null,
+			provider: this.bot.provider,
+			api: this.model.api,
+			session_id_hash: sessionIdHash,
+			cache_retention: this.bot.cacheRetention,
+			full_payload_hash: observation?.fullPayloadHash ?? null,
+			first_divergent_segment: observation?.firstDivergentSegment ?? null,
+			first_divergent_message_index: observation?.firstDivergentMessageIndex ?? null,
+			first_divergent_byte_offset: observation?.firstDivergentByteOffset ?? null,
+			trigger_message_id: this.currentTriggerMessageId,
+			public_send_count: 0,
+			vision_calls: metrics.visionCalls,
+			images_attached: metrics.imagesAttached,
+			tool_followup_rounds: this.providerCallsInRun > 1 ? 1 : 0,
+			input_events: metrics.inputEvents,
+			input_tokens_estimated: metrics.estimatedTokens,
+			rows_scanned: metrics.rowsScanned,
+			system_tokens: contextBreakdown.system,
+			tools_tokens: contextBreakdown.tools,
+			compacted_history_tokens: contextBreakdown.compactedHistory,
+			message_tokens: contextBreakdown.messages,
+			thinking_ms: this.thinkingMs,
+		});
 		this.pendingInputMetrics = emptyInputMetrics();
 		const run: UsageRun = {
 			id: this.lastLlmRunId,
@@ -1977,33 +1974,28 @@ export class BotRuntime {
 	): void {
 		const contextTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 		if (contextTokens + usage.output + (usage.reasoning ?? 0) === 0 && usage.cost.total === 0) return;
-		const result = this.db
-			.query(`
-			INSERT INTO llm_runs (
-				bot_id, ts, model, epoch, context_tokens, cache_read, cache_write, cache_miss,
-				output_tokens, reasoning_tokens, latency_ms, cost, compaction,
-				system_hash, tools_hash, provider, api, cache_retention
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 1, ?, ?, ?, ?, 'none')
-		`)
-			.run(
-				this.bot.id,
-				now,
-				model.id,
-				this.epoch,
-				contextTokens,
-				usage.cacheRead,
-				usage.cacheWrite,
-				usage.input,
-				usage.output,
-				usage.reasoning ?? 0,
-				usage.cost.total,
-				sha256Short(COMPACTION_SUMMARY_PROMPT),
-				sha256Short("[]"),
-				model.provider,
-				model.api,
-			);
+		const id = insertRow(this.db, "llm_runs", {
+			bot_id: this.bot.id,
+			ts: now,
+			model: model.id,
+			epoch: this.epoch,
+			context_tokens: contextTokens,
+			cache_read: usage.cacheRead,
+			cache_write: usage.cacheWrite,
+			cache_miss: usage.input,
+			output_tokens: usage.output,
+			reasoning_tokens: usage.reasoning ?? 0,
+			latency_ms: null,
+			cost: usage.cost.total,
+			compaction: 1,
+			system_hash: sha256Short(COMPACTION_SUMMARY_PROMPT),
+			tools_hash: sha256Short("[]"),
+			provider: model.provider,
+			api: model.api,
+			cache_retention: "none",
+		});
 		this.usageSink?.({
-			id: Number(result.lastInsertRowid),
+			id,
 			botId: this.bot.id,
 			ts: now,
 			model: model.id,
