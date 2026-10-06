@@ -22,7 +22,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { MIN_COMPACTION_RESERVE, type AppConfig, type BotConfig } from "../config.ts";
 import { getBotState, setBotState } from "../db/db.ts";
-import { BotApi, TelegramApiError } from "../telegram/api.ts";
+import { BotApi, groupReactionAllowlist, TelegramApiError } from "../telegram/api.ts";
 import { TelegramTypingLease } from "../telegram/activity.ts";
 import { executeAgentSend } from "./send.ts";
 import { type MessageRow, TELEGRAM_SERIALIZER_VERSION } from "./serialize.ts";
@@ -277,6 +277,7 @@ export class BotRuntime {
 	private telemetryHmacKey = "";
 	private staticPrefixTokenEstimate = 0;
 	private pendingPayloadObservation: ProviderPayloadObservation | null = null;
+	private allowedReactions: ReadonlySet<string> | null = null;
 	private previousRequest: (PreviousProviderPayloadFingerprint & { cohort: string }) | null = null;
 	private pendingTurnContext: TelegramContextDetails | null = null;
 	private currentTriggerMessageId: number | null = null;
@@ -359,6 +360,12 @@ export class BotRuntime {
 	async init(): Promise<void> {
 		const persona = readFileSync(this.bot.personaPath, "utf8");
 		const chatId = this.config.groupChatId;
+		try {
+			this.allowedReactions = groupReactionAllowlist(await this.api.getChat(chatId));
+		} catch {
+			// Unknown restrictions degrade to the standard set; Telegram still rejects the rest.
+			log.warn("agent_runtime", "reaction_allowlist_unavailable", { bot_id: this.bot.id, category: "request_failed" });
+		}
 		// Catalog identity + format is pinned into the stable system prefix below.
 		if (this.bot.stickerSets.length > 0) {
 			await ensureStickerCatalog(this.db, this.api, this.bot.id, this.bot.stickerSets);
@@ -1056,6 +1063,7 @@ export class BotRuntime {
 			chatId: this.config.groupChatId,
 			emitMediaUpdates: this.config.media.mode === "vision",
 			visibleMessageIds: this.visibleMessageIds,
+			allowedReactions: this.allowedReactions,
 			triggerMessageId: this.currentTriggerMessageId,
 			recordPublicSend: () => this.recordPublicSend(),
 			markVisible: (ids) => this.markVisible(ids),

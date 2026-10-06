@@ -79,6 +79,10 @@ export class BotApi {
 		return this.call("getMe");
 	}
 
+	getChat(chatId: number): Promise<{ available_reactions?: { type: string; emoji?: string }[] }> {
+		return this.call("getChat", { chat_id: chatId });
+	}
+
 	getUpdates(offset: number, timeoutSec: number, signal?: AbortSignal): Promise<unknown[]> {
 		return this.call(
 			"getUpdates",
@@ -259,7 +263,21 @@ const REACTION_EMOJIS: ReadonlySet<string> = new Set(
 	].map((emoji) => emoji.replaceAll("\ufe0f", "")),
 );
 
-/** Telegram rejects any emoji outside its fixed reaction enum with REACTION_INVALID. */
-export function isReactionEmoji(value: string): boolean {
-	return REACTION_EMOJIS.has(value.replaceAll("\ufe0f", ""));
+/**
+ * Telegram rejects any emoji outside its fixed reaction enum, and a group may narrow that set
+ * further (`getChat.available_reactions`); `allowed` is that narrowed set when known.
+ */
+export function isReactionEmoji(value: string, allowed?: ReadonlySet<string> | null): boolean {
+	const emoji = value.replaceAll("\ufe0f", "");
+	return REACTION_EMOJIS.has(emoji) && (allowed == null || allowed.has(emoji));
+}
+
+/** The group's emoji reaction allowlist, or null when it allows every standard reaction. */
+export function groupReactionAllowlist(chat: { available_reactions?: { type: string; emoji?: string }[] }) {
+	if (!chat.available_reactions) return null;
+	return new Set(
+		chat.available_reactions.flatMap((reaction) =>
+			reaction.type === "emoji" && reaction.emoji ? [reaction.emoji.replaceAll("\ufe0f", "")] : [],
+		),
+	);
 }

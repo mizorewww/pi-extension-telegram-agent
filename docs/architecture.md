@@ -38,7 +38,7 @@ Telegram ── poller × N ──┐
 
 Telegram create 不可回滚，所以：
 
-- 发送前做完所有本地校验（`reply_to` 必须在上下文中可见、sticker 必须有本 bot 的 `file_id`、reaction 只允许 Telegram 固定集合）。带内容的 send 遇到无效 reaction 时丢弃 reaction 继续发；只点 reaction 才报错。
+- 发送前做完所有本地校验（`reply_to` 必须在上下文中可见、sticker 必须有本 bot 的 `file_id`、reaction 只允许 Telegram 固定集合，群组限制了 reaction 时再与启动时 `getChat.available_reactions` 取交集）。带内容的 send 遇到无效 reaction 时丢弃 reaction 继续发；只点 reaction 才报错。
 - 只有 Telegram 确定性的 4xx 拒绝（且之前没有任何提交）才把错误还给模型重试。超时、断线、429、5xx、非 JSON 一律算结果未知，返回固定 `no_retry` 并结束本轮。
 - 提交后的本地记账（canonical 写库、可见性、广播、事件）失败只降级为 `committed`，不重发；SQLite busy 有 25/100/250 ms 有界重试。
 - 文字由本地 Markdown → Telegram entities 转换（`src/telegram/markdown.ts`）；只有 Telegram 确定性拒绝 entities 时才用同一文本无格式重发一次。

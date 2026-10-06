@@ -26,6 +26,8 @@ interface AgentSendContext {
 	chatId: number;
 	emitMediaUpdates: boolean;
 	visibleMessageIds: ReadonlySet<number>;
+	/** The group's narrowed reaction set; null when every standard reaction is allowed. */
+	allowedReactions: ReadonlySet<string> | null;
 	triggerMessageId: number | null;
 	recordPublicSend(): void;
 	markVisible(ids: number[]): void;
@@ -77,12 +79,12 @@ function preflight(
 		reject("empty_payload", "send requires at least one of message, sticker or reaction");
 	if (params.reaction != null && params.reply_to == null)
 		reject("reaction_without_target", "reaction requires reply_to: the reaction lands on the replied message");
-	if (params.reaction != null && !isReactionEmoji(params.reaction)) {
+	if (params.reaction != null && !isReactionEmoji(params.reaction, context.allowedReactions)) {
 		// Decoration must not cost a whole extra provider turn: drop it when there is content.
 		if (!params.message && !params.sticker)
 			reject(
 				"invalid_reaction_emoji",
-				`invalid reaction emoji: ${params.reaction} (Telegram accepts only its fixed reaction emoji set, e.g. 👍 ❤️ 🔥 🤣 🎉)`,
+				`invalid reaction emoji: ${params.reaction} (use one this group allows${context.allowedReactions ? `: ${[...context.allowedReactions].join(" ")}` : ", e.g. 👍 ❤️ 🔥 🤣 🎉"})`,
 			);
 		log.warn("agent_send", "reaction_dropped", {
 			bot_id: context.botId,
