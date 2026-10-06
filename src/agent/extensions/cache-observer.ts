@@ -3,7 +3,8 @@ import { createHmac } from "node:crypto";
 import { CONTEXT_IMAGE_TOKEN_ESTIMATE } from "../token-packer.ts";
 
 /** Pi wraps compaction summaries with this prefix (core/messages.ts, not exported since 0.87). */
-export const COMPACTION_SUMMARY_PREFIX = "The conversation history before this point was compacted into the following summary:";
+export const COMPACTION_SUMMARY_PREFIX =
+	"The conversation history before this point was compacted into the following summary:";
 
 export interface ProviderPayloadObservation {
 	systemHash: string;
