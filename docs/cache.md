@@ -133,7 +133,7 @@ tools: [{ name, description, parameters }] in fixed order
 
 ## 媒体模式与 provider boundary
 
-`media.mode` 选择媒体到达模型的方式：`"vision"`（默认）由辅助视觉模型把媒体描述成文字，`"context"`（opt-in）把图片作为 image 内容块直接交给主模型。两种模式下 voice、audio、非视频 document 与 TGS 动态贴纸都只有文本占位——Pi 0.86.0 只支持 image 内容块，这是硬限制；视频都靠 `ffmpeg`/`ffprobe` 抽帧，缺失时视频在 Telegram 下载前即降级/跳过，不占主对话 token、不阻塞 daemon ready，CLI/operator log/debug 提示安装用途，群内上下文不增加提示文字。
+`media.mode` 选择媒体到达模型的方式：`"vision"`（默认）由辅助视觉模型把媒体描述成文字，`"context"`（opt-in）把图片作为 image 内容块直接交给主模型。两种模式下 voice、audio、非视频 document 与 TGS 动态贴纸都只有文本占位——Pi 1.0.4 只支持 image 内容块，这是硬限制；视频都靠 `ffmpeg`/`ffprobe` 抽帧，缺失时视频在 Telegram 下载前即降级/跳过，不占主对话 token、不阻塞 daemon ready，CLI/operator log/debug 提示安装用途，群内上下文不增加提示文字。
 
 ### Vision（默认模式）
 

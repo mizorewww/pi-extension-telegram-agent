@@ -12,7 +12,6 @@ import {
 	type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
-import { COMPACTION_SUMMARY_PREFIX } from "@earendil-works/pi-agent-core";
 import {
 	buildContextFingerprint,
 	canResumeContextSession,
@@ -24,6 +23,7 @@ import {
 	inspectModelReasoning,
 } from "../src/agent/model-runtime.ts";
 import {
+	COMPACTION_SUMMARY_PREFIX,
 	NO_SEND_MARKER,
 	TELEGRAM_EXTENSION_ORDER,
 	applyAssistantPersistencePolicy,

@@ -27,7 +27,7 @@
 ## 运行时与依赖
 
 - 运行时：**Bun**（Pi SDK × Bun 兼容性已经 smoke 验证）
-- daemon 的 Pi SDK：registry `@earendil-works/pi-coding-agent`、`pi-ai`、`pi-agent-core`、`pi-tui` 精确锁定为 v0.86.0。交互入口 `bun run pi` 使用 PATH 中本机安装的 Pi，排除 Bun 注入的 `node_modules/.bin`；不安装依赖、不固定 CLI 版本。首次运行先执行 `bun install --frozen-lockfile`。运行与构建不读取 sibling `../pi`。
+- daemon 的 Pi SDK：registry `@earendil-works/pi-coding-agent`、`pi-ai`、`pi-agent-core`、`pi-tui` 精确锁定为 v1.0.4。交互入口 `bun run pi` 使用 PATH 中本机安装的 Pi，排除 Bun 注入的 `node_modules/.bin`；不安装依赖、不固定 CLI 版本。首次运行先执行 `bun install --frozen-lockfile`。运行与构建不读取 sibling `../pi`。
 - Telegram：raw Bot API（fetch long polling），无第三方 SDK
 
 ## Telegram ingestion
@@ -118,7 +118,7 @@
 
 ## 媒体模式
 
-`media.mode` 选择媒体如何到达模型：`"vision"`（默认，历史行为）由辅助视觉模型把媒体描述成文字；`"context"`（opt-in）把图片作为image内容块直接交给主模型。两种模式的共同边界：voice、audio、非视频document与TGS动态贴纸永远只有文本占位——Pi 0.86.0只支持image内容块，没有audio/file block，这是硬限制；TGS只保证可发送，不进入下载或渲染。视频（`video`、`animation`、`video_note`、video MIME document与video sticker）在两种模式下都用`ffprobe`读时长、`ffmpeg`抽1–3帧（1帧50%，2帧33%/67%，3帧20%/50%/80%；时长<1s取1帧、<3s取2帧），输出≤1280×1280 JPEG，绝不整段交给模型。两种模式共用同一条图片准备管线（`src/media/prepare-images.ts` `prepareMediaImages`）：`ensureLocalMedia`下载/复用source → 下载后才暴露为video容器的sticker翻转为video → 视频抽帧 / 静态图片经Pi公开`convertToPng()`（WebP/GIF）与`resizeImage`（统一上限1024×1024、≈200KB、JPEG质量80；resize失败保留转换/原图）；`cacheDir`与`videoTranscoder`快照是必填参数，生产由daemon传入，无默认值。失败以固定category返回（`{ok:false, outcome}`），绝不抛出。
+`media.mode` 选择媒体如何到达模型：`"vision"`（默认，历史行为）由辅助视觉模型把媒体描述成文字；`"context"`（opt-in）把图片作为image内容块直接交给主模型。两种模式的共同边界：voice、audio、非视频document与TGS动态贴纸永远只有文本占位——Pi 1.0.4只支持image内容块，没有audio/file block，这是硬限制；TGS只保证可发送，不进入下载或渲染。视频（`video`、`animation`、`video_note`、video MIME document与video sticker）在两种模式下都用`ffprobe`读时长、`ffmpeg`抽1–3帧（1帧50%，2帧33%/67%，3帧20%/50%/80%；时长<1s取1帧、<3s取2帧），输出≤1280×1280 JPEG，绝不整段交给模型。两种模式共用同一条图片准备管线（`src/media/prepare-images.ts` `prepareMediaImages`）：`ensureLocalMedia`下载/复用source → 下载后才暴露为video容器的sticker翻转为video → 视频抽帧 / 静态图片经Pi公开`convertToPng()`（WebP/GIF）与`resizeImage`（统一上限1024×1024、≈200KB、JPEG质量80；resize失败保留转换/原图）；`cacheDir`与`videoTranscoder`快照是必填参数，生产由daemon传入，无默认值。失败以固定category返回（`{ok:false, outcome}`），绝不抛出。
 
 daemon启动只读检查`ffmpeg`与`ffprobe`；缺失任一工具且当前模式需要抽帧（`vision.enabled`或context模式）时，startup log记一条non-blocking advisory（category `video_transcoder_unavailable`，`blocking=false`），`start`/`restart`/`status`给operator用途与安装建议，`bun run debug`输出带固定impact/action的同名finding；不阻塞ready，不影响photo/sticker链路或三种sticker发送，也不向群内用户发故障消息。安装并restart后自动重试；probe/抽帧失败不记录stderr/path。
 
