@@ -27,6 +27,9 @@ Pi 中等价：`/tg start`、`/tg restart`（ready 后自动重连当前 feed）
 Description=Pi Telegram agent daemon
 After=network-online.target
 Wants=network-online.target
+# 令牌被撤销等致命错误不要无限重启
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -51,7 +54,7 @@ systemctl --user restart telegram-agent     # 部署新代码后
 ```
 
 - 用 systemd 托管时**不要**再用 `bun run start` 另起一个；`bun run status` 仍可用来查看。两个 daemon 会争抢同一 token（Telegram 409）。
-- `bun run stop` 是干净退出，不会触发 `Restart=on-failure`。
+- `bun run stop` 是干净退出，不会触发 `Restart=on-failure`。5 分钟内失败 5 次后 systemd 停止重启（例如 token 失效），修好后 `systemctl --user reset-failed telegram-agent` 再启动。
 - 整机 OOM 连 user manager 一起杀掉时，`Restart` 与 linger 都救不回来；先找资源耗尽的来源。
 
 ## 部署新代码
