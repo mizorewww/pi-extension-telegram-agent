@@ -181,6 +181,49 @@ function parseStoredMessageHashes(value: string | null): string[] | null {
 	}
 }
 
+function emptyInputMetrics() {
+	return { inputEvents: 0, estimatedTokens: 0, rowsScanned: 0, visionCalls: 0, imagesAttached: 0 };
+}
+
+/** Distinct preparable media identities in a batch, direct-reply events first, newest first. */
+function pendingMediaIds(
+	batch: readonly MessageEvent[],
+	obligationIds: ReadonlySet<number>,
+	limit: number,
+	prepared: (fileUniqueId: string) => boolean,
+	/** Vision mode also describes media carried by edit/metadata revisions. */
+	includeRevisions = false,
+): string[] {
+	const pending: string[] = [];
+	const seen = new Set<string>();
+	const prioritized = [...batch].sort(
+		(left, right) =>
+			Number(obligationIds.has(right.messageId)) - Number(obligationIds.has(left.messageId)) ||
+			right.ingestSeq - left.ingestSeq,
+	);
+	for (const event of prioritized) {
+		if (pending.length >= limit) break;
+		if (event.kind === "media_update" || (!includeRevisions && event.kind !== "message")) continue;
+		const row = event.payload as MessageRow;
+		if (!row.media) continue;
+		const media = JSON.parse(row.media) as { kind: string; mime?: string; file_unique_id?: string };
+		if (!media.file_unique_id || !isVisionMedia(media.kind, media.mime) || seen.has(media.file_unique_id)) continue;
+		seen.add(media.file_unique_id);
+		if (!prepared(media.file_unique_id)) pending.push(media.file_unique_id);
+	}
+	return pending;
+}
+
+/** Run `work` over `items` with at most `concurrency` in flight. */
+async function forEachConcurrent<T>(items: readonly T[], concurrency: number, work: (item: T) => Promise<void>) {
+	let next = 0;
+	await Promise.all(
+		Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+			while (next < items.length) await work(items[next++]!);
+		}),
+	);
+}
+
 export class BotRuntime {
 	private db: Database;
 	private bot: BotConfig;
@@ -234,13 +277,7 @@ export class BotRuntime {
 	private pendingPayloadObservation: ProviderPayloadObservation | null = null;
 	private pendingTurnContext: TelegramContextDetails | null = null;
 	private currentTriggerMessageId: number | null = null;
-	private pendingInputMetrics = {
-		inputEvents: 0,
-		estimatedTokens: 0,
-		rowsScanned: 0,
-		visionCalls: 0,
-		imagesAttached: 0,
-	};
+	private pendingInputMetrics = emptyInputMetrics();
 	private providerCallsInRun = 0;
 	private lastLlmRunId: number | null = null;
 	private lastUsageRun: UsageRun | null = null;
@@ -639,18 +676,15 @@ export class BotRuntime {
 					});
 					break;
 				case "tool_execution_end":
-					if (event.toolName === "send") {
-						try {
-							this.recordEvent("tool_result", { tool: event.toolName, isError: event.isError });
-						} catch {
-							log.warn("agent_tool", "result_persist_failed", {
-								bot_id: this.bot.id,
-								tool: "send",
-								category: "local_failure",
-							});
-						}
-					} else {
+					try {
 						this.recordEvent("tool_result", { tool: event.toolName, isError: event.isError });
+					} catch {
+						// A committed send must stay terminal even when its local record fails.
+						log.warn("agent_tool", "result_persist_failed", {
+							bot_id: this.bot.id,
+							tool: event.toolName,
+							category: "local_failure",
+						});
 					}
 					log.info("agent_tool", "execution_finished", {
 						bot_id: this.bot.id,
@@ -1173,13 +1207,7 @@ export class BotRuntime {
 		let mandatory = requiredEvents();
 		let normal = ordinaryEvents();
 
-		this.pendingInputMetrics = {
-			inputEvents: 0,
-			estimatedTokens: 0,
-			rowsScanned: 0,
-			visionCalls: 0,
-			imagesAttached: 0,
-		};
+		this.pendingInputMetrics = emptyInputMetrics();
 		if (this.config.media.mode === "context") {
 			await this.ensureBatchContextMedia([...mandatory, ...normal], obligationIds);
 		} else {
@@ -1685,86 +1713,38 @@ export class BotRuntime {
 		obligationIds: ReadonlySet<number>,
 	): Promise<void> {
 		if (this.config.media.maxImagesPerTurn <= 0) return;
-		const pending: string[] = [];
-		const seen = new Set<string>();
-		const prioritized = [...batch].sort(
-			(left, right) =>
-				Number(obligationIds.has(right.messageId)) - Number(obligationIds.has(left.messageId)) ||
-				right.ingestSeq - left.ingestSeq,
+		const pending = pendingMediaIds(batch, obligationIds, this.config.media.maxImagesPerTurn, (id) =>
+			Boolean(contextMediaRefs(this.db, id)),
 		);
-		for (const event of prioritized) {
-			if (event.kind !== "message") continue;
-			const row = event.payload as MessageRow;
-			if (!row.media) continue;
-			const media = JSON.parse(row.media) as { kind: string; mime?: string; file_unique_id?: string };
-			if (!media.file_unique_id || !isVisionMedia(media.kind, media.mime)) continue;
-			if (seen.has(media.file_unique_id)) continue;
-			seen.add(media.file_unique_id);
-			if (contextMediaRefs(this.db, media.file_unique_id)) continue; // already prepared, shared by both bots
-			pending.push(media.file_unique_id);
-			if (pending.length >= this.config.media.maxImagesPerTurn) break;
-		}
-
-		let next = 0;
-		const workers = Math.min(this.config.media.downloadConcurrency, pending.length);
-		await Promise.all(
-			Array.from({ length: workers }, async () => {
-				while (next < pending.length) {
-					const fileUniqueId = pending[next++]!;
-					try {
-						const prepared = await ensureContextMedia(this.db, this.api, this.bot.id, fileUniqueId, {
-							cacheDir: join(this.config.dataDir, "media"),
-							botApis: this.botApis,
-							videoTranscoder: this.videoTranscoder,
-						});
-						if (!prepared.ok) {
-							this.recordEvent("error", { stage: "context_media", category: prepared.outcome });
-							log.warn("context_media", "prepare_failed", { bot_id: this.bot.id, category: prepared.outcome });
-						}
-					} catch {
-						this.recordEvent("error", { stage: "context_media", category: "request_failed" });
-					}
+		await forEachConcurrent(pending, this.config.media.downloadConcurrency, async (fileUniqueId) => {
+			try {
+				const prepared = await ensureContextMedia(this.db, this.api, this.bot.id, fileUniqueId, {
+					cacheDir: join(this.config.dataDir, "media"),
+					botApis: this.botApis,
+					videoTranscoder: this.videoTranscoder,
+				});
+				if (!prepared.ok) {
+					this.recordEvent("error", { stage: "context_media", category: prepared.outcome });
+					log.warn("context_media", "prepare_failed", { bot_id: this.bot.id, category: prepared.outcome });
 				}
-			}),
-		);
+			} catch {
+				this.recordEvent("error", { stage: "context_media", category: "request_failed" });
+			}
+		});
 	}
 
 	/** Lazy vision: bounded per turn, with direct-reply events ordered before ordinary catch-up. */
 	private async ensureBatchVision(batch: readonly MessageEvent[], obligationIds: ReadonlySet<number>): Promise<void> {
 		if (!this.config.vision.enabled || this.config.vision.foregroundMediaLimit <= 0) return;
-		const pending: string[] = [];
-		const seen = new Set<string>();
-		const prioritized = [...batch].sort(
-			(left, right) =>
-				Number(obligationIds.has(right.messageId)) - Number(obligationIds.has(left.messageId)) ||
-				right.ingestSeq - left.ingestSeq,
+		const described = this.db.query("SELECT vision FROM media WHERE file_unique_id = ?");
+		const pending = pendingMediaIds(
+			batch,
+			obligationIds,
+			this.config.vision.foregroundMediaLimit,
+			(id) => Boolean((described.get(id) as { vision: string | null } | null)?.vision),
+			true,
 		);
-		for (const event of prioritized) {
-			if (event.kind === "media_update") continue;
-			const row = event.payload as MessageRow;
-			if (!row.media) continue;
-			const media = JSON.parse(row.media) as { kind: string; mime?: string; file_unique_id?: string };
-			if (!media.file_unique_id || !isVisionMedia(media.kind, media.mime)) continue;
-			if (seen.has(media.file_unique_id)) continue;
-			seen.add(media.file_unique_id);
-			const existing = this.db.query("SELECT vision FROM media WHERE file_unique_id = ?").get(media.file_unique_id) as {
-				vision: string | null;
-			} | null;
-			if (existing?.vision) continue; // persistent cache hit, shared by both bots
-			pending.push(media.file_unique_id);
-			if (pending.length >= this.config.vision.foregroundMediaLimit) break;
-		}
-
-		let next = 0;
-		const workers = Math.min(VISION_BATCH_CONCURRENCY, pending.length);
-		await Promise.all(
-			Array.from({ length: workers }, async () => {
-				while (next < pending.length) {
-					const fileUniqueId = pending[next++]!;
-					await this.ensureOneVision(fileUniqueId);
-				}
-			}),
-		);
+		await forEachConcurrent(pending, VISION_BATCH_CONCURRENCY, (fileUniqueId) => this.ensureOneVision(fileUniqueId));
 	}
 
 	private async ensureOneVision(fileUniqueId: string): Promise<void> {
@@ -1944,13 +1924,7 @@ export class BotRuntime {
 				this.thinkingMs,
 			);
 		this.lastLlmRunId = Number(res.lastInsertRowid);
-		this.pendingInputMetrics = {
-			inputEvents: 0,
-			estimatedTokens: 0,
-			rowsScanned: 0,
-			visionCalls: 0,
-			imagesAttached: 0,
-		};
+		this.pendingInputMetrics = emptyInputMetrics();
 		const run: UsageRun = {
 			id: this.lastLlmRunId,
 			botId: this.bot.id,
