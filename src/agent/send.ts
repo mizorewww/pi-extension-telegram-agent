@@ -17,7 +17,6 @@ import {
 	retrySqliteBusy,
 	sendMarkdownTextAndPersist,
 	SentMessagePersistenceError,
-	type SentMessageTransport,
 } from "../telegram/send.ts";
 
 interface AgentSendContext {
@@ -43,11 +42,6 @@ interface SendFailure {
 	category: string;
 }
 
-function rawTelegramMessageId(raw: Record<string, unknown>): number | null {
-	const id = raw.message_id;
-	return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : null;
-}
-
 /** Own the entire irreversible send boundary, including every observer and finalizer. */
 export async function executeAgentSend(params: SendParams, context: AgentSendContext) {
 	const startedAt = Date.now();
@@ -65,45 +59,49 @@ export async function executeAgentSend(params: SendParams, context: AgentSendCon
 	}
 }
 
-async function sendAttempt(params: SendParams, context: AgentSendContext) {
-	if (!params.message && !params.sticker && !params.reaction) {
+/** Reject before any network call; returns the sticker file_id to send, if any. */
+function preflight(params: SendParams, context: AgentSendContext): string | null {
+	const reject = (category: string, message: string, fields: Record<string, unknown> = {}): never => {
 		log.warn("agent_send", "preflight_failed", {
 			bot_id: context.botId,
-			category: "empty_payload",
+			category,
 			trigger_message_id: context.triggerMessageId,
+			...fields,
 		});
-		throw new Error("send requires at least one of message, sticker or reaction");
-	}
-	if (params.reaction != null) {
-		if (params.reply_to == null) {
-			log.warn("agent_send", "preflight_failed", {
-				bot_id: context.botId,
-				category: "reaction_without_target",
-				trigger_message_id: context.triggerMessageId,
-			});
-			throw new Error("reaction requires reply_to: the reaction lands on the replied message");
-		}
-		if (!isReactionEmoji(params.reaction)) {
-			log.warn("agent_send", "preflight_failed", {
-				bot_id: context.botId,
-				category: "invalid_reaction_emoji",
-				trigger_message_id: context.triggerMessageId,
-			});
-			throw new Error(
-				`invalid reaction emoji: ${params.reaction} (Telegram accepts only its fixed reaction emoji set, e.g. 👍 ❤️ 🔥 🤣 🎉)`,
-			);
-		}
-	}
-	if (params.reply_to != null && !context.visibleMessageIds.has(params.reply_to)) {
-		log.warn("agent_send", "preflight_failed", {
-			bot_id: context.botId,
-			category: "reply_not_visible",
+		throw new Error(message);
+	};
+	if (!params.message && !params.sticker && !params.reaction)
+		reject("empty_payload", "send requires at least one of message, sticker or reaction");
+	if (params.reaction != null && params.reply_to == null)
+		reject("reaction_without_target", "reaction requires reply_to: the reaction lands on the replied message");
+	if (params.reaction != null && !isReactionEmoji(params.reaction))
+		reject(
+			"invalid_reaction_emoji",
+			`invalid reaction emoji: ${params.reaction} (Telegram accepts only its fixed reaction emoji set, e.g. 👍 ❤️ 🔥 🤣 🎉)`,
+		);
+	if (params.reply_to != null && !context.visibleMessageIds.has(params.reply_to))
+		reject("reply_not_visible", "messaging.reply_not_visible", {
 			reply_to: params.reply_to,
 			visible_count: context.visibleMessageIds.size,
-			trigger_message_id: context.triggerMessageId,
 		});
-		throw new Error("messaging.reply_not_visible");
-	}
+	// Resolve the sticker before sending anything: a late failure would make the model retry
+	// and double-send the text.
+	if (!params.sticker) return null;
+	const row = context.db.query("SELECT file_unique_id FROM media WHERE short_id = ?").get(params.sticker) as {
+		file_unique_id: string;
+	} | null;
+	if (!row)
+		throw new Error(
+			`unknown sticker id: ${params.sticker} (use a short_id from the Sticker 目录 or the latest 〔系统附注〕)`,
+		);
+	const fileId = fileIdForBot(context.db, context.botId, row.file_unique_id);
+	if (fileId) return fileId;
+	context.recordEvent("error", { stage: "send", code: "candidate_invariant", sticker: params.sticker });
+	throw new Error(`candidate invariant violated: sticker ${params.sticker} is not sendable by this bot (no file_id)`);
+}
+
+async function sendAttempt(params: SendParams, context: AgentSendContext) {
+	const stickerFileId = preflight(params, context);
 	log.info("agent_send", "started", {
 		bot_id: context.botId,
 		has_message: Boolean(params.message),
@@ -112,42 +110,16 @@ async function sendAttempt(params: SendParams, context: AgentSendContext) {
 		has_reply: params.reply_to != null,
 		trigger_message_id: context.triggerMessageId,
 	});
-	// Validate everything (incl. sticker resolution) before any network send (R7):
-	// a late sticker failure would make the model retry and double-send the text.
-	let stickerFileId: string | null = null;
-	if (params.sticker) {
-		const row = context.db.query("SELECT file_unique_id FROM media WHERE short_id = ?").get(params.sticker) as {
-			file_unique_id: string;
-		} | null;
-		if (!row)
-			throw new Error(
-				`unknown sticker id: ${params.sticker} (use a short_id from the Sticker 目录 or latest recent-context candidates)`,
-			);
-		stickerFileId = fileIdForBot(context.db, context.botId, row.file_unique_id);
-		if (!stickerFileId) {
-			context.recordEvent("error", { stage: "send", code: "candidate_invariant", sticker: params.sticker });
-			throw new Error(
-				`candidate invariant violated: sticker ${params.sticker} is not sendable by this bot (no file_id)`,
-			);
-		}
-	}
 	const chatId = context.chatId;
-	const sentIds: number[] = [];
+	const primaryComponent = params.sticker && !params.message ? "sticker" : "message";
+	const sent: number[] = [];
 	const failures: SendFailure[] = [];
-	let remoteCommits = 0;
 	let reactedTo: number | null = null;
-	let sendEventAttempted = false;
-	let typingStopAttempted = false;
 
-	const runLocalEffect = async (
-		component: "message" | "sticker",
-		category: string,
-		effect: () => void,
-		retryBusy: boolean,
-	): Promise<void> => {
+	/** After a remote commit, local bookkeeping is best effort: a failure degrades, never resends. */
+	const local = async (component: "message" | "sticker", category: string, effect: () => void) => {
 		try {
-			if (retryBusy) await retrySqliteBusy(effect);
-			else effect();
+			await retrySqliteBusy(effect);
 		} catch (error) {
 			const localCategory = localFailureCategory(error);
 			failures.push({
@@ -158,87 +130,73 @@ async function sendAttempt(params: SendParams, context: AgentSendContext) {
 			});
 		}
 	};
-	const finishCommittedComponent = async (
+	const committed = async (
 		component: "message" | "sticker",
 		raw: Record<string, unknown>,
-		messageId: number | null,
-		transport?: SentMessageTransport,
-	): Promise<void> => {
-		remoteCommits++;
-		await runLocalEffect(component, "telemetry_failed", () => context.recordPublicSend(), true);
-		if (messageId != null && !sentIds.includes(messageId)) sentIds.push(messageId);
-		if (messageId != null) {
-			await runLocalEffect(component, "visibility_failed", () => context.markVisible([messageId]), true);
-		}
-		await runLocalEffect(component, "broadcast_failed", () => context.onSent(raw), false);
-		if (component === "message" && messageId != null && transport) {
-			await runLocalEffect(
-				component,
-				"event_failed",
-				() =>
-					context.recordEvent(transport === "formatted" ? "markdown_sent" : "plain_fallback", {
-						message_id: messageId,
-					}),
-				true,
-			);
-		}
-	};
-	const finishDegraded = async (outcome: SendDegradedOutcome) => {
-		const component = failures[0]?.failed_component ?? (params.sticker && !params.message ? "sticker" : "message");
-		if (sentIds.length > 0 && !sendEventAttempted) {
-			sendEventAttempted = true;
-			await runLocalEffect(
-				component,
-				"event_failed",
-				() =>
-					context.recordEvent("send", {
-						reply_to: params.reply_to ?? null,
-						sticker: params.sticker ?? null,
-						reaction: params.reaction ?? null,
-						reacted_to: reactedTo,
-						sent: sentIds,
-					}),
-				true,
-			);
-		}
-		if (!typingStopAttempted) {
-			typingStopAttempted = true;
-			await runLocalEffect(component, "typing_stop_failed", () => context.stopTyping(), false);
-		}
-		const primary = (outcome === "partial" ? failures.find((failure) => failure.stage === "telegram_create") : null) ??
-			failures[0] ?? {
+		persistFailure: unknown,
+		eventKind?: string,
+	) => {
+		const messageId = raw.message_id as number;
+		sent.push(messageId);
+		if (persistFailure)
+			failures.push({
 				failed_component: component,
-				failed_outcome: "unknown" as const,
-				stage: "local_effect" as const,
-				category: "local_failure",
-			};
-		const diagnostic = {
-			outcome,
-			sent: [...sentIds],
-			failures: failures.length > 0 ? failures : [primary],
-		};
+				failed_outcome: "committed",
+				stage: "canonical_persist",
+				category: localFailureCategory(persistFailure),
+			});
+		await local(component, "telemetry_failed", () => context.recordPublicSend());
+		await local(component, "visibility_failed", () => context.markVisible([messageId]));
+		await local(component, "broadcast_failed", () => context.onSent(raw));
+		if (eventKind)
+			await local(component, "event_failed", () => context.recordEvent(eventKind, { message_id: messageId }));
+	};
+	const finish = async (outcome: SendDegradedOutcome | null) => {
+		if (outcome == null || sent.length > 0)
+			await local(primaryComponent, "event_failed", () =>
+				context.recordEvent("send", {
+					reply_to: params.reply_to ?? null,
+					sticker: params.sticker ?? null,
+					reaction: params.reaction ?? null,
+					reacted_to: reactedTo,
+					sent,
+				}),
+			);
+		await local(primaryComponent, "typing_stop_failed", () => context.stopTyping());
+		if (outcome == null && failures.length === 0) {
+			log.info("agent_send", "committed", {
+				bot_id: context.botId,
+				sent_count: sent.length,
+				trigger_message_id: context.triggerMessageId,
+			});
+			return successfulSendResult(sent);
+		}
+		const degraded = outcome ?? "committed";
+		const primary =
+			(degraded === "partial" ? failures.find((failure) => failure.stage === "telegram_create") : undefined) ??
+			failures[0]!;
 		try {
-			await retrySqliteBusy(() => context.recordEvent("send_degraded", diagnostic));
+			await retrySqliteBusy(() =>
+				context.recordEvent("send_degraded", { outcome: degraded, sent: [...sent], failures }),
+			);
 		} catch {
 			// The bounded, redacted process log remains available when SQLite/event sinks are unavailable.
 		}
 		log.warn("agent_send", "degraded", {
 			bot_id: context.botId,
-			outcome,
+			outcome: degraded,
 			component: primary.failed_component,
 			stage: primary.stage,
 			category: primary.category,
-			sent_count: sentIds.length,
+			sent_count: sent.length,
 			trigger_message_id: context.triggerMessageId,
 		});
-		return degradedSendResult({ sent: [...sentIds], outcome, ...primary });
+		return degradedSendResult({ sent: [...sent], outcome: degraded, ...primary });
 	};
-	const handleCreateFailure = async (
-		component: "message" | "sticker",
-		error: unknown,
-	): Promise<ReturnType<typeof degradedSendResult>> => {
+	/** Only a deterministic rejection before any commit may go back to the model as a retryable error. */
+	const createFailed = async (component: "message" | "sticker", error: unknown) => {
 		const failure = classifyTelegramCreateFailure(error);
-		if (failure.outcome === "rejected" && remoteCommits === 0) {
+		if (failure.outcome === "rejected" && sent.length === 0) {
 			try {
 				context.stopTyping();
 			} catch {
@@ -252,12 +210,12 @@ async function sendAttempt(params: SendParams, context: AgentSendContext) {
 			stage: "telegram_create",
 			category: failure.category,
 		});
-		return await finishDegraded(remoteCommits > 0 ? "partial" : "unknown");
+		return await finish(sent.length > 0 ? "partial" : "unknown");
 	};
 
 	if (params.message) {
 		try {
-			const { raw, canonical, transport } = await sendMarkdownTextAndPersist(
+			const { raw, transport } = await sendMarkdownTextAndPersist(
 				context.db,
 				context.api,
 				context.botId,
@@ -265,55 +223,40 @@ async function sendAttempt(params: SendParams, context: AgentSendContext) {
 				params.message,
 				params.reply_to,
 			);
-			await finishCommittedComponent("message", raw, canonical.message_id, transport);
+			await committed("message", raw, null, transport === "formatted" ? "markdown_sent" : "plain_fallback");
 		} catch (error) {
-			if (!(error instanceof SentMessagePersistenceError)) return await handleCreateFailure("message", error);
-			failures.push({
-				failed_component: "message",
-				failed_outcome: "committed",
-				stage: "canonical_persist",
-				category: localFailureCategory(error.cause),
-			});
-			await finishCommittedComponent("message", error.raw, rawTelegramMessageId(error.raw), error.transport);
+			if (!(error instanceof SentMessagePersistenceError)) return await createFailed("message", error);
+			await committed(
+				"message",
+				error.raw,
+				error.cause,
+				error.transport === "formatted" ? "markdown_sent" : "plain_fallback",
+			);
 		}
 	}
 	if (stickerFileId) {
+		let raw: Record<string, unknown>;
 		try {
-			const raw = await context.api.sendSticker(chatId, stickerFileId, params.reply_to);
-			try {
-				const canonical = await persistSentMessageWithRetry(
-					context.db,
-					context.botId,
-					raw,
-					"sticker",
-					context.emitMediaUpdates,
-				);
-				await finishCommittedComponent("sticker", raw, canonical.message_id);
-			} catch (error) {
-				if (!(error instanceof SentMessagePersistenceError)) throw error;
-				failures.push({
-					failed_component: "sticker",
-					failed_outcome: "committed",
-					stage: "canonical_persist",
-					category: localFailureCategory(error.cause),
-				});
-				await finishCommittedComponent("sticker", error.raw, rawTelegramMessageId(error.raw));
-			}
+			raw = await context.api.sendSticker(chatId, stickerFileId, params.reply_to);
 		} catch (error) {
-			return await handleCreateFailure("sticker", error);
+			return await createFailed("sticker", error);
+		}
+		try {
+			await persistSentMessageWithRetry(context.db, context.botId, raw, "sticker", context.emitMediaUpdates);
+			await committed("sticker", raw, null);
+		} catch (error) {
+			await committed("sticker", raw, (error as SentMessagePersistenceError).cause);
 		}
 	}
-	// The reaction is best-effort decoration on the replied message: it runs only when every
-	// create component committed cleanly (a degraded path returns above). A failure after a
-	// commit is recorded but never downgrades the delivered message; a reaction-only failure
-	// is thrown back to the model instead — setMessageReaction is idempotent, so retrying it
-	// can never duplicate a message.
+	// The reaction is best-effort decoration on the replied message. After a commit its failure
+	// is recorded but never downgrades the delivered message; a reaction-only failure goes back
+	// to the model, since setMessageReaction is idempotent and cannot duplicate a message.
 	if (params.reaction && params.reply_to != null) {
 		try {
 			await context.api.setMessageReaction(chatId, params.reply_to, params.reaction);
 			reactedTo = params.reply_to;
 		} catch (error) {
-			if (remoteCommits === 0) {
+			if (sent.length === 0) {
 				try {
 					context.stopTyping();
 				} catch {
@@ -328,40 +271,10 @@ async function sendAttempt(params: SendParams, context: AgentSendContext) {
 				target_message_id: params.reply_to,
 				trigger_message_id: context.triggerMessageId,
 			});
-			await runLocalEffect(
-				"message",
-				"event_failed",
-				() => context.recordEvent("reaction_failed", { message_id: params.reply_to, category }),
-				true,
+			await local("message", "event_failed", () =>
+				context.recordEvent("reaction_failed", { message_id: params.reply_to, category }),
 			);
 		}
 	}
-	sendEventAttempted = true;
-	typingStopAttempted = true;
-	await runLocalEffect(
-		params.sticker && !params.message ? "sticker" : "message",
-		"event_failed",
-		() =>
-			context.recordEvent("send", {
-				reply_to: params.reply_to ?? null,
-				sticker: params.sticker ?? null,
-				reaction: params.reaction ?? null,
-				reacted_to: reactedTo,
-				sent: sentIds,
-			}),
-		true,
-	);
-	await runLocalEffect(
-		params.sticker && !params.message ? "sticker" : "message",
-		"typing_stop_failed",
-		() => context.stopTyping(),
-		false,
-	);
-	if (failures.length > 0) return await finishDegraded("committed");
-	log.info("agent_send", "committed", {
-		bot_id: context.botId,
-		sent_count: sentIds.length,
-		trigger_message_id: context.triggerMessageId,
-	});
-	return successfulSendResult(sentIds);
+	return await finish(null);
 }
