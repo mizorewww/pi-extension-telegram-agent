@@ -59,8 +59,11 @@ export async function executeAgentSend(params: SendParams, context: AgentSendCon
 	}
 }
 
-/** Reject before any network call; returns the sticker file_id to send, if any. */
-function preflight(params: SendParams, context: AgentSendContext): string | null {
+/** Reject before any network call; returns the params to send and the sticker file_id, if any. */
+function preflight(
+	params: SendParams,
+	context: AgentSendContext,
+): { params: SendParams; stickerFileId: string | null } {
 	const reject = (category: string, message: string, fields: Record<string, unknown> = {}): never => {
 		log.warn("agent_send", "preflight_failed", {
 			bot_id: context.botId,
@@ -74,11 +77,20 @@ function preflight(params: SendParams, context: AgentSendContext): string | null
 		reject("empty_payload", "send requires at least one of message, sticker or reaction");
 	if (params.reaction != null && params.reply_to == null)
 		reject("reaction_without_target", "reaction requires reply_to: the reaction lands on the replied message");
-	if (params.reaction != null && !isReactionEmoji(params.reaction))
-		reject(
-			"invalid_reaction_emoji",
-			`invalid reaction emoji: ${params.reaction} (Telegram accepts only its fixed reaction emoji set, e.g. 👍 ❤️ 🔥 🤣 🎉)`,
-		);
+	if (params.reaction != null && !isReactionEmoji(params.reaction)) {
+		// Decoration must not cost a whole extra provider turn: drop it when there is content.
+		if (!params.message && !params.sticker)
+			reject(
+				"invalid_reaction_emoji",
+				`invalid reaction emoji: ${params.reaction} (Telegram accepts only its fixed reaction emoji set, e.g. 👍 ❤️ 🔥 🤣 🎉)`,
+			);
+		log.warn("agent_send", "reaction_dropped", {
+			bot_id: context.botId,
+			category: "invalid_reaction_emoji",
+			trigger_message_id: context.triggerMessageId,
+		});
+		params = { ...params, reaction: undefined };
+	}
 	if (params.reply_to != null && !context.visibleMessageIds.has(params.reply_to))
 		reject("reply_not_visible", "messaging.reply_not_visible", {
 			reply_to: params.reply_to,
@@ -86,7 +98,7 @@ function preflight(params: SendParams, context: AgentSendContext): string | null
 		});
 	// Resolve the sticker before sending anything: a late failure would make the model retry
 	// and double-send the text.
-	if (!params.sticker) return null;
+	if (!params.sticker) return { params, stickerFileId: null };
 	const row = context.db.query("SELECT file_unique_id FROM media WHERE short_id = ?").get(params.sticker) as {
 		file_unique_id: string;
 	} | null;
@@ -95,13 +107,13 @@ function preflight(params: SendParams, context: AgentSendContext): string | null
 			`unknown sticker id: ${params.sticker} (use a short_id from the Sticker 目录 or the latest 〔系统附注〕)`,
 		);
 	const fileId = fileIdForBot(context.db, context.botId, row.file_unique_id);
-	if (fileId) return fileId;
+	if (fileId) return { params, stickerFileId: fileId };
 	context.recordEvent("error", { stage: "send", code: "candidate_invariant", sticker: params.sticker });
 	throw new Error(`candidate invariant violated: sticker ${params.sticker} is not sendable by this bot (no file_id)`);
 }
 
-async function sendAttempt(params: SendParams, context: AgentSendContext) {
-	const stickerFileId = preflight(params, context);
+async function sendAttempt(requested: SendParams, context: AgentSendContext) {
+	const { params, stickerFileId } = preflight(requested, context);
 	log.info("agent_send", "started", {
 		bot_id: context.botId,
 		has_message: Boolean(params.message),
