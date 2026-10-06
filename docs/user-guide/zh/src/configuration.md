@@ -1,25 +1,23 @@
 # 配置与添加 bot
 
-`/tg config` 是推荐入口。需要添加 bot 或调整高级项时，编辑 ignored `telegram.config.ts`，然后执行 `bun run restart` 或 Pi 中的 `/tg restart`。
+所有设置都在项目根的 `telegram.config.ts`；仓库里的 [`telegram.config.example.ts`](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/telegram.config.example.ts) 列出了全部字段和注释。改完执行 `bun run restart`（或 Pi 里 `/tg restart`）生效。
 
-## 文件边界
+## 文件
 
-| 文件 | 保存什么 | 是否提交 |
-| --- | --- | --- |
-| `telegram.config.ts` | 群、bot、Pi 模型选择、routing、成本上限、tools | 否 |
-| `.env` | Telegram/TinyFish token 与 router secret | 否 |
-| `personas/*.local.md` | 真实 deployment persona | 否 |
-| `telegram.config.example.ts` | public typed schema example | 是 |
-| `personas/template.*.md` | public generic persona templates | 是 |
+| 文件 | 内容 | 提交到 Git |
+|---|---|---|
+| `telegram.config.ts` | 群、bot、模型、路由、工具、上限 | 否 |
+| `.env` | bot token、TinyFish key 等 secret | 否 |
+| `personas/*.local.md` | 你的 bot 人格 | 否 |
+| `telegram.config.example.ts`、`personas/template.*.md` | 公开示例 | 是 |
 
-`.env` 使用项目自己的冒号格式，不是 dotenv 的等号格式：
+`.env` 用冒号格式（不是 `KEY=value`）：
 
 ```text
 telegram_bot_token: 123456:REPLACE_WITH_BOTFATHER_TOKEN
-router_secret: REPLACE_WITH_RANDOM_LOCAL_SECRET
 ```
 
-## 成本优先的单 bot 配置
+## 最小配置
 
 ```ts
 import { defineConfig } from "./src/config.ts";
@@ -28,106 +26,79 @@ export default defineConfig({
   group_peer_id: 1234567890,
   provider: "openai-codex",
   model: "gpt-5.6-luna",
-  reasoning_effort: "off",
-  cache_retention: "short",
-  compaction_model: "openai-codex/gpt-5.6-luna:low",
-  context_window: 65_536,
-  max_suffix_tokens: 12_000,
-  max_message_tokens: 4_096,
-  media: {
-    mode: "vision", // 默认；改 "context" 时主模型必须支持图片输入
-    max_images_per_turn: 4,
-    download_concurrency: 2,
-  },
-  vision: {
-    enabled: false,
-    foreground_media_limit: 2,
-    concurrency: 2,
-  },
-  telemetry_retention_days: 90,
-  raw_update_retention_days: 30,
-  message_event_retention_days: 365,
   bots: [{
     id: "friend",
     name: "Mochi",
     token_env: "telegram_bot_token",
     persona_path: "personas/friend.local.md",
     routing_p: 0.1,
-    sticker_sets: [],
-    tools: { send: true, search: false, run_js: false },
   }],
 });
 ```
 
-完整注释和高级默认见仓库根的 `telegram.config.example.ts`。TypeScript config 是受信本机代码；只编辑你自己维护的文件，不执行来源不明的片段。
+没写的字段都用默认值。配置错误时启动会一次列出所有问题。
 
-## 添加第二或第三只 bot
+## 添加 bot
 
-1. 在 `.env` 增加独立 token key。
-2. 从 public template 复制新的 ignored persona。
-3. 在 `bots` 数组追加对象；`id` 必须唯一且只含字母、数字、`_`、`-`。
-4. 执行受控 restart，并在 Pi 用 `/tg attach <id>` 与 `/tg status <id>` 验证。
+1. 在 `.env` 加一行新 token，例如 `helper_bot_token: ...`；
+2. 从 `personas/template.zh.md` 复制一份新的 persona；
+3. 在 `bots` 数组里追加一项（`id` 唯一，只含字母、数字、`_`、`-`）；
+4. 重启，在 Pi 里用 `/tg attach <id>` 确认。
+
+每个 bot 有独立的 token、人格、会话和统计；它们共享同一个群的聊天记录，看得到彼此的发言，但不会互相触发。
+
+## 什么时候回应
+
+- **必定回应**：有人 @ 它、回复它的消息，或在消息里提到它的 `name`。
+- **概率插话**：普通消息按 `routing_p` 的概率交给某个 bot（所有 bot 的 `routing_p` 加起来不能超过 1）。被选中的 bot 正忙或在冷却期（`sampling_cooldown_ms`，默认 2000）就跳过，不会转给别的 bot；即使被选中，bot 也可以按人格选择不说话。
+- `routing_p: 0` 只关闭概率插话，点名仍然有效。
+- bot 发的消息不会触发其它 bot。
+
+## 模型
+
+- `provider` / `model` 可以写在顶层（所有 bot 共用），也可以在单个 bot 里覆盖；换 provider 时必须同时写 `model`。省略时继承 Pi `/model` 的默认值。
+- `reasoning_effort` 默认 `off`，必须是该模型真正支持的档位（在 Pi `/model` 里能看到），否则启动会报错。
+- `compaction_model` 是生成上下文摘要用的便宜模型（`provider/model:effort`）；摘要失败时保留原上下文，不会改用主模型。
+- 自建网关或代理：在 Pi 的 `~/.pi/agent/models.json` 里注册（`baseUrl`、`api: "openai-completions"`、`apiKey`、每个模型的 `input`、`contextWindow`、`maxTokens`），在 Pi `/model` 里确认后写进配置即可，不需要改本项目。
+- 在群里可以用 `/model` 按钮直接换模型（管理员），见[群内命令](operations.md#群内命令)。
+
+## 工具
 
 ```ts
-{
-  id: "helper",
-  name: "Nori",
-  token_env: "helper_bot_token",
-  persona_path: "personas/helper.local.md",
-  routing_p: 0,
-  tools: { send: true, search: false, run_js: false },
-}
+tools: { send: true, search: false, run_js: false }
 ```
 
-`routing_p: 0` 只关闭普通消息的概率抽样；mention、直接 reply 和配置名称仍是明确触发。所有 bot 的 `routing_p` 总和必须 `<= 1`，配置顺序决定确定性概率桶顺序。
+- `send`：在群里发言、发 sticker、点 reaction。关掉就是只看不说的观察 bot。
+- `search`：联网搜索或读取一个公开网页（TinyFish），需要在 `.env` 加 `tiny_fish_api_key`。不会自动打开群里的每个链接，也不能访问内网地址。
+- `run_js`：在沙箱里跑小段 JavaScript 做精确计算。沙箱仍有残余风险，默认关闭。
 
-每个 bot 的 Telegram poller、agent session、模型选择、state 与 telemetry 都隔离；共享的是一个 Pi model runtime/auth snapshot、目标群与 canonical SQLite history。
+## 图片和视频
 
-## Pi 模型与 tools override
+`media.mode` 决定 bot 怎么“看”媒体：
 
-公开示例固定了一组成本优先profile：Luna、reasoning off、short cache retention，并用Luna low做compaction。向导会把已经通过Pi预检的provider/model固定进新配置，因此以后改变Pi默认值不会静默改变这个deployment。旧手写配置仍可省略这两个字段兼容继承Pi合并后的默认值；但省略`reasoning_effort`表示`off`，不再继承Pi的thinking level。daemon会通过Pi原生resource loader读取用户级已安装provider extension，因此插件提供的模型、能力与费用元数据和交互式Pi一致；项目extension不会进入bot session。单bot可以覆盖到另一个catalog entry；切换provider时必须同时填写provider和model。认证始终来自Pi，不来自本配置或`.env`。
+| 模式 | 方式 | 要求 |
+|---|---|---|
+| `"vision"`（默认） | 打开 `vision.enabled: true` 后，辅助视觉模型（`auxiliary_visual_model`）把每张图/视频描述成文字，结果所有 bot 共用 | 主模型无要求 |
+| `"context"` | 图片和视频截帧直接交给主模型，不调用视觉模型；每次最多 `media.max_images_per_turn`（默认 4）张 | 主模型必须支持图片输入 |
 
-`reasoning_effort`不仅必须是Pi全局枚举，还必须是所选模型实际支持的档位。Pi SDK本身会把不支持的值静默夹到最近档位；Telegram agent为避免费用、行为与状态显示不一致，会在任何Telegram/provider调用前拒绝启动，并列出requested与supported值。main bot、`compaction_model`及vision模式下启用的辅助视觉模型执行同一检查。请在Pi `/model`查看可选档位；例如`deepseek-v4-flash`只接受`off`、`high`、`max`。
+语音、音频、普通文件、TGS 动画贴纸在两种模式下都只是文字占位。视频需要主机装有 FFmpeg。
 
-摘要只使用配置的 `compaction_model`，失败不会切换到主模型。`provider_retries` 是聊天和摘要请求可重试错误的最大额外尝试次数；0 会关闭 Pi 与 adapter 的额外重试。每次请求的 timeout 覆盖 stream 创建与消费全过程；取消或 daemon 关停会终止摘要请求。
+## 上限与默认值
 
-自定义OpenAI兼容端点（自建网关、代理等）通过Pi原生的`~/.pi/agent/models.json`注册，不需要任何项目侧扩展：在`providers`里声明`baseUrl`、`api: "openai-completions"`、`apiKey`（可写成`"$ENV_VAR"`引用环境变量），并为每个模型显式声明`input`（如`["text","image"]`）、`contextWindow`、`maxTokens`。注册后在Pi `/model`确认可用，再把`provider`/`model`写进本配置；打算用`media.mode: "context"`时模型声明必须包含image输入，否则daemon启动时fail fast。
+| 字段 | 默认 | 作用 |
+|---|---|---|
+| `context_window` | 65,536 | 主模型最多使用的上下文 |
+| `compaction_threshold` | 32,768 | 上下文超过它就压缩成摘要（最多 `context_window − 16,384`） |
+| `compaction_keep_recent` | 1 | 压缩后保留的最近原文 token 数；1 表示只留摘要和最后一轮，群聊建议 20,000 |
+| `max_suffix_tokens` / `max_message_tokens` | 12,000 / 4,096 | 每轮新消息和单条消息的上限 |
+| `context_image_budget_bytes` | 10,000,000 | 上下文里图片总字节超过它就额外压缩 |
+| `provider_timeout_ms` / `provider_retries` | 300,000 / 2 | 单次请求超时与自动重试次数 |
+| `cache_retention` | `"short"` | provider prompt cache 保留策略 |
+| `telemetry_retention_days` 等 | 90 / 30 / 365 | 用量、原始 update、消息事件的保留天数 |
+| `telegram_admins` | 空 | 能用群内管理命令的人（数字 user id 或 `@username`） |
 
-以下边界都有默认上限：
+这些值大部分也可以在单个 bot 里覆盖。
 
-- `max_suffix_tokens: 12000`和`max_message_tokens: 4096`限制每轮新增的Telegram provider context；
-- 主聊天默认`cache_retention: "short"`，compaction使用配置的廉价task model且关闭provider cache retention；
-- `context_window`（默认65,536）限制主模型的有效上下文窗口，并把`compaction_threshold`的上限压到`context_window − 16,384`；
-- `media.mode`（默认`"vision"`）决定媒体如何到达模型。vision模式：`vision.enabled`开启后，辅助视觉模型（`auxiliary_visual_model`）为每个媒体生成文字描述；描述持久化在`media.vision`列、所有bot共享，以immutable media-update event追加进上下文，主模型读到的是`[图片: 描述]`占位，因此主模型不需要图片输入；每轮最多处理`foreground_media_limit`个未缓存媒体，所有bot共用一个最多`concurrency`个active job的FIFO门。context模式：完全不调用视觉模型，照片与静态sticker直接作为图片进入主模型上下文，视频（含视频sticker与GIF动图）本地抽取1-3张代表帧；视觉描述绝不进入上下文——已持久化的历史描述也不会以 media-update event 注入；主模型必须支持图片输入，否则启动直接报`image_input_unsupported`；每次模型调用最多附`media.max_images_per_turn`张图（默认4，每张约1.1K token），超出上限或上下文预算的媒体自动降级为文字占位，下载/抽帧并发由`media.download_concurrency`（默认2）控制。两种模式下voice/audio/非视频document/TGS动态贴纸都保持文字占位（当前模型API的硬限制），视频抽帧都要求daemon主机PATH中有`ffmpeg`和`ffprobe`；缺失时视频只保留文字占位且不占provider token，只给operator安装提示，不影响daemon、聊天、图片或sticker发送；
-- telemetry、raw update、immutable message event默认分别保留90、30、365天。旧event只有在所有已知bot cursor都消费且没有reply obligation引用时才删除。
-
-model、reasoning、cache policy、persona、tools、serializer、`media.mode`等cache-visible字段变化都会得到新context fingerprint。受控restart会保留旧session文件，但在restore前创建新session，绝不会用新identity恢复旧context。
-
-`tools`：
-
-- `send`：允许agent发送本地转换为Telegram message entities的Markdown文字，以及static/animated/video sticker；普通正文保持普通字重；可选reaction（限Telegram固定reaction emoji）落在`reply_to`消息上表态，不能替代必须的文字回应；
-- `search`：启用同一个TinyFish工具的有界网页检索与单页读取，需要 `.env` 中由 `tinyfish_key_env` 指定的TinyFish key；
-- `run_js`：启用受限的确定性计算工具；默认关闭，因为模型提供的JavaScript即使经过sandbox仍有残余风险。
-
-search与`run_js`只有字段显式为`true`才启用，不存在旧版隐式默认。启用search前把TinyFish credential加入`.env`（默认key名为`tiny_fish_api_key`）；它与Pi模型认证无关。启用后agent可显式搜索，或在回答确实需要页面内容时读取一个public HTTP(S) URL；不会自动抓取群里的每条链接，也不支持登录态、cookie或private/local地址。
-
-## Routing 与管理命令
-
-- mention > reply > 配置名称 > probability；bot 消息不会触发 bot-to-bot run。
-- `routing_p` 是普通 human 消息的**回应机会**，不是最终群发言配额。每条 eligible 消息只生成一个确定性值并至多落入一个累计桶；当总和为 1 时，每条 eligible 消息恰有一个 probability target。
-- `sampling_cooldown_ms` 只约束 probability 路径；默认 2000，0 表示关闭冷却。
-- probability target busy 或 cooldown 时会直接 skip，不改投另一只 bot；mention/reply/name 走明确触发路径。即使成功开始，persona 仍可选择沉默，发送也可能失败，所以群内公开消息比例无需等于 `routing_p`。
-- `telegram_admins` 默认空，拒绝 Telegram 群内 `compact`/`set`。需要时优先加入你自己的正整数 numeric user ID；不要复制示例占位值。
-- Telegram `/set <routing_p|cooldown_ms> <value>` 写穿 `telegram.config.ts`（原子写入 + 全量校验，任何一步失败回滚文件），成功后立即更新内存 effective 值，重启后仍然生效。
-
-只读诊断当前 deployment 用 `bun run debug`（见[运维](operations.md)与[故障排查](troubleshooting.md)）。
-
-## 多群
-
-一份 deployment 只有一个 `group_peer_id`。多个群必须使用隔离工作目录及 data/session/DB/pid/socket，不能在同一 checkout 只换配置文件并行运行。
+改了模型、人格、工具、媒体模式等影响模型输入的设置后，重启时 bot 会开启新的会话（旧会话文件保留），这是正常的。
 
 下一步：[在 Pi 中聊天和观察](using-pi.md)。
-
-图片上下文超预算时，本次压缩临时缩小原文保留窗口，结束后恢复配置。共享媒体文件由统一引用回收管理。未完成路由交付的 raw update 暂不受 retention 删除；control 消息排除身份永久保存。
-
-本次 cache schema 20 升级会自动创建新上下文 epoch，旧 session 文件保留；无需手工改库。路由按全局 @mention（含 caption）优先于 reply，不取决于 bot 排列顺序。

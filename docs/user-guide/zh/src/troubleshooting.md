@@ -1,88 +1,70 @@
 # 故障排查
 
-先从症状选择安全的下一步；不要删除data、pid或socket来“试一下”。完整进程恢复规则见[daemon runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/daemon.md)。
+先跑一次只读诊断，它会指出问题卡在哪一步：
 
-## `bun run pi` 无法启动
+```bash
+bun run debug -- --since 30m
+```
 
-运行：
+不要为了“试一下”删除 `data/`、pid 或 socket 文件。
+
+## `bun run pi` 启动不了
 
 ```bash
 bun install --frozen-lockfile
 pi --version
-bun run pi --version
 ```
 
-两个 version 命令应显示本机安装的同一版本。若找不到 `pi`，先安装 Pi 并确认它在 PATH 中；启动器会跳过 `node_modules/.bin`，不自动安装 CLI。依赖安装失败时保留错误输出并修复 registry/network。
+找不到 `pi` 就先安装 Pi 并确认它在 PATH 中；本项目不会替你安装 Pi。
 
-## `/tg config` 不在菜单中
+## 菜单里没有 `/tg config`
 
-确认你从仓库根运行 `bun run pi`，并且 package discovery 加载了 `.pi/extensions/tg-extension.ts`。`config` 是静态命令，不依赖已有 config；若完全缺失，优先排查Pi/package加载，而不是手工创建空配置文件。
+确认是在仓库根目录运行的 `bun run pi`。`/tg config` 不依赖已有配置，没有它通常是扩展没被加载。
 
 ## 向导拒绝配置
 
-- 字段错误：按notification列出的字段修复；值不会回显。
-- 已有文件：选择validate/editor，或明确确认backup-replace；取消不会改字节。
-- Pi model preflight：退出向导，用 Pi `/login`、`/model` 修复后重试；deployment 文件尚未写入。
+- 字段错误：按提示修改对应字段（token 等值不会回显）。
+- 模型未就绪：退出向导，用 Pi `/login`、`/model` 修好后重试，此时还没有写入任何文件。
 
-## 配置有效但 daemon 未 ready
+## 配置有效但 bot 没上线
 
 ```text
 /tg status-daemon
 /tg restart
 ```
 
-再检查 `data/daemon.log`。常见原因是Telegram token错误、网络不可达、Pi login/default model已变化、model不在Pi catalog、`media.mode: "context"`下主模型不支持图片输入（`image_input_unsupported`，用Pi `/model`换一个支持的模型或回到默认vision模式）或bot未加入目标群。有效配置会保留；不需要重新粘贴token。
+再看 `data/daemon.log`。常见原因：token 错误、网络不通、bot 不在群里、所选模型不在 Pi 目录里，或在 `media.mode: "context"` 下选了不支持图片的模型（`image_input_unsupported`）。
 
-## `daemon starting` 很久
+## 群里 @ 了 bot 但没反应
 
-配置了sticker sets时首次Telegram catalog拉取可能较慢。vision模式的描述生成只有`vision.enabled`显式开启后才工作，不属于默认启动路径。运行`bun run status`并观察脱敏日志。如果child仍alive，controller不会把60秒等待上限误报成ready；只有socket真实可连接才算ready。
+- 确认 BotFather 里已关闭 group privacy，bot 在正确的群里且能发言。
+- 跑 `bun run debug`：`pending_reply_obligation` 表示还欠着这条回复（bot 会在下次触发或重启时补上）；`route_without_run` 表示路由了但没发起请求，看日志里的 `flush_failed` / `provider_attempt_failed`。
+- 401：token 被撤销，修正 `.env` 后重启。
+- 409：同一个 token 被另一个进程使用。确认只有一个 daemon 在运行（不要同时用 systemd 和 `bun run start`，也不要在另一台机器上用同一 token 启动）。
 
-修改model、persona、cache policy、tools等cache-visible字段后，日志出现`session ready (new)`是预期行为。context fingerprint会阻止用新identity恢复旧session；旧文件仍保留用于恢复或审计。
+## bot 一直说跟话题无关的话
 
-## Telegram 401 或没有群消息
+bot 的上下文可能被某个误解带偏了（摘要会把它延续下去）。管理员在群里发 `/new` 开启新会话即可；它只会看到之后的消息。
 
-- 401：轮换或修正对应bot token，确认`token_env`指向正确key，再restart。
-- 普通群消息不可见：在BotFather关闭该bot group privacy，确认bot已加入正确supergroup。
-- bot不能发言：检查Telegram群权限；不需要为了普通读取授予多余管理员权限。
+## 图片没有显示
 
-## Telegram 409 / duplicate poller
+- 图片显示取决于终端是否支持图片（Kitty、Ghostty、iTerm2、WezTerm 等）；不支持时只显示 `[photo]` 等标签。
+- 新图片先显示标签，下载完成后原位出现。超过 1 MiB 的图片不在终端显示。
+- 上下文被压缩后，不再被任何 bot 需要的本地图片会被清理，旧卡片只剩标签是正常的；消息和图片描述都还在。
 
-同一个token正在被另一进程长轮询。运行`bun run restart`；controller会验证并回收当前deployment的真实daemon与孤儿。不要盲目`kill` pid file中的数字，也不要并发start。
+## 视频没被理解
 
-## Pi feed 或 compose 断开
+`bun run debug` 报 `video_transcoder_unavailable` 表示缺少 `ffmpeg`/`ffprobe`。安装后重启即可，其它功能不受影响。超过 20 MiB 的视频不会处理。
 
-- `no connected Telegram feed`：先`/tg attach [bot]`，等snapshot连接完成。
-- `unknown bot id`：使用`/tg `补全，或检查配置id。
-- compose unknown outcome：先查群，不自动重试；确认缺失后再发。
-- `/tg detach`或关闭Pi不会停止daemon；重新`/tg attach`即可。
+## 搜索或读网页失败
 
-## 图片没有内联显示
+- 确认该 bot 的 `tools.search` 为 `true`，`.env` 里有 TinyFish key，然后重启。
+- `invalid_url` 表示目标不是公网 HTTP(S) 地址（例如 localhost、内网 IP、带用户名密码的链接），这是有意的安全限制。
 
-用户或bot新发的static photo/sticker会先显示media label，再由daemon后台下载并在同一Pi卡片原位出现；它不依赖routing或任何模型调用。animated/video媒体保留文字placeholder。daemon启动时会把旧绝对cache path按文件名迁到当前`data/media`，不存在的记录先清空，再只回填仍被当前上下文、未消费event或待回复义务引用的最新100条static display缺口。
+## 发送结果未知
 
-成功compaction后，所有当前配置bot都不再引用的本地媒体cache会按有界批次自动删除；旧Pi卡片因此只剩label是预期行为，不代表消息、vision描述或媒体派生文件记录、Telegram file mapping丢失。restart不会为了历史展示把这些文件无条件下载回来。
+Pi 里手动发送提示结果未知时，消息可能已经发出。先去群里确认，没有再重发。
 
-若新媒体持续只有label，先在脱敏日志中查`media_cache_ready/skip/error`的固定category与queue数字，再检查文件是否超过1 MiB、是否为支持的静态图片格式、terminal图像能力和当前项目Pi版本。Pi根据当前capability选择Kitty/iTerm2/native fallback；不要手写terminal escape或绕过Pi组件。稳定复现时只记录terminal、tmux状态、媒体种类、固定outcome和“是否有本地path”，不要附带token、绝对path或私人图片本体。
+## 求助时提供什么
 
-## 视频没有视觉描述或代表帧
-
-先运行`bun run debug`。`video_transcoder_unavailable`表示主机缺少`ffmpeg`或`ffprobe`；`start`/`restart`/`status`也会说明它只用于视频抽帧并给出安装建议。两种媒体模式的视频抽帧都需要FFmpeg。这个告警不阻塞daemon，不会发到群里：vision模式下视频在Telegram下载和provider调用前跳过、不占provider token；context模式下视频（含视频sticker与GIF动图）只以文字占位进入上下文。聊天、图片处理和三种sticker发送保持正常。安装同一FFmpeg发行包后restart即可，之前的失败不会永久缓存。`video_probe_failed`或`video_frame_extraction_failed`表示文件无法由本机工具读取；检查是否超过20 MiB和格式支持。日志不会包含文件path、stderr或视频内容。
-
-## 搜索或网页读取失败
-
-- 确认对应bot的`tools.search`为true，`.env`中存在`tinyfish_key_env`选中的key，然后受控restart。
-- `invalid_url`表示目标不是允许的public HTTP(S) URL，或包含userinfo/local/private/link-local地址；不要通过关闭校验来访问内网。
-- `*_timeout`、`*_http_*`、`*_response_too_large`和`fetch_*`是固定类别。它们只影响当前turn；不会后台重试或换URL。
-- 排查时只记录固定category与hostname。不要粘贴API key、signed URL的path/query/fragment或网页正文。
-
-## 仍无法恢复
-
-收集以下非敏感信息：
-
-- `bun run status` 输出；
-- `bun run pi --version`；
-- `data/daemon.log`中手工复核过的脱敏末尾；
-- 失败命令、bot id、配置是新写还是替换已有文件；
-- 是否使用tmux、Kitty/Ghostty/iTerm2。
-
-不要提交 `.env`、真实persona、完整群消息、token、API key或未脱敏绝对路径。
+`bun run status` 的输出、`pi --version`、检查过的日志末尾、出问题的命令和 bot id、使用的终端。不要提交 `.env`、persona、聊天内容、token 或 API key。

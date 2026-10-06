@@ -2,58 +2,53 @@
 
 [中文](README.md) · [English](README.en.md)
 
-Let a few AI bots, each with its own persona, live permanently in your Telegram group: they join conversations by probability, send animated stickers, and understand images and videos — like real group members. You observe and control everything from the local Pi terminal.
+Let a few AI bots, each with its own personality, live in your Telegram group: they answer when mentioned, sometimes join in on their own, send stickers, and understand images and videos, like real group members. You watch and control everything from the Pi terminal on your machine.
 
-## Why use it
-
-- **Fast**: a local daemon runs permanently, and incoming messages route straight to the right bot — no cold start.
-- **Cheap**: provider prefix caching can reduce repeated input costs; the actual discount depends on the provider. Routing, dedupe, and state use deterministic code without model calls.
-- **Simple**: one config file, one structure. Change a value, restart, done.
+- **Fast**: a daemon runs on your machine and routes incoming messages immediately, with no cold start.
+- **Cheap**: deterministic code decides whether to respond, so no model call is wasted; prompt prefixes stay unchanged to reuse provider caching (the actual discount depends on the provider).
+- **Simple**: one configuration file; adding a bot means adding one entry.
 
 ## Quick start
 
-You need: [Bun](https://bun.sh/), a locally installed `pi` on PATH, a Telegram supergroup, and at least one [BotFather](https://t.me/BotFather) token (the bot must be in the group with privacy mode disabled, or it cannot see ordinary messages). Video frame sampling additionally needs host `ffmpeg` (including `ffprobe`); without it, videos stay text placeholders while the rest of the agent keeps working.
+You need:
+
+- [Bun](https://bun.sh/) and a local [Pi](https://github.com/earendil-works/pi) installation (`pi` on your PATH);
+- a Telegram supergroup and at least one [BotFather](https://t.me/BotFather) bot with **group privacy turned off**, added to the group;
+- optionally `ffmpeg`, so bots can understand videos.
 
 ```bash
 git clone https://github.com/mizorewww/pi-extension-telegram-agent.git
 cd pi-extension-telegram-agent
-bun install
+bun install --frozen-lockfile
 bun run pi
 ```
 
-Then two things inside Pi:
+In Pi:
 
-1. `/login` to authenticate a model provider and `/model` to pick the default model (credentials stay with Pi, outside this repo). The default media mode (`vision`) works with any chat model; image input is required only if you opt into `media.mode: "context"`, which refuses to start with a text-only model.
-2. `/tg config` to run the setup wizard: group ID, token, persona. Once it validates, the daemon is ready.
+1. `/login` to a model provider and `/model` to pick the default model (credentials stay in Pi);
+2. `/tg config` to run the setup wizard: group ID, token, persona. The daemon becomes ready when it finishes.
 
-Done. Mention your bot in the group or just say something; `/help` lists the group commands.
+Mention your bot in the group to try it.
 
-> Note: Pi's input dialog does not mask secrets — the token stays visible while you paste it. Use a private terminal and don't record your screen.
+> Pi's input box does not mask passwords. Do not record or share your screen while pasting the token.
 
 ## Everyday use
 
 ```bash
-bun run start      # Start in the background
-bun run pi         # Open the observation/control UI
-bun run status     # Check status
-bun run restart    # Restart to apply config changes
-bun run stop       # Stop
+bun run start      # start in the background (use systemd for long-running setups; see the runbook)
+bun run pi         # open the watch / control UI (/tg attach)
+bun run status     # check status
+bun run restart    # apply configuration changes
+bun run stop       # stop
+bun run debug      # read-only diagnostic report
 ```
 
-In the group, `/help` and `/status` work for everyone; admins (listed in `telegram_admins`) also get `/compact` and `/set` — and `/set` writes the new value straight back into the config file.
+Group commands: anyone can use `/help` and `/status`; admins listed in `telegram_admins` also get `/model` (switch models with buttons), `/new` (start a new session), `/compact` (summarize the context) and `/set` (tune how often a bot joins in and its cooldown).
 
-## Configuration
+## Documentation
 
-There is exactly one config file, `telegram.config.ts`, with a comment on every field — copy [telegram.config.example.ts](telegram.config.example.ts) and change a few values. Secrets (tokens, API keys) live in `.env`. Adding another bot means adding one entry to `bots` — no code changes.
+- User guide: [English](docs/user-guide/en/src/README.md) · [中文](docs/user-guide/zh/src/README.md)
+- [Configuration](docs/user-guide/en/src/configuration.md) · [Troubleshooting](docs/user-guide/en/src/troubleshooting.md) · [Daemon operations](docs/runbooks/daemon.md)
+- Contributing: start with [AGENTS.md](AGENTS.md) and [docs/index.md](docs/index.md)
 
-Full reference: [Configuration guide](docs/user-guide/en/src/configuration.md).
-
-## Getting help
-
-- Common problems: [Troubleshooting](docs/user-guide/en/src/troubleshooting.md)
-- Daemon operations (restart, logs, diagnostics): [daemon runbook](docs/runbooks/daemon.md) — `bun run debug` produces a full diagnostic report
-- Complete user guide: [English](docs/user-guide/en/src/README.md) · [中文](docs/user-guide/zh/src/README.md)
-
-## Contributing
-
-Start with [AGENTS.md](AGENTS.md) and the [development guide](docs/engineering/development-guide.md); the documentation index is [docs/index.md](docs/index.md). Licensed under BSD 2-Clause — see [LICENSE](LICENSE).
+Licensed under BSD 2-Clause; see [LICENSE](LICENSE).

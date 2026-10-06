@@ -1,88 +1,70 @@
 # Troubleshooting
 
-Choose a safe next action from the observable symptom. Do not delete data, PID files, or sockets just to experiment. The [daemon runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/daemon.md) owns full recovery procedures.
+Start with the read-only diagnosis; it shows where things got stuck:
+
+```bash
+bun run debug -- --since 30m
+```
+
+Do not delete `data/`, pid or socket files "just to try".
 
 ## `bun run pi` does not start
-
-Run:
 
 ```bash
 bun install --frozen-lockfile
 pi --version
-bun run pi --version
 ```
 
-Both version commands should show the same locally installed version. If `pi` is missing, install Pi and check PATH; the launcher skips `node_modules/.bin` and does not install the CLI. If dependency installation fails, retain the error and fix registry/network access.
+If `pi` is not found, install Pi and put it on your PATH first; this project does not install it for you.
 
-## `/tg config` is missing
+## `/tg config` is missing from the menu
 
-Confirm you started `bun run pi` from the repository root and package discovery loaded `.pi/extensions/tg-extension.ts`. `config` is static and does not depend on an existing deployment. If it is completely absent, inspect Pi/package loading instead of creating an empty config file.
+Make sure you ran `bun run pi` from the repository root. `/tg config` works without an existing configuration, so its absence usually means the extension was not loaded.
 
-## The wizard refuses configuration
+## The wizard rejects the configuration
 
-- Field error: correct the fields named in the notification; values are never echoed.
-- Existing files: choose validate/editor or explicitly confirm backup-replace. Cancellation preserves bytes.
-- Pi model preflight: leave the wizard, use Pi `/login` and `/model`, then retry. No deployment file was written.
+- Field errors: fix the field named in the message (values such as tokens are not echoed).
+- Model not ready: leave the wizard, fix it with Pi `/login` and `/model`, and try again. Nothing has been written yet.
 
-## Config is valid but the daemon is not ready
+## The configuration is valid but the bot is not online
 
 ```text
 /tg status-daemon
 /tg restart
 ```
 
-Then inspect `data/daemon.log`. Typical causes include an invalid Telegram token, unreachable network, changed Pi login/default-model settings, a model absent from Pi's catalog, a context-mode main model without image input (`image_input_unsupported` — only when `media.mode: "context"`; check capabilities with Pi `/model`), or a bot missing from the target group. Valid files remain, so you do not need to paste the token again.
+Then read `data/daemon.log`. Typical causes: a wrong token, no network, the bot is not in the group, the model is not in Pi's catalog, or, with `media.mode: "context"`, a model without image input (`image_input_unsupported`).
 
-## `daemon starting` persists
+## The bot ignores a mention
 
-Configured sticker sets may make the first Telegram catalog fetch slower. Vision work occurs only when explicitly enabled, and context-mode media preparation (downloads and frame sampling) runs lazily for real turns; neither is part of the startup path. Run `bun run status` and inspect redacted logs. A live child after the 60-second wait is reported only as starting; readiness requires a real socket connection.
+- Check that group privacy is off in BotFather and the bot is in the right group with permission to post.
+- Run `bun run debug`: `pending_reply_obligation` means the reply is still owed (it is sent on the next trigger or restart); `route_without_run` means the message was routed but no request ran, so look for `flush_failed` / `provider_attempt_failed` in the log.
+- 401: the token was revoked; fix `.env` and restart.
+- 409: another process uses the same token. Make sure only one daemon runs (do not combine systemd with `bun run start`, and do not start the same token on another machine).
 
-After changing a model, persona, cache policy, tools, or another cache-visible field, a `session ready (new)` line is expected. The context fingerprint deliberately prevents restoring the old session under the new identity; the old file is retained for recovery/audit.
+## The bot keeps talking off-topic
 
-## Telegram 401 or no group messages
+Its context may be stuck on a misunderstanding, which summaries then carry forward. An admin can send `/new` in the group to start a new session; it only sees later messages.
 
-- 401: rotate or correct that bot's token, ensure `token_env` selects the right key, then restart.
-- Ordinary messages are absent: disable group privacy for that bot in BotFather and confirm it joined the intended supergroup.
-- The bot cannot send: inspect group permissions. Do not grant unrelated administrator rights for ordinary reading.
+## Images do not show
 
-## Telegram 409 / duplicate poller
+- Inline images depend on your terminal (Kitty, Ghostty, iTerm2, WezTerm and others); otherwise you see a label such as `[photo]`.
+- New images first show a label and appear in place once downloaded. Images above 1 MiB are not shown in the terminal.
+- After a context summary, local images no bot needs anymore are cleaned up, so old cards showing only a label is expected; the messages and image descriptions remain.
 
-Another process is long-polling with the same token. Run `bun run restart`; the controller verifies and recovers this deployment's real daemon and orphans. Do not blindly signal the PID-file number or start concurrently.
+## Videos are not understood
 
-## Pi feed or compose disconnects
+`video_transcoder_unavailable` in `bun run debug` means `ffmpeg`/`ffprobe` is missing. Install it and restart; nothing else is affected. Videos above 20 MiB are not processed.
 
-- `no connected Telegram feed`: run `/tg attach [bot]` and wait for the snapshot connection.
-- `unknown bot id`: use `/tg ` completion or inspect configured IDs.
-- Unknown compose outcome: inspect the group and retry only when absent.
-- `/tg detach` and closing Pi do not stop the daemon; attach again later.
+## Search or page reading fails
 
-## Images do not render inline
+- Check that the bot has `tools.search: true` and a TinyFish key in `.env`, then restart.
+- `invalid_url` means the target is not a public HTTP(S) address (for example localhost, a private IP, or a link with a username and password). This is a deliberate safety limit.
 
-A new user- or bot-sent static photo/sticker first shows its media label, then the daemon downloads it in the background and updates the same Pi card. This does not depend on routing or the media pipeline; animated/video media retains a text placeholder in the feed. On startup, legacy absolute cache paths are rebased by filename when the file exists in the current `data/media`; missing entries are cleared before at most 100 recent static display gaps still referenced by current context, an unconsumed event, or a pending reply are backfilled.
+## A send outcome is unknown
 
-After successful compaction, a bounded batch of local media files no longer referenced by any configured bot is removed automatically. An old Pi card falling back to its label is therefore expected and does not mean that the message, vision description, or Telegram file mapping was lost; a future turn can reacquire the source — reusing a persisted vision result or preparing context images again. Restart does not unconditionally download those files again just for historical display.
+When a manual send from Pi reports an unknown outcome, the message may already have been posted. Check the group and resend only if it is not there.
 
-If new media remains label-only, inspect only the fixed `media_cache_ready/skip/error` category and queue number in redacted logs, then check the 1 MiB limit, static-image format, terminal image capability, and project Pi version. Pi still selects Kitty, iTerm2, or native text fallback. Do not add terminal escapes or bypass Pi components. Record terminal type, tmux state, media kind, fixed outcome, and whether a local path exists—never a token, absolute path, or private image contents.
+## Asking for help
 
-## A video has no description or stays a text placeholder
-
-Videos (including video stickers, GIF animations, and video notes) reach a model only through sampled frames: 1-3 frames attached to the main model in context mode, or one vision call over at most three frames in vision mode. A persistent placeholder — or, in vision mode, a missing description — therefore means frame sampling or the vision call is unavailable or failed. Run `bun run debug` first. `video_transcoder_unavailable` means the host lacks `ffmpeg` or `ffprobe`; `start`, `restart`, and `status` also explain that the package is used only for frame sampling and suggest installation. The warning never blocks daemon readiness or posts into the group: the video skips before Telegram download or a provider call, so it consumes no provider tokens while chat, static images, and all sticker formats continue. Install the FFmpeg distribution package and restart; this failure is not cached permanently. `video_probe_failed` or `video_frame_extraction_failed` means the local tools could not read the file; check the 20 MiB bound and format support. Logs never contain its path, stderr, or video contents.
-
-## Search or page retrieval fails
-
-- Confirm that the bot has `tools.search: true`, that `.env` contains the key selected by `tinyfish_key_env`, and then perform a controlled restart.
-- `invalid_url` means the target is not an allowed public HTTP(S) URL or contains userinfo or a local/private/link-local address. Never disable the guard to access an internal service.
-- `*_timeout`, `*_http_*`, `*_response_too_large`, and `fetch_*` are fixed categories. They affect only the current turn; there is no background retry or URL substitution.
-- Retain only the fixed category and hostname when diagnosing. Never paste the API key, a signed URL's path/query/fragment, or page contents.
-
-## Still unable to recover
-
-Collect only non-sensitive evidence:
-
-- `bun run status` output;
-- `bun run pi --version`;
-- a manually reviewed, redacted tail of `data/daemon.log`;
-- the failed command, bot ID, and whether the config was newly written or replaced an existing file;
-- terminal and tmux details when UI is involved.
-
-Never submit `.env`, real personas, full group messages, tokens, API keys, or unredacted absolute paths.
+Include the output of `bun run status`, `pi --version`, the reviewed end of the log, the failing command and bot id, and your terminal. Never share `.env`, personas, chat content, tokens or API keys.

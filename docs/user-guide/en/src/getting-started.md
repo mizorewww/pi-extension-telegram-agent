@@ -1,83 +1,74 @@
 # Installation and first setup
 
-This project runs 1..N AI bots, each with its own persona, inside one Telegram supergroup. It is designed to be fast (a resident daemon routes messages directly), context-optimized (provider prefix caching can reduce repeated input costs, with provider-specific discounts), and simple (one configuration track, no intermediate concepts) — low cost is the result of those three.
+## 1. Prepare the machine
 
-There is exactly one configuration track: `telegram.config.ts` for non-secret settings, `.env` for secrets such as tokens, and Pi for model authentication. The wizard below writes these files for you in its final step.
-
-## 1. Prepare the local environment
-
-Install Bun and Pi (check that `pi --version` works), clone the repository, and enter the project directory:
+You need [Bun](https://bun.sh/) and a local Pi installation (`pi --version` works).
 
 ```bash
-git clone <repository-url> pi-extension-telegram-agent
+git clone https://github.com/mizorewww/pi-extension-telegram-agent.git
 cd pi-extension-telegram-agent
 bun install --frozen-lockfile
 bun run pi
 ```
 
-`bun run pi` starts the Pi installed on PATH and forwards command-line arguments; you can also run `pi` directly from the repository root. The daemon uses the project's pinned Pi SDK, while the interactive CLI version comes from your local installation. The launcher does not install dependencies or read a sibling `../pi` checkout.
+`bun run pi` starts the Pi on your PATH and loads this project's Telegram extension.
+
+Optional: install `ffmpeg` (which also provides `ffprobe`) so bots can understand videos. Without it, videos show up as a text placeholder and everything else keeps working. Use `brew install ffmpeg` on macOS, `sudo apt install ffmpeg` on Debian/Ubuntu, or `sudo pacman -S ffmpeg` on Arch.
 
 ## 2. Prepare Telegram
 
-For every bot:
+For each bot:
 
-1. Create it with BotFather and retain the token.
-2. Disable group privacy in BotFather so the bot receives ordinary group messages.
-3. Add the bot to the target supergroup. Grant send permission if the group's restrictions require it.
-4. Obtain the supergroup's numeric ID. The wizard accepts bare positive, negative, or `-100...` forms and normalizes them.
+1. Create the bot with [BotFather](https://t.me/BotFather) and keep the token.
+2. Turn off **group privacy** in BotFather; otherwise the bot cannot see ordinary group messages.
+3. Add the bot to the target supergroup and make sure it may post.
+4. Find the group's numeric ID (`1234567890`, `-1234567890` and `-1001234567890` are all accepted).
 
-Never paste a token into the group, an issue, logs, or Git. Give every bot a distinct token environment-key name.
+A token is the bot's password: never post it in a group, an issue or Git.
 
-## 3. Prepare the Pi model
+## 3. Prepare a model
 
-In the project Pi session:
+In Pi:
 
-1. Run `/login` and complete Pi's native provider authentication.
-2. Run `/model` and select the default provider and chat model. The default media mode (`vision`) works with any chat model; image input is required only if you later opt into `media.mode: "context"`, which attaches photos, static stickers, and sampled video frames to the chat model's context directly and refuses to start with a text-only model (`image_input_unsupported`). The Telegram runtime uses reasoning `off` unless `telegram.config.ts` explicitly overrides it, even if the interactive Pi session uses another thinking level.
+1. `/login` to your model provider;
+2. `/model` to choose the default model.
 
-The Telegram project reads Pi's merged global/project model settings and Pi auth store. It does not copy model credentials into this repository. First setup uses `tools.search: false`, so a TinyFish key is not required.
+Model credentials stay in Pi and are never written to this repository. By default the main model does not need image input, because an optional helper vision model describes images. Only if you switch to `media.mode: "context"`, where the main model looks at images directly, must the model support image input.
 
 ## 4. Run `/tg config`
 
-`/tg config` remains available in Pi help and completion when configuration is missing or invalid. The daemon does not need to be running.
+The wizard first checks locally that the model is usable (without calling it), then asks for:
 
-Before opening input dialogs, the wizard locally preflights the displayed `provider/model:thinking` against Pi's catalog and authentication. It makes no model request. The wizard then asks for:
+1. a Chinese or English persona template;
+2. the group ID;
+3. the bot's local ID, display name, the name of its token in `.env`, and the BotFather token;
+4. a final confirmation.
 
-1. a Chinese or English public persona template;
-2. the Telegram supergroup ID;
-3. local bot ID, Telegram display name, token environment-key name, and BotFather token;
-4. final write confirmation.
+> Pi's input box does not mask passwords. Make sure you are not recording or sharing your screen when you paste the token.
 
-Pi's current native `input` dialog does not mask passwords. The BotFather token remains visible while entered. Use a private terminal and do not record or share the screen. The wizard never places it in notifications, process arguments, the Pi session, or provider context. Provider authentication stays in Pi and is never requested here.
+Pressing Esc at any step leaves no partial configuration. On confirmation it writes three files, all ignored by Git and readable only by you:
 
-Pressing Esc at any step leaves no partial deployment. After confirmation, the wizard atomically creates:
+| File | Content |
+|---|---|
+| `.env` | the bot token |
+| `telegram.config.ts` | group ID, bot, and the model you just confirmed; everything else uses defaults |
+| `personas/<bot-id>.local.md` | the bot's personality, which you can edit any time |
 
-- `.env`: the Telegram token, mode 0600, ignored by Git;
-- `telegram.config.ts`: Telegram deployment fields; the wizard pins the Pi provider/model it just preflighted and inherits the defaults — reasoning/search/`run_js`/vision off, media mode `vision`, bounded context/cache/retention — mode 0600, ignored by Git;
-- `personas/<bot-id>.local.md`: local persona, mode 0600, ignored by Git.
+## 5. Wait for ready
 
-## 5. Confirm readiness
+The wizard validates the configuration and restarts the daemon. The group view opens only after the daemon reports ready. Mention your bot in the group, or send `/help` to see the group commands.
 
-The wizard validates the complete deployment with the production loader, then invokes the controlled daemon restart. Pi opens the all-bots feed only when the command exits successfully and explicitly reports `daemon ready`.
-
-If Pi has no valid default model or authentication, the preflight stops before any dialog or write. Use Pi `/login` and `/model`, then run `/tg config` again.
-
-When Telegram credentials or networking prevent readiness, the validated files remain and the UI does not claim a connection. Run:
+If it does not become ready (usually a wrong token, no network, or the bot is not in the group), your configuration is kept. Run:
 
 ```text
 /tg status-daemon
 /tg restart
 ```
 
-Inspect the redacted tail of `data/daemon.log` when needed. Do not overwrite configuration repeatedly just to retry.
+If that does not help, check `data/daemon.log` or [Troubleshooting](troubleshooting.md). You do not need to enter the token again.
 
-## Existing configuration
+## Running it again
 
-Running `/tg config` again lets you:
+With an existing configuration, `/tg config` lets you validate it, edit `telegram.config.ts` directly in Pi's editor, back it up and replace it, or cancel. Replacing keeps the old files as `.bak-<random>`.
 
-- validate the current deployment;
-- edit the project-root `telegram.config.ts` source in Pi and retain an exact backup after confirmation;
-- explicitly back up and replace a default source;
-- cancel without changing a byte.
-
-Next: [Configuration and additional bots](configuration.md).
+Next: [Configuration and more bots](configuration.md).

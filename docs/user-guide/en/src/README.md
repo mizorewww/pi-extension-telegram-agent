@@ -2,27 +2,25 @@
 
 [中文指南](https://mizorewww.github.io/pi-extension-telegram-agent/zh/) · [Back to the project README](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/README.en.md)
 
-This guide is for operators and users. You can connect 1..N configurable AI companions to one Telegram supergroup and use Pi's native interface without first learning the internal architecture.
+Put one or more AI bots, each with its own personality, into your Telegram group. They run on your machine, answer when mentioned, sometimes join the conversation on their own, send stickers, and understand images and videos. You watch the group, speak as a bot and check usage from the Pi terminal on your machine.
 
 ## Shortest path
 
-1. Prepare the group ID and a BotFather token; authenticate and select the default model with Pi `/login` and `/model`.
-2. Run `bun run pi` from the repository.
-3. Run `/tg config` in Pi and wait for the all-bots feed to open.
+1. Create a bot with BotFather, turn off group privacy, and add it to your supergroup.
+2. Run `bun run pi` in the repository and pick a model with Pi's `/login` and `/model`.
+3. Run `/tg config` in Pi and follow the prompts; the group view opens when it finishes.
 
-Read in order:
+## Chapters
 
-- [Installation and first setup](getting-started.md): Telegram and Pi-model preparation plus the native wizard.
-- [Configuration and additional bots](configuration.md): typed config, secret boundaries, routing, and N-bot setup.
-- [Chat and observe in Pi](using-pi.md): attach, compose, history, and telemetry.
-- [Daily operations](operations.md): daemon lifecycle, configuration changes, backups, and multi-group isolation.
-- [Troubleshooting](troubleshooting.md): move from an observable symptom to a safe next action.
-- [Cost design overview](design-cost.md): how routing, cache, context, media, and UI avoid wasted calls and tokens.
+- [Installation and first setup](getting-started.md)
+- [Configuration and more bots](configuration.md)
+- [Chat and observe in Pi](using-pi.md)
+- [Daily operations and group commands](operations.md)
+- [Troubleshooting](troubleshooting.md)
+- [Why it is cheap](design-cost.md)
 
-## Product boundaries
+## Boundaries worth knowing
 
-- One deployment = one Telegram supergroup + 1..N bots.
-- Closing Pi does not stop the daemon. Telegram is the chat venue; Pi is the local observation and control interface.
-- Multiple groups require isolated working directories and all data/session/process resources.
-- `telegram.config.ts` is trusted executable local code, not a sandbox for downloaded configuration.
-- Tracked files contain no valid credentials or deployment personas; older Git history may still contain removed personas.
+- Closing Pi does not stop the bots. The conversation happens in Telegram; Pi is only a local window onto it.
+- One deployment serves one group. For a second group, use a separate clone.
+- `telegram.config.ts` is code that gets executed on your machine; only put your own content in it.
