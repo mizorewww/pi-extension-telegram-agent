@@ -34,6 +34,8 @@ WorkingDirectory=/home/<user>/pi-extension-telegram-agent
 # 每次（重）启动前轮转日志，与 CLI 一致（8 MiB × 3 代）
 ExecStartPre=/usr/bin/bun -e "import('./src/observability/log.ts').then((m) => m.rotateLogFile('data/daemon.log'))"
 ExecStart=/bin/sh -c 'exec /usr/bin/bun run src/daemon/index.ts >> data/daemon.log 2>&1'
+# 日志与 shell 新建的文件只对本用户可读
+UMask=0077
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
