@@ -251,8 +251,8 @@ export type BotControlConfigField = "routing_p" | "sampling_cooldown_ms";
 
 /**
  * Write one numeric bot control field through to the live config file, which stays the only
- * source of truth (the change survives restarts). Reuses the validated atomic replace: any
- * failure rolls the file back and throws.
+ * source of truth (the change survives restarts). The draft is validated before it replaces
+ * the file; runtime edits keep no backup copies.
  */
 export function updateBotConfigField(
 	rootDir: string,
@@ -263,7 +263,9 @@ export function updateBotConfigField(
 	const root = resolve(rootDir);
 	const { path, source } = readExistingConfigSource(root);
 	const edited = replaceBotFieldValue(source, botId, field, value);
-	return replaceExistingConfigSource(root, path, edited, { confirmed: true }).summary;
+	const summary = validateEditedConfigSource(root, path, edited);
+	installAtomically([{ path, contents: edited, mode: PRIVATE_MODE }], "backup-replace", false).finalize();
+	return summary;
 }
 
 /** One validated file replacement for the entire model selection; caller commits its runtime next. */
@@ -282,7 +284,7 @@ export function updateBotModelConfig(
 	}))
 		edited = replaceBotFieldValue(edited, botId, field, value);
 	validateEditedConfigSource(root, path, edited);
-	return installAtomically([{ path, contents: edited, mode: PRIVATE_MODE }], "backup-replace");
+	return installAtomically([{ path, contents: edited, mode: PRIVATE_MODE }], "backup-replace", false);
 }
 
 /**
@@ -324,67 +326,43 @@ function replaceBotFieldValue(source: string, botId: string, field: string, valu
 	return source.slice(0, start) + inserted + source.slice(end);
 }
 
-function installAtomically(files: InstallFile[], mode: OnboardingWriteMode): AtomicInstall {
-	const nonce = randomUUID();
+/** Write through a same-directory temporary file so readers never see a partial file. */
+function writeAtomic(path: string, contents: string | Buffer, mode: number): void {
+	mkdirSync(dirname(path), { recursive: true });
+	const temporary = join(dirname(path), `.${basename(path)}.tmp-${randomUUID()}`);
+	writeFileSync(temporary, contents, { flag: "wx", mode });
+	chmodSync(temporary, mode);
+	renameSync(temporary, path);
+}
+
+/** Replace every file or none; wizard flows keep a copy of each replaced original beside it. */
+function installAtomically(files: InstallFile[], mode: OnboardingWriteMode, keepBackups = true): AtomicInstall {
 	const existing = files.map((file) => file.path).filter((path) => existsSync(path));
-	if (mode === "create" && existing.length > 0) {
+	if (mode === "create" && existing.length > 0)
 		throw new OnboardingWriteError(
 			`existing files were preserved: ${existing.map((path) => basename(path)).join(", ")}`,
 		);
-	}
 	for (const path of existing) assertRegularFile(path);
-	const backups = existing.map((path) => ({ original: path, backup: `${path}.bak-${nonce}` }));
-	for (const { backup } of backups) {
-		if (existsSync(backup)) throw new OnboardingWriteError(`backup already exists: ${basename(backup)}`);
-	}
-	const staged = files.map((file) => ({
-		...file,
-		temporary: join(dirname(file.path), `.${basename(file.path)}.tmp-${nonce}`),
-	}));
-	for (const file of staged) {
-		if (existsSync(file.temporary))
-			throw new OnboardingWriteError(`temporary file already exists: ${basename(file.temporary)}`);
-		mkdirSync(dirname(file.path), { recursive: true });
-	}
-
-	const movedBackups: typeof backups = [];
-	const installed: string[] = [];
+	const originals = new Map(existing.map((path) => [path, readFileSync(path)]));
+	const nonce = randomUUID();
+	const backupPaths = keepBackups ? existing.map((path) => `${path}.bak-${nonce}`) : [];
+	const written: string[] = [];
 	let closed = false;
 	const rollback = () => {
 		if (closed) return;
-		const failures: string[] = [];
-		const attempt = (label: string, action: () => void) => {
-			try {
-				action();
-			} catch {
-				failures.push(label);
-			}
-		};
-		for (const path of [...installed].reverse()) attempt(basename(path), () => unlinkIfExists(path));
-		for (const { original, backup } of [...movedBackups].reverse()) {
-			attempt(basename(original), () => unlinkIfExists(original));
-			attempt(basename(backup), () => {
-				if (existsSync(backup)) renameSync(backup, original);
-			});
-		}
-		for (const file of staged) attempt(basename(file.temporary), () => unlinkIfExists(file.temporary));
 		closed = true;
-		if (failures.length > 0) {
-			throw new OnboardingWriteError(`automatic rollback was incomplete for: ${[...new Set(failures)].join(", ")}`);
+		for (const path of written.reverse()) {
+			const original = originals.get(path);
+			if (original) writeAtomic(path, original, PRIVATE_MODE);
+			else unlinkIfExists(path);
 		}
 	};
-
 	try {
-		for (const file of staged)
-			writeFileSync(file.temporary, file.contents, { encoding: "utf8", flag: "wx", mode: file.mode });
-		for (const item of backups) {
-			renameSync(item.original, item.backup);
-			movedBackups.push(item);
-		}
-		for (const file of staged) {
-			renameSync(file.temporary, file.path);
-			installed.push(file.path);
-			chmodSync(file.path, file.mode);
+		for (const [index, backup] of backupPaths.entries())
+			writeFileSync(backup, originals.get(existing[index]!)!, { flag: "wx", mode: PRIVATE_MODE });
+		for (const file of files) {
+			written.push(file.path);
+			writeAtomic(file.path, file.contents, file.mode);
 		}
 	} catch {
 		try {
@@ -396,9 +374,8 @@ function installAtomically(files: InstallFile[], mode: OnboardingWriteMode): Ato
 		}
 		throw new OnboardingWriteError("configuration write failed; original files were restored");
 	}
-
 	return {
-		backupPaths: backups.map(({ backup }) => backup),
+		backupPaths,
 		rollback,
 		finalize() {
 			closed = true;
