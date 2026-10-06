@@ -105,6 +105,7 @@ import {
 	type ContextFingerprintInput,
 } from "./context-fingerprint.ts";
 import { contextStateFromEntries } from "./context-state.ts";
+import { trimSessionBeforeCompaction } from "./session-trim.ts";
 import { parsePiModelReference, type PiRequestThinkingLevel } from "./model-ref.ts";
 import type { VideoTranscoderAvailability } from "../media/video-frames.ts";
 import { errorCategory, log } from "../observability/log.ts";
@@ -463,6 +464,14 @@ export class BotRuntime {
 			this.contextFingerprint,
 			manifest != null && existsSync(manifest.sessionFile),
 		);
+		if (canResume) {
+			try {
+				if (trimSessionBeforeCompaction(manifest!.sessionFile, sessionsDir, this.config.dataDir))
+					log.info("agent_runtime", "session_trimmed", { bot_id: this.bot.id });
+			} catch (error) {
+				log.warn("agent_runtime", "session_trim_failed", { bot_id: this.bot.id, category: errorCategory(error) });
+			}
+		}
 		const sessionManager = canResume
 			? SessionManager.open(manifest!.sessionFile, sessionsDir, this.config.dataDir)
 			: SessionManager.create(this.config.dataDir, sessionsDir);

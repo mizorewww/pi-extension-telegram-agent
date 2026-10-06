@@ -27,7 +27,7 @@ bun run scripts/e2e-compaction.ts --bot <id>   # 通过公开 control 入口压�
 | 文件 | 守护什么 |
 |---|---|
 | `cache.test.ts` | cache-visible 协议 golden：system prompt、tool schema 与顺序、event 序列化、摘要输入、extension 顺序；每批 sticker 附注作为独立〔系统附注〕消息紧跟该批且永久保留（请求严格前缀）；工具声明只写已开启的工具；摘要不含 thinking。 |
-| `context.test.ts` | fingerprint 变化或 session 文件缺失时不恢复；压缩切点计入图片；未发送的 assistant 文本不进入后续 context。 |
+| `context.test.ts` | fingerprint 变化或 session 文件缺失时不恢复；压缩切点计入图片；未发送的 assistant 文本不进入后续 context；裁剪 session 文件后 provider context 逐字节不变且可重复执行。 |
 | `runtime.test.ts` | 直接点名的回复义务：coalesce 不丢、失败 turn 保留且不记零用量、沉默只补答一次、结果未知不重发；真实 Pi 压缩在图片超预算时触发、失败 turn 不触发阈值摘要但保留 overflow 恢复。 |
 | `session-control.test.ts` | `/model` 与 `/new` 原子切换 session/epoch、失败不改旧状态、重启后恢复；变更类命令只允许人类管理员，命令消息不进 provider context。 |
 | `telegram.test.ts` | mention 优先于 reply；路由交接在 handler 失败并重启后仍送达；manual send 结果未知不重发；未配置 bot 的 cursor 不阻塞保留期清理。 |

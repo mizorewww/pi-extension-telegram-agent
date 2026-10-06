@@ -114,3 +114,29 @@ test("unpublished assistant prose is absent from the next context", () => {
 	expect((result as { content: unknown }).content).toEqual([{ type: "text", text: NO_SEND_MARKER }]);
 	expect(JSON.stringify(result)).not.toContain("private draft");
 });
+
+test("trimming a resumed session keeps Pi's provider context byte-identical", async () => {
+	const { mkdtempSync, readdirSync, rmSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const { trimSessionBeforeCompaction } = await import("../src/agent/session-trim.ts");
+	const dir = mkdtempSync(join(tmpdir(), "tg-trim-"));
+	try {
+		const manager = SessionManager.create(dir, dir);
+		manager.appendModelChange("p", "m");
+		manager.appendThinkingLevelChange("high");
+		const ids = Array.from({ length: 6 }, (_, i) =>
+			manager.appendMessage({ role: "user", content: `turn ${i}`, timestamp: i }),
+		);
+		manager.appendCompaction("summary", ids[3]!, 1000);
+		manager.appendMessage({ role: "user", content: "after", timestamp: 9 });
+		const file = manager.getSessionFile()!;
+		const before = JSON.stringify(SessionManager.open(file, dir, dir).buildSessionContext());
+		expect(trimSessionBeforeCompaction(file, dir, dir)).toBe(true);
+		expect(JSON.stringify(SessionManager.open(file, dir, dir).buildSessionContext())).toBe(before);
+		expect(trimSessionBeforeCompaction(file, dir, dir)).toBe(false);
+		expect(readdirSync(dir).filter((name) => name.includes(".pre-trim-"))).toHaveLength(1);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

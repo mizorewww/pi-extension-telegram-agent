@@ -47,6 +47,7 @@ Telegram create 不可回滚，所以：
 ## 上下文与压缩
 
 - 每 bot 一个 Pi session，打开前先算完整 context fingerprint；fingerprint 和 session 文件都匹配才恢复，否则保留旧文件、新建 session、推进 epoch。规则见 [cache.md](cache.md)。
+- Pi session 文件只增不减。恢复时 `src/agent/session-trim.ts` 把最近一次压缩保留窗口之前的内容裁掉（保留最后的 model / thinking 设置与 session id），只有 Pi 由新文件构建出的 context 与原文件逐字节相同才替换；原文件改名为 `.pre-trim-<时间>` 保留。
 - `bot_cursors`（业务消费位置，只增不减）与 `bot_visible_messages`（当前 context 真正可见的完整消息）分开维护。压缩或换 session 只替换后者。
 - 压缩由 Pi 原生触发（阈值 = `context_window − max(16384, context_window − compaction_threshold)`），摘要由 `tg-compaction` 用配置的 `compaction_model` 生成；失败或空摘要直接取消，不退回主模型、不退回 Pi 默认摘要器。
 - 图片在 session 里只存引用，Pi 的 chars/4 估算看不到它们。runtime 在 Pi 准备压缩**之前**按每张 1,100 token 临时缩小 `keepRecentTokens`，结束后恢复。
