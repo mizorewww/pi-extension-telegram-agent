@@ -12,7 +12,6 @@ import type {
 	ServerMessage,
 	TimelineCursor,
 	StatsSnapshot,
-	UsageRun,
 	VisionUpdate,
 	MediaReadyUpdate,
 	AgentStreamFrame,
@@ -211,9 +210,16 @@ export class IpcServer {
 		this.broadcastTo(item.kind === "evt" ? item.botId : null, { type: "append", item });
 	}
 
-	/** Push a live usage run (REQ-UI-0003 R2), honoring per-listener filters. */
-	broadcastUsage(run: UsageRun): void {
-		this.broadcastTo(run.botId, { type: "usage", run });
+	/** Push one bot's freshly aggregated stats; listeners never re-aggregate runs themselves. */
+	broadcastUsage(botId: string): void {
+		if (this.listenersFor(botId).length === 0) return;
+		const status = this.runtimeSnapshot(botId);
+		this.broadcastTo(botId, {
+			type: "usage",
+			botId,
+			stats: loadBotStats(this.db, botId),
+			...(status ? { status } : {}),
+		});
 	}
 
 	/** Push one shared media description to every live transcript (REQ-UI-0006). */
@@ -385,9 +391,7 @@ export class IpcServer {
 	/** Full-history cumulative stats per bot (REQ-UI-0003 R2/R3: daemon-side aggregation). */
 	private loadStats(filter: string | null): StatsSnapshot {
 		const bots = filter ? [filter] : [...this.botNames.keys()];
-		const out: StatsSnapshot = { lastId: 0, bots: {}, statuses: {} };
-		const maxId = this.db.query("SELECT COALESCE(MAX(id), 0) m FROM llm_runs").get() as { m: number };
-		out.lastId = maxId.m;
+		const out: StatsSnapshot = { bots: {}, statuses: {} };
 		for (const botId of bots) {
 			out.bots[botId] = loadBotStats(this.db, botId);
 			const status = this.runtimeSnapshot(botId);

@@ -55,7 +55,7 @@ import {
 	replyObligationCount,
 } from "../db/reply-obligations.ts";
 import type { RoutingTrigger, TriggerResult, TriggerSource } from "./router.ts";
-import type { AgentStreamFrame, RuntimeControlSnapshot, UsageRun } from "../ipc.ts";
+import type { AgentStreamFrame, RuntimeControlSnapshot } from "../ipc.ts";
 import { consumedControlMessageIds } from "../telegram/control-command.ts";
 import { classifyPiProviderFailure } from "./model-runtime.ts";
 import { providerRetryPolicy, guardProviderCall } from "./provider-guard.ts";
@@ -290,7 +290,6 @@ export class BotRuntime {
 	private pendingInputMetrics = emptyInputMetrics();
 	private providerCallsInRun = 0;
 	private lastLlmRunId: number | null = null;
-	private lastUsageRun: UsageRun | null = null;
 	private thinkingStartedAt = 0;
 	private thinkingMs = 0;
 	private thinkingFinished = false;
@@ -301,8 +300,8 @@ export class BotRuntime {
 	eventSink: ((event: { id: number; ts: number; kind: string; payload: unknown }) => void) | null = null;
 	/** Optional sink for messages this bot sent (poller echo dedupes them, so TUI needs this path). */
 	sentMessageSink: ((rawMsg: unknown) => void) | null = null;
-	/** Optional sink for llm_run telemetry (REQ-UI-0003: live usage push). */
-	usageSink: ((run: UsageRun) => void) | null = null;
+	/** Notified after each persisted llm_runs change so live views reload this bot's stats. */
+	usageSink: (() => void) | null = null;
 	/** Optional sink for newly persisted media descriptions (REQ-UI-0006). */
 	visionSink: VisionUpdateSink | null = null;
 	/** Bounded cache observer invoked only after successful compaction visibility commits. */
@@ -628,7 +627,6 @@ export class BotRuntime {
 					this.lastTurnFailed = false;
 					this.providerCallsInRun = 0;
 					this.lastLlmRunId = null;
-					this.lastUsageRun = null;
 					this.thinkingStartedAt = 0;
 					this.thinkingMs = 0;
 					this.thinkingFinished = false;
@@ -1879,8 +1877,6 @@ export class BotRuntime {
 						contextTokens,
 					)
 				: null;
-		const effectiveCacheRead = cacheReadEstimated ?? usage.cacheRead;
-		const effectiveCacheMiss = cacheReadEstimated == null ? usage.input : contextTokens - cacheReadEstimated;
 		this.lastLlmRunId = insertRow(this.db, "llm_runs", {
 			bot_id: this.bot.id,
 			ts: now,
@@ -1922,26 +1918,7 @@ export class BotRuntime {
 			thinking_ms: this.thinkingMs,
 		});
 		this.pendingInputMetrics = emptyInputMetrics();
-		const run: UsageRun = {
-			id: this.lastLlmRunId,
-			botId: this.bot.id,
-			ts: now,
-			model: this.bot.model,
-			epoch: this.epoch,
-			contextTokens,
-			cacheRead: effectiveCacheRead,
-			cacheWrite: usage.cacheWrite,
-			cacheMiss: effectiveCacheMiss,
-			cacheEstimated: cacheReadEstimated != null,
-			outputTokens: usage.output,
-			reasoningTokens,
-			latencyMs,
-			thinkingMs: this.thinkingMs,
-			contextBreakdown,
-			cost: usage.cost.total,
-		};
-		this.lastUsageRun = run;
-		this.usageSink?.(run);
+		this.usageSink?.();
 		this.thinkingMs = 0;
 		this.thinkingFinished = false;
 	}
@@ -1951,13 +1928,7 @@ export class BotRuntime {
 		this.db
 			.query("UPDATE llm_runs SET send_ms = send_ms + ?, send_samples = send_samples + 1 WHERE id = ?")
 			.run(Math.max(0, Math.round(durationMs)), this.lastLlmRunId);
-		if (!this.lastUsageRun || this.lastUsageRun.id !== this.lastLlmRunId) return;
-		this.lastUsageRun = {
-			...this.lastUsageRun,
-			sendMs: (this.lastUsageRun.sendMs ?? 0) + Math.max(0, Math.round(durationMs)),
-			sendSamples: (this.lastUsageRun.sendSamples ?? 0) + 1,
-		};
-		this.usageSink?.(this.lastUsageRun);
+		this.usageSink?.();
 	}
 
 	private recordCompactionUsage(
@@ -1994,22 +1965,7 @@ export class BotRuntime {
 			api: model.api,
 			cache_retention: "none",
 		});
-		this.usageSink?.({
-			id,
-			botId: this.bot.id,
-			ts: now,
-			model: model.id,
-			epoch: this.epoch,
-			contextTokens,
-			cacheRead: usage.cacheRead,
-			cacheWrite: usage.cacheWrite,
-			cacheMiss: usage.input,
-			outputTokens: usage.output,
-			reasoningTokens: usage.reasoning ?? 0,
-			latencyMs: null,
-			cost: usage.cost.total,
-			compaction: true,
-		});
+		this.usageSink?.();
 	}
 
 	async stop(): Promise<void> {

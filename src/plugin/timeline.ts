@@ -12,7 +12,6 @@ import {
 	type ServerMessage,
 	type TimelineCursor,
 	type TimelineItem,
-	type UsageRun,
 } from "../ipc.ts";
 
 const MEDIA_MAX_BYTES = 1024 * 1024;
@@ -113,67 +112,12 @@ function compareCursor(left: TimelineCursor, right: TimelineCursor): number {
 	return left.ts - right.ts || left.rank - right.rank || left.id - right.id;
 }
 
-function emptyBotStats(): BotStats {
-	return {
-		runs: 0,
-		contextTokens: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		cacheMiss: 0,
-		estimatedCacheRuns: 0,
-		outputTokens: 0,
-		speedOutputTokens: 0,
-		reasoningTokens: 0,
-		totalLatencyMs: 0,
-		latencySamples: 0,
-		totalThinkingMs: 0,
-		thinkingSamples: 0,
-		totalSendMs: 0,
-		sendSamples: 0,
-		firstRunTs: null,
-		cost: 0,
-		epoch: 0,
-		lastRunId: 0,
-		last: null,
-	};
-}
-
-/** Fold one live run into a bot's totals (docs/telemetry.md: compaction adds to totals, never replaces `last`). */
-function applyRun(stats: BotStats, run: UsageRun): void {
-	stats.runs++;
-	stats.contextTokens += run.contextTokens;
-	stats.cacheRead += run.cacheRead;
-	stats.cacheWrite += run.cacheWrite;
-	if (run.cacheEstimated) stats.estimatedCacheRuns++;
-	stats.cacheMiss += run.cacheMiss;
-	stats.outputTokens += run.outputTokens;
-	stats.reasoningTokens += run.reasoningTokens;
-	if (!run.compaction) {
-		stats.speedOutputTokens += run.outputTokens;
-		stats.totalThinkingMs += run.thinkingMs ?? 0;
-		stats.thinkingSamples++;
-		stats.last = run;
-	}
-	stats.totalSendMs += run.sendMs ?? 0;
-	stats.sendSamples += run.sendSamples ?? 0;
-	if (run.latencyMs != null) {
-		stats.totalLatencyMs += run.latencyMs;
-		stats.latencySamples++;
-	}
-	stats.cost += run.cost;
-	stats.epoch = Math.max(stats.epoch, run.epoch);
-	stats.lastRunId = Math.max(stats.lastRunId, run.id);
-	stats.firstRunTs = stats.firstRunTs == null ? run.ts : Math.min(stats.firstRunTs, run.ts);
-}
-
 /** IPC-only timeline client. Presentation belongs to the Pi extension. */
 export class TimelineClient {
 	private readonly seen = new Set<string>();
 	private readonly decoder = new FrameDecoder();
 	private stats: Record<string, BotStats> = {};
 	private statuses: Record<string, RuntimeControlSnapshot> = {};
-	/** Highest llm_runs.id already folded into `stats` (snapshot `lastId` or a later live run). */
-	private appliedMaxId = 0;
 	private readonly pendingSends = new Map<string, PendingSend>();
 	private readonly visionUpdates = new BoundedTtlMap<string>(MAX_MEDIA_UPDATES, MEDIA_UPDATE_TTL_MS);
 	private readonly mediaReadyUpdates = new BoundedTtlMap<string>(MAX_MEDIA_UPDATES, MEDIA_UPDATE_TTL_MS);
@@ -330,7 +274,6 @@ export class TimelineClient {
 			if (message.stats) {
 				this.stats = message.stats.bots;
 				this.statuses = message.stats.statuses;
-				this.appliedMaxId = message.stats.lastId;
 				this.emitStats();
 			}
 		} else if (message.type === "history") {
@@ -340,11 +283,8 @@ export class TimelineClient {
 		} else if (message.type === "append") {
 			this.emitFresh("append", [message.item]);
 		} else if (message.type === "usage") {
-			if (message.run.id <= this.appliedMaxId) return;
-			this.appliedMaxId = message.run.id;
-			const stats = { ...(this.stats[message.run.botId] ?? emptyBotStats()) };
-			applyRun(stats, message.run);
-			this.stats = { ...this.stats, [message.run.botId]: stats };
+			this.stats = { ...this.stats, [message.botId]: message.stats };
+			if (message.status) this.statuses = { ...this.statuses, [message.botId]: message.status };
 			this.emitStats();
 		} else if (message.type === "vision_update") {
 			const text = message.text.trim();

@@ -56,7 +56,7 @@ export interface TimelineCursor {
 	rank: 0 | 1;
 }
 
-/** One provider run's telemetry, pushed live and aggregated in snapshots (REQ-UI-0003). */
+/** One provider run's telemetry: the latest main-conversation run inside BotStats. */
 export interface UsageRun {
 	id: number; // llm_runs.id — dedupes snapshot/push races
 	botId: string;
@@ -130,9 +130,8 @@ export interface RuntimeControlSnapshot {
 	lastCompact: { at: number; outcome: "ok" | "failed" } | null;
 }
 
-/** Snapshot stats: lastId = max llm_runs.id included; pushes with id <= lastId are already inside. */
+/** Retention-window stats per bot plus the daemon's runtime truth. */
 export interface StatsSnapshot {
-	lastId: number;
 	bots: Record<string, BotStats>;
 	statuses: Record<string, RuntimeControlSnapshot>;
 }
@@ -230,7 +229,7 @@ export type ServerMessage =
 	| { type: "snapshot"; items: TimelineItem[]; stats?: StatsSnapshot }
 	| { type: "history"; items: TimelineItem[]; hasMore: boolean }
 	| { type: "append"; item: TimelineItem }
-	| { type: "usage"; run: UsageRun }
+	| { type: "usage"; botId: string; stats: BotStats; status?: RuntimeControlSnapshot }
 	| ({ type: "vision_update" } & VisionUpdate)
 	| ({ type: "media_ready" } & MediaReadyUpdate)
 	| { type: "agent_stream"; stream: AgentStreamFrame }

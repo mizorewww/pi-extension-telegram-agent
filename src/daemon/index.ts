@@ -225,7 +225,7 @@ for (const [botId, rt] of runtimes) {
 		const row = broadcastMessageRow(m.chat.id, m.message_id);
 		if (row) mediaCache.scheduleMessage(botId, row);
 	};
-	rt.usageSink = (run) => ipc.broadcastUsage(run);
+	rt.usageSink = () => ipc.broadcastUsage(botId);
 	rt.visionSink = (fileUniqueId, text) => ipc.broadcastVision({ fileUniqueId, text });
 	rt.mediaPruneSink = () => {
 		const result = pruneUnreferencedMediaCache(db, mediaDir, [...runtimes.keys()]);
