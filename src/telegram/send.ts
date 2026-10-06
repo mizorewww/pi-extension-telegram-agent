@@ -135,47 +135,37 @@ export async function sendTextAndPersist(
 	return { raw, canonical: await persistSentMessageWithRetry(db, botId, raw, "plain") };
 }
 
-/**
- * True only when Telegram has deterministically rejected the entity request before
- * creating a message. Unknown outcomes must never be retried as plain text.
- */
-function isDeterministicEntityRejection(error: unknown): error is TelegramApiError {
+const PARSE_REJECTIONS = ["can't parse", "cannot parse", "failed to parse", "parse error"];
+const ENTITY_REJECTIONS = [
+	...PARSE_REJECTIONS,
+	"message entit",
+	"entity offset",
+	"entity length",
+	"entities are not valid",
+];
+const RICH_REJECTIONS = [
+	...PARSE_REJECTIONS,
+	"unsupported start tag",
+	"rich message is not supported",
+	"rich messages are not supported",
+];
+
+/** A 400 whose description proves Telegram rejected the format before creating any message. */
+function isFormatRejection(error: unknown, phrases: readonly string[]): error is TelegramApiError {
 	if (!(error instanceof TelegramApiError) || error.kind !== "api" || error.code !== 400) return false;
 	const description = error.description.toLowerCase();
-	return (
-		description.includes("can't parse") ||
-		description.includes("cannot parse") ||
-		description.includes("failed to parse") ||
-		description.includes("parse error") ||
-		description.includes("message entity") ||
-		description.includes("message entities") ||
-		description.includes("entity offset") ||
-		description.includes("entity length") ||
-		description.includes("entities are not valid")
-	);
+	return phrases.some((phrase) => description.includes(phrase));
 }
 
-/** True only when Telegram proves the rich request was rejected before message creation. */
-export function isDeterministicRichRejection(error: unknown): error is TelegramApiError {
-	if (!(error instanceof TelegramApiError) || error.kind !== "api") return false;
-	const description = error.description.toLowerCase();
-	// Bot API answers 404 "Not Found" for a method it does not know (sendRichMessage predates
-	// some deployments' API version); that proves no message was created.
-	if (error.code === 404) {
+/** Rich rejection also covers a Bot API that does not know sendRichMessage (404 proves no create). */
+function isDeterministicRichRejection(error: unknown): error is TelegramApiError {
+	if (error instanceof TelegramApiError && error.kind === "api" && error.code === 404) {
+		const description = error.description.toLowerCase();
 		return (
 			description === "not found" || description.includes("method not found") || description.includes("sendrichmessage")
 		);
 	}
-	if (error.code !== 400) return false;
-	return (
-		description.includes("can't parse") ||
-		description.includes("cannot parse") ||
-		description.includes("failed to parse") ||
-		description.includes("parse error") ||
-		description.includes("unsupported start tag") ||
-		description.includes("rich message is not supported") ||
-		description.includes("rich messages are not supported")
-	);
+	return isFormatRejection(error, RICH_REJECTIONS);
 }
 
 /** Deterministic control rich text with one safe plain projection fallback. */
@@ -227,7 +217,7 @@ export async function sendMarkdownTextAndPersist(
 	try {
 		raw = await api.sendMessageWithEntities(chatId, formatted.text, formatted.entities, replyToMessageId);
 	} catch (error) {
-		if (!isDeterministicEntityRejection(error)) throw error;
+		if (!isFormatRejection(error, ENTITY_REJECTIONS)) throw error;
 		transport = "plain_fallback";
 		raw = await api.sendMessage(chatId, formatted.text, replyToMessageId);
 	}
