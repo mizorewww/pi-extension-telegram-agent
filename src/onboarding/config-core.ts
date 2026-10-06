@@ -247,7 +247,7 @@ export function replaceExistingConfigSource(
 	}
 }
 
-export type BotControlConfigField = "routing_p" | "sampling_cooldown_ms";
+export type BotControlConfigField = "routing_p" | "cooldown_ms";
 
 /**
  * Write one numeric bot control field through to the live config file, which stays the only
@@ -318,7 +318,7 @@ function replaceBotFieldValue(source: string, botId: string, field: string, valu
 	}
 	if (new RegExp(`^${indent}${field}:`, "m").test(block))
 		throw new OnboardingWriteError(`config field ${field} must be a scalar literal`);
-	// Field absent (e.g. bot-level sampling_cooldown_ms falling back to the global value):
+	// Field absent (e.g. bot-level cooldown_ms falling back to the global value):
 	// insert it right after the id line, matching its indent.
 	const lineEnd = block.indexOf("\n");
 	if (lineEnd < 0) throw new OnboardingWriteError(`config source is truncated after the id anchor for bot "${botId}"`);

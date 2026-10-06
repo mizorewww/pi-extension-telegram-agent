@@ -1061,7 +1061,7 @@ export class BotRuntime {
 			api: this.api,
 			botId: this.bot.id,
 			chatId: this.config.groupChatId,
-			emitMediaUpdates: this.config.media.mode === "vision",
+			emitMediaUpdates: this.config.media.mode !== "context",
 			visibleMessageIds: this.visibleMessageIds,
 			allowedReactions: this.allowedReactions,
 			triggerMessageId: this.currentTriggerMessageId,
@@ -1263,7 +1263,7 @@ export class BotRuntime {
 			this.config.media.mode === "context"
 				? {
 						refs: (fileUniqueId) => contextMediaRefs(this.db, fileUniqueId),
-						maxImages: this.config.media.maxImagesPerTurn,
+						maxImages: this.config.media.maxPerTurn,
 					}
 				: undefined,
 		);
@@ -1727,11 +1727,11 @@ export class BotRuntime {
 		batch: readonly MessageEvent[],
 		obligationIds: ReadonlySet<number>,
 	): Promise<void> {
-		if (this.config.media.maxImagesPerTurn <= 0) return;
-		const pending = pendingMediaIds(batch, obligationIds, this.config.media.maxImagesPerTurn, (id) =>
+		if (this.config.media.maxPerTurn <= 0) return;
+		const pending = pendingMediaIds(batch, obligationIds, this.config.media.maxPerTurn, (id) =>
 			Boolean(contextMediaRefs(this.db, id)),
 		);
-		await forEachConcurrent(pending, this.config.media.downloadConcurrency, async (fileUniqueId) => {
+		await forEachConcurrent(pending, this.config.media.concurrency, async (fileUniqueId) => {
 			try {
 				const prepared = await ensureContextMedia(this.db, this.api, this.bot.id, fileUniqueId, {
 					cacheDir: join(this.config.dataDir, "media"),
@@ -1750,12 +1750,12 @@ export class BotRuntime {
 
 	/** Lazy vision: bounded per turn, with direct-reply events ordered before ordinary catch-up. */
 	private async ensureBatchVision(batch: readonly MessageEvent[], obligationIds: ReadonlySet<number>): Promise<void> {
-		if (!this.config.vision.enabled || this.config.vision.foregroundMediaLimit <= 0) return;
+		if (this.config.media.mode !== "describe" || this.config.media.maxPerTurn <= 0) return;
 		const described = this.db.query("SELECT vision FROM media WHERE file_unique_id = ?");
 		const pending = pendingMediaIds(
 			batch,
 			obligationIds,
-			this.config.vision.foregroundMediaLimit,
+			this.config.media.maxPerTurn,
 			(id) => Boolean((described.get(id) as { vision: string | null } | null)?.vision),
 			true,
 		);
@@ -1919,7 +1919,7 @@ export class BotRuntime {
 	): void {
 		const contextTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 		if (contextTokens + usage.output + (usage.reasoning ?? 0) === 0 && usage.cost.total === 0) return;
-		const id = insertRow(this.db, "llm_runs", {
+		insertRow(this.db, "llm_runs", {
 			bot_id: this.bot.id,
 			ts: now,
 			model: model.id,

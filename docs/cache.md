@@ -59,7 +59,7 @@ tools:    send, search, run_js（按 bot 开关过滤，顺序不变）
 
 - 无 username 的发送者用稳定别名 `u<N>`（rowid 分配）。
 - 引用父消息优先用随消息保存的 `reply_snapshot`；父消息在同一新批次里时只写裸 `↪ #id`。
-- `media_update` 只出现在 vision 模式；context 模式的图片在消息首次打包时就位，或永远不出现。
+- `media_update` 只出现在 off / describe 模式；context 模式的图片在消息首次打包时就位，或永远不出现。
 
 ## Compaction
 

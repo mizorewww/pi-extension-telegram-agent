@@ -19,10 +19,7 @@ function reportAdvisory(): void {
 		const config = loadConfig(rootDir);
 		// Frame sampling matters whenever media reaches a model: vision descriptions or
 		// context-mode image blocks.
-		const advisory = videoTranscoderAdvisory(
-			config.vision.enabled || config.media.mode === "context",
-			inspectVideoTranscoder(),
-		);
+		const advisory = videoTranscoderAdvisory(config.media.mode !== "off", inspectVideoTranscoder());
 		if (advisory) console.warn(advisory);
 	} catch {
 		// Daemon startup owns config failures; an optional capability hint must never mask or block it.

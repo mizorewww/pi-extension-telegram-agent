@@ -145,7 +145,7 @@ function usageTelemetry(
 export function createPiVisionExecutor(runtime: VisionModelRuntime, modelRef: string): VisionExecutor {
 	const selection = parsePiModelReference(modelRef);
 	if (!selection) {
-		throw new Error("invalid auxiliary_visual_model; expected provider/model:effort");
+		throw new Error("invalid media.vision_model; expected provider/model:effort");
 	}
 	const model = runtime.getModel(selection.provider, selection.model);
 	const readinessFailure = !model ? "unknown_model" : !model.input.includes("image") ? "image_input_unsupported" : null;

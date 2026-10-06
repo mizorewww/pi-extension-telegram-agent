@@ -88,9 +88,9 @@ export async function main(args = process.argv.slice(2), rootDir = process.cwd()
 						},
 					];
 				}),
-				...(config.vision.enabled && config.media.mode === "vision"
+				...(config.media.mode === "describe"
 					? (() => {
-							const vision = parsePiModelReference(config.auxiliaryVisualModel)!;
+							const vision = parsePiModelReference(config.media.visionModel)!;
 							return [
 								{
 									bot_id: "vision",
@@ -122,7 +122,7 @@ export async function main(args = process.argv.slice(2), rootDir = process.cwd()
 			daemon: { pid, alive: pid != null && pidAlive(pid), socket: existsSync(join(config.dataDir, "daemon.sock")) },
 			modelReasoning,
 			videoTranscoder: {
-				required: config.vision.enabled || config.media.mode === "context",
+				required: config.media.mode !== "off",
 				...inspectVideoTranscoder(),
 			},
 		});

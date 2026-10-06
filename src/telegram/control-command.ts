@@ -390,12 +390,7 @@ export class TelegramControlCommandService {
 		const bot = this.bots.find((candidate) => candidate.id === botId);
 		if (!bot) return { text: `未知 bot：${bounded(botId)}`, outcome: "unknown_bot" };
 		try {
-			updateBotConfigField(
-				this.rootDir,
-				botId,
-				parameter === "routing_p" ? "routing_p" : "sampling_cooldown_ms",
-				value,
-			);
+			updateBotConfigField(this.rootDir, botId, parameter === "routing_p" ? "routing_p" : "cooldown_ms", value);
 		} catch (error) {
 			return {
 				text: boundedReply(`未修改：${error instanceof Error ? error.message : String(error)}`),
@@ -431,7 +426,7 @@ export class TelegramControlCommandService {
 	}
 
 	private isAdmin(sender: ControlSender): boolean {
-		return this.admins.some((admin) => (typeof admin === "number" ? admin === sender.id : admin === sender.username));
+		return sender.id != null && this.admins.includes(sender.id);
 	}
 
 	private consumeEveryRuntime(messageId: number): void {

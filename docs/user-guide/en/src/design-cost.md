@@ -8,7 +8,7 @@ This project does not promise a fixed saving: prices, group activity, persona le
 
 3. **Only what is needed per turn.** The full history stays in the local database; each turn sends a bounded batch of new messages (12,000 tokens by default), with direct mentions first. When the context reaches the threshold, a cheap summary model compacts it instead of letting it grow forever.
 
-4. **Media is processed once.** However many bots see an image or video, it is described (vision mode) or prepared (context mode) once and reused. Videos are reduced to 1–3 frames.
+4. **Media is processed once.** However many bots see an image or video, it is described (describe mode) or prepared (context mode) once and reused. Videos are reduced to 1–3 frames.
 
 5. **Bounded tool output.** A search returns at most five short results and a page at most about 2,000 tokens; links in the group are never opened automatically.
 

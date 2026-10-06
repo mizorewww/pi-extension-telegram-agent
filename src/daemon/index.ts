@@ -40,7 +40,7 @@ const config = loadConfig(rootDir);
 acquirePidLock(config.dataDir);
 const videoTranscoder = inspectVideoTranscoder();
 // Frame sampling matters in both media modes: vision descriptions and context-mode image blocks.
-const mediaNeedsFrames = config.vision.enabled || config.media.mode === "context";
+const mediaNeedsFrames = config.media.mode !== "off";
 if (mediaNeedsFrames && (!videoTranscoder.ffmpeg || !videoTranscoder.ffprobe)) {
 	log.warn("media_transcoder", "tools_unavailable", {
 		ffmpeg: videoTranscoder.ffmpeg,
@@ -54,8 +54,8 @@ if (mediaNeedsFrames && (!videoTranscoder.ffmpeg || !videoTranscoder.ffprobe)) {
 // loadConfig already canonicalizes model references (config.ts), so values from config always parse.
 // The auxiliary visual model is only used in vision mode (the default); context mode feeds
 // images to the chat model directly.
-const visionMode = config.media.mode === "vision";
-const visualModel = visionMode && config.vision.enabled ? parsePiModelReference(config.auxiliaryVisualModel)! : null;
+const visionMode = config.media.mode !== "context";
+const visualModel = config.media.mode === "describe" ? parsePiModelReference(config.media.visionModel)! : null;
 const chatModels = config.bots.map((bot) => ({
 	provider: bot.provider,
 	model: bot.model,
@@ -97,7 +97,7 @@ const { sharedModelRuntime, sharedVisionExecutor } = await (async () => {
 		throw error;
 	}
 })();
-const visionScheduler = visualModel ? new VisionScheduler(config.vision.concurrency) : null;
+const visionScheduler = visualModel ? new VisionScheduler(config.media.concurrency) : null;
 const db = openDb(config.dbPath);
 const mediaDir = join(config.dataDir, "media");
 const unconfiguredRows = pruneUnconfiguredBotState(

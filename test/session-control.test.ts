@@ -53,11 +53,9 @@ function fixture() {
 	model: "old",
 	reasoning_effort: "off",
 	compaction_model: "fixture/old:low",
-	auxiliary_visual_model: "fixture/old:low",
 	context_window: 65536,
 	media: { mode: "context" },
 	telegram_admins: [42],
-	tools: { send: true, search: false, run_js: false },
 	bots: [
 		{
 			id: "A", // primary bot

@@ -18,7 +18,8 @@ import {
 export const MIN_COMPACTION_RESERVE = 16_384;
 
 type CacheRetention = "none" | "short" | "long";
-type MediaMode = "vision" | "context";
+/** "off": placeholders only; "describe": a vision model describes media as text; "context": images go to the main model. */
+type MediaMode = "off" | "describe" | "context";
 
 /** Settings a bot inherits from the deployment level unless it overrides them. */
 interface SharedConfigInput {
@@ -30,8 +31,8 @@ interface SharedConfigInput {
 	cache_retention?: CacheRetention;
 	compaction_threshold?: number;
 	compaction_keep_recent?: number;
-	/** Probability-route cooldown after a completed turn. */
-	sampling_cooldown_ms?: number;
+	/** Pause after a spontaneous (probability) reply before the bot may join in again. */
+	cooldown_ms?: number;
 	/** Per-attempt provider timeout before the request is aborted and retried. */
 	provider_timeout_ms?: number;
 	/** Extra Pi attempts for retryable provider failures (0 disables automatic retries). */
@@ -60,15 +61,17 @@ export interface TelegramBotConfigInput extends SharedConfigInput {
 /** Trusted local deployment config. Secret values belong in .env, never here. */
 export interface TelegramConfigInput extends SharedConfigInput {
 	group_peer_id: string | number;
-	router_secret_env?: string;
-	db_path?: string;
-	tinyfish_key_env?: string;
-	/** Vision-mode task model: provider/model:effort. */
-	auxiliary_visual_model?: string;
-	/** Cap on the main model's effective context window; also caps compaction_threshold. */
+	/** Cap on the main model's effective context window; compaction_threshold defaults to half of it. */
 	context_window?: number;
-	media?: { mode?: MediaMode; max_images_per_turn?: number; download_concurrency?: number };
-	vision?: { enabled?: boolean; foreground_media_limit?: number; concurrency?: number };
+	media?: {
+		mode?: MediaMode;
+		/** "describe" only: the vision model as provider/model:effort. */
+		vision_model?: string;
+		/** Media per turn: described ("describe", default 2) or attached as images ("context", default 4). */
+		max_per_turn?: number;
+		/** Parallel media jobs: vision calls ("describe") or downloads/frame extraction ("context"). */
+		concurrency?: number;
+	};
 	telemetry_retention_days?: number;
 	raw_update_retention_days?: number;
 	message_event_retention_days?: number;
@@ -81,7 +84,8 @@ export function defineConfig<const T extends TelegramConfigInput>(config: T): T 
 	return config;
 }
 
-export type TelegramAdmin = number | `@${string}`;
+/** Numeric Telegram user id; usernames can change hands, ids cannot. */
+export type TelegramAdmin = number;
 
 export interface BotConfig {
 	id: string;
@@ -120,10 +124,8 @@ export interface AppConfig {
 	groupChatId: number;
 	bots: BotConfig[];
 	tinyfishApiKey: string;
-	auxiliaryVisualModel: string;
-	vision: { enabled: boolean; foregroundMediaLimit: number; concurrency: number };
 	contextWindow: number;
-	media: { mode: MediaMode; maxImagesPerTurn: number; downloadConcurrency: number };
+	media: { mode: MediaMode; visionModel: string; maxPerTurn: number; concurrency: number };
 	retention: RetentionConfig;
 	/** Generated and persisted by the daemon when absent. */
 	routerSecret: string | null;
@@ -175,7 +177,7 @@ const SHARED_RULES: Record<keyof SharedConfigInput, Rule> = {
 	cache_retention: oneOf("none", "short", "long"),
 	compaction_threshold: range(1, MAX),
 	compaction_keep_recent: range(1, MAX),
-	sampling_cooldown_ms: range(0, MAX),
+	cooldown_ms: range(0, MAX),
 	provider_timeout_ms: range(1_000, 3_600_000),
 	provider_retries: range(0, 5, true),
 	context_image_budget_bytes: range(100_000, 100_000_000),
@@ -184,21 +186,49 @@ const SHARED_RULES: Record<keyof SharedConfigInput, Rule> = {
 };
 const ROOT_RULES: Record<string, Rule> = {
 	...SHARED_RULES,
-	auxiliary_visual_model: modelRef,
 	context_window: range(MIN_COMPACTION_RESERVE * 2, 10_000_000, true),
 	telemetry_retention_days: range(1, 3650),
 	raw_update_retention_days: range(1, 3650),
 	message_event_retention_days: range(1, 3650),
 };
 const BOT_RULES: Record<string, Rule> = { ...SHARED_RULES, routing_p: range(0, 1) };
-const NESTED_RULES: Record<string, Record<string, Rule>> = {
-	media: {
-		mode: oneOf("vision", "context"),
-		max_images_per_turn: range(0, 16, true),
-		download_concurrency: range(1, 16, true),
-	},
-	vision: { enabled: boolean, foreground_media_limit: range(0, 16, true), concurrency: range(1, 16, true) },
+const MEDIA_RULES: Record<string, Rule> = {
+	mode: oneOf("off", "describe", "context"),
+	vision_model: modelRef,
+	max_per_turn: range(0, 16, true),
+	concurrency: range(1, 16, true),
 };
+const TOOL_RULES: Record<string, Rule> = { send: boolean, search: boolean, run_js: boolean };
+const ROOT_KEYS = new Set([...Object.keys(ROOT_RULES), "group_peer_id", "media", "telegram_admins", "bots"]);
+const BOT_KEYS = new Set([
+	...Object.keys(BOT_RULES),
+	"id",
+	"name",
+	"token_env",
+	"persona_path",
+	"tools",
+	"sticker_sets",
+]);
+/** Removed or renamed fields fail loudly with their replacement instead of being ignored. */
+const REPLACED_KEYS: Record<string, string> = {
+	sampling_cooldown_ms: "renamed to cooldown_ms",
+	auxiliary_visual_model: "moved to media.vision_model",
+	vision: 'merged into media: use media.mode "describe" with media.max_per_turn / media.concurrency',
+	db_path: "removed; the database is always data/agent.db",
+	router_secret_env: "removed; the .env key is always router_secret",
+	tinyfish_key_env: "removed; the .env key is always tiny_fish_api_key",
+	max_images_per_turn: "renamed to max_per_turn",
+	download_concurrency: "renamed to concurrency",
+};
+
+/** Reject keys a section does not define; a typo must never silently fall back to a default. */
+function checkKeys(errors: string[], at: string, source: Raw, known: ReadonlySet<string>): void {
+	for (const key of Object.keys(source)) {
+		if (known.has(key)) continue;
+		const hint = REPLACED_KEYS[key];
+		errors.push(`[config] ${at}${key}: ${hint ?? "unknown field"}`);
+	}
+}
 
 function checkFields(errors: string[], at: string, source: Raw, rules: Record<string, Rule>): void {
 	for (const [key, rule] of Object.entries(rules)) {
@@ -232,10 +262,7 @@ export function normalizePeerId(raw: string | number): number {
 }
 
 function normalizeTelegramAdmin(value: unknown): TelegramAdmin | null {
-	if (typeof value === "number") return Number.isSafeInteger(value) && value > 0 ? value : null;
-	if (typeof value !== "string") return null;
-	const username = value.trim().toLowerCase();
-	return /^@[a-z0-9_]{5,32}$/.test(username) ? (username as `@${string}`) : null;
+	return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 function resolvePath(rootDir: string, p: string): string {
@@ -273,11 +300,13 @@ function loadConfigSource(path: string): Raw {
 /** Shape and range checks that need no Pi state; secrets are only checked for presence. */
 function validate(rootDir: string, raw: Raw, env: Record<string, string>, identityOnly: boolean): string[] {
 	const errors: string[] = [];
+	checkKeys(errors, "", raw, ROOT_KEYS);
 	checkFields(errors, "", raw, ROOT_RULES);
-	for (const [key, rules] of Object.entries(NESTED_RULES)) {
-		if (raw[key] === undefined) continue;
-		if (isObject(raw[key])) checkFields(errors, `${key}.`, raw[key], rules);
-		else errors.push(`[config] ${key}: expected object`);
+	if (raw.media !== undefined) {
+		if (isObject(raw.media)) {
+			checkKeys(errors, "media.", raw.media, new Set(Object.keys(MEDIA_RULES)));
+			checkFields(errors, "media.", raw.media, MEDIA_RULES);
+		} else errors.push("[config] media: expected object");
 	}
 	if (raw.group_peer_id !== undefined && !Number.isFinite(normalizePeerId(String(raw.group_peer_id))))
 		errors.push(
@@ -285,13 +314,15 @@ function validate(rootDir: string, raw: Raw, env: Record<string, string>, identi
 		);
 	if (raw.telegram_admins !== undefined) {
 		if (!Array.isArray(raw.telegram_admins)) {
-			errors.push("[config] telegram_admins: expected an array of positive user ids or @usernames");
+			errors.push("[config] telegram_admins: expected an array of numeric Telegram user ids");
 		} else {
 			const seen = new Set<TelegramAdmin>();
 			raw.telegram_admins.forEach((value, index) => {
 				const admin = normalizeTelegramAdmin(value);
 				if (admin == null)
-					errors.push(`[config] telegram_admins[${index}]: expected a positive integer user id or @username`);
+					errors.push(
+						`[config] telegram_admins[${index}]: expected a numeric Telegram user id (usernames can change hands), got ${JSON.stringify(value)}`,
+					);
 				else if (seen.has(admin)) errors.push(`[config] telegram_admins[${index}]: duplicate identity ${admin}`);
 				else seen.add(admin);
 			});
@@ -307,6 +338,7 @@ function validate(rootDir: string, raw: Raw, env: Record<string, string>, identi
 			errors.push(`[config] ${at}: must be an object`);
 			return;
 		}
+		checkKeys(errors, `${at}.`, bot, BOT_KEYS);
 		checkFields(errors, `${at}.`, bot, BOT_RULES);
 		if (typeof bot.routing_p === "number" && Number.isFinite(bot.routing_p)) routingSum += bot.routing_p;
 		if (typeof bot.id !== "string" || !/^[A-Za-z0-9_-]+$/.test(bot.id)) {
@@ -326,9 +358,10 @@ function validate(rootDir: string, raw: Raw, env: Record<string, string>, identi
 				errors.push(`[config] ${at}.persona_path: file not readable: ${path}`);
 		}
 		if (bot.tools !== undefined) {
-			if (isObject(bot.tools))
-				checkFields(errors, `${at}.tools.`, bot.tools, { send: boolean, search: boolean, run_js: boolean });
-			else errors.push(`[config] ${at}.tools: expected object {send?, search?, run_js?}`);
+			if (isObject(bot.tools)) {
+				checkKeys(errors, `${at}.tools.`, bot.tools, new Set(Object.keys(TOOL_RULES)));
+				checkFields(errors, `${at}.tools.`, bot.tools, TOOL_RULES);
+			} else errors.push(`[config] ${at}.tools: expected object {send?, search?, run_js?}`);
 		}
 		if (
 			bot.sticker_sets !== undefined &&
@@ -385,7 +418,7 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 	const contextWindow = (raw.context_window as number | undefined) ?? 65_536;
 	const maxThreshold = contextWindow - MIN_COMPACTION_RESERVE;
 	const media = (raw.media ?? {}) as Raw;
-	const vision = (raw.vision ?? {}) as Raw;
+	const mediaMode = (media.mode as MediaMode | undefined) ?? "off";
 	const groupPeerId = normalizePeerId(String(raw.group_peer_id ?? ""));
 	if (!Number.isFinite(groupPeerId)) errors.push("[config] group_peer_id: required (bare positive peer id)");
 
@@ -401,7 +434,7 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 			errors.push(
 				`[config] bot "${id}" selects provider "${provider}" without a model; select both in config or Pi /model`,
 			);
-		const compactionThreshold = setting("compaction_threshold", 32_768);
+		const compactionThreshold = setting("compaction_threshold", Math.floor(contextWindow / 2));
 		if (compactionThreshold > maxThreshold)
 			errors.push(
 				`[config] bot "${id}" compaction_threshold ${compactionThreshold}: effective trigger is capped at ${maxThreshold} (context_window ${contextWindow} minus ${MIN_COMPACTION_RESERVE} reserve); use a value <= ${maxThreshold}`,
@@ -413,12 +446,12 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 			token: identityOnly ? "" : (env[bot.token_env as string] ?? ""),
 			personaPath: resolvePath(rootDir, bot.persona_path as string),
 			routingP: (bot.routing_p as number | undefined) ?? 0,
-			samplingCooldownMs: setting("sampling_cooldown_ms", 2000),
+			samplingCooldownMs: setting("cooldown_ms", 2000),
 			provider,
 			model,
 			reasoningEffort: setting<ThinkingLevel>("reasoning_effort", "off"),
 			compactionThreshold,
-			compactionKeepRecent: setting("compaction_keep_recent", 1),
+			compactionKeepRecent: setting("compaction_keep_recent", 20_000),
 			compactionModel: canonicalPiModelReference(setting("compaction_model", DEFAULT_COMPACTION_MODEL))!,
 			cacheRetention: setting<CacheRetention>("cache_retention", "short"),
 			contextImageBudgetBytes: setting("context_image_budget_bytes", 10_000_000),
@@ -430,42 +463,34 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 			stickerSets: [...((bot.sticker_sets as string[] | undefined) ?? [])],
 		};
 	});
-	const tinyfishKeyEnv = str(raw.tinyfish_key_env) ?? "tiny_fish_api_key";
-	const tinyfishApiKey = env[tinyfishKeyEnv] ?? "";
+	const tinyfishApiKey = env.tiny_fish_api_key ?? "";
 	if (!identityOnly && !tinyfishApiKey && bots.some((bot) => bot.tools.search))
-		errors.push(
-			`[config] tinyfish_key_env "${tinyfishKeyEnv}": env key "${tinyfishKeyEnv}" is empty or missing in .env`,
-		);
+		errors.push('[config] tools.search: needs "tiny_fish_api_key" in .env');
 	if (errors.length > 0) throw new ConfigError(errors);
 
 	const dataDir = join(rootDir, "data");
 	return {
 		dataDir,
-		dbPath: typeof raw.db_path === "string" ? resolvePath(rootDir, raw.db_path) : join(dataDir, "agent.db"),
+		dbPath: join(dataDir, "agent.db"),
 		groupPeerId,
 		groupChatId: Number(`-100${groupPeerId}`),
 		bots,
 		tinyfishApiKey,
-		auxiliaryVisualModel: canonicalPiModelReference(
-			(raw.auxiliary_visual_model as string | undefined) ?? DEFAULT_AUXILIARY_VISUAL_MODEL,
-		)!,
-		vision: {
-			enabled: vision.enabled === true,
-			foregroundMediaLimit: (vision.foreground_media_limit as number | undefined) ?? 2,
-			concurrency: (vision.concurrency as number | undefined) ?? 2,
-		},
 		contextWindow,
 		media: {
-			mode: media.mode === "context" ? "context" : "vision",
-			maxImagesPerTurn: (media.max_images_per_turn as number | undefined) ?? 4,
-			downloadConcurrency: (media.download_concurrency as number | undefined) ?? 2,
+			mode: mediaMode,
+			visionModel: canonicalPiModelReference(
+				(media.vision_model as string | undefined) ?? DEFAULT_AUXILIARY_VISUAL_MODEL,
+			)!,
+			maxPerTurn: (media.max_per_turn as number | undefined) ?? (mediaMode === "context" ? 4 : 2),
+			concurrency: (media.concurrency as number | undefined) ?? 2,
 		},
 		retention: {
 			telemetryDays: (raw.telemetry_retention_days as number | undefined) ?? 90,
 			rawUpdateDays: (raw.raw_update_retention_days as number | undefined) ?? 30,
 			messageEventDays: (raw.message_event_retention_days as number | undefined) ?? 365,
 		},
-		routerSecret: env[str(raw.router_secret_env) ?? "router_secret"] || null,
+		routerSecret: env.router_secret || null,
 		telegramAdmins: ((raw.telegram_admins as unknown[] | undefined) ?? []).map(
 			(value) => normalizeTelegramAdmin(value)!,
 		),

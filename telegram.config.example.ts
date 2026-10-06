@@ -1,6 +1,7 @@
-// The single config file for this project (non-secret). Secrets live in .env; this file
-// only names the .env keys. Apply changes with `bun run restart`; tuning from the group
-// chat (`/set routing_p 0.5`, admin only) writes back into this file.
+// The single config file for this project (non-secret). Secrets live in .env (`key: value`);
+// this file only names the .env key of each bot token. Apply changes with `bun run restart`;
+// admin group commands (`/set`, `/model`) write back into this file. Unknown or misspelled
+// fields are rejected at startup.
 import { defineConfig } from "./src/config.ts";
 
 export default defineConfig({
@@ -9,108 +10,82 @@ export default defineConfig({
 	// Target Telegram supergroup id. Bare, negative, and -100-prefixed forms are accepted.
 	group_peer_id: 1234567890,
 
-	// ===== Models (omit to inherit Pi's /login + /model defaults) =====
+	// ===== Models (omit provider/model to inherit Pi's /login + /model defaults) =====
 
 	provider: "openai-codex",
 	model: "gpt-5.6-luna",
-	// Thinking level: off / minimal / low / medium / high. Defaults to off.
-	// Non-off levels only take effect when the model is registered with reasoning: true
-	// in ~/.pi/agent/models.json — otherwise Pi clamps any level back to off.
+	// Thinking level. Defaults to off; must be a level the model supports (see Pi /model),
+	// otherwise startup fails instead of silently using another level.
 	reasoning_effort: "off",
-	// Provider prefix cache retention: none / short / long. "short" is the cheapest choice.
+	// Provider prompt cache retention: none / short / long.
 	cache_retention: "short",
-	// Model used for context compaction (provider/model:thinking). Runs rarely; pick a cheap one.
-	// A failed summary keeps the old context; it never falls back to the bot's main model.
+	// Cheap model that summarizes old context (provider/model:thinking). A failed summary keeps
+	// the old context; it never falls back to the bot's main model.
 	compaction_model: "openai-codex/gpt-5.6-luna:low",
-	// Vision model that describes images and sampled video frames for the chat model.
-	// Only used in the default media mode ("vision") when vision.enabled is true.
-	auxiliary_visual_model: "openai-codex/gpt-5.6-luna:low",
 
-	// ===== Local behavior (every field has a default; shown for visibility) =====
+	// ===== Context (every field has a default; shown for visibility) =====
 
-	// Cap on the main model's effective context window (clamps the Pi catalog value).
-	// compaction_threshold must stay <= context_window - 16_384 (Pi's response reserve).
+	// Most context the main model uses (also clamps the Pi catalog value).
 	context_window: 65_536,
-	compaction_threshold: 32_768, // compact early for underestimated CJK text and context images
-	compaction_keep_recent: 20_000, // token budget kept verbatim after compaction (1 token keeps nothing; ~20K ≈ 1-2 turns)
-	sampling_cooldown_ms: 2_000, // min interval between two unprompted replies per bot
-	// Per-attempt provider call timeout in ms: a wedged upstream (no response head or
-	// idle stream) aborts after this budget, then retries with exponential backoff
-	// (10s/20s/40s …, capped at 60s) up to `provider_retries` extra attempts. When the
-	// budget is exhausted the turn ends with an error instead of pinning the bot busy.
-	// Defaults: 300_000 / 2. Bot-level overrides accepted per bot.
+	// Summarize once the context passes this many tokens. Defaults to half of context_window
+	// and may be at most context_window - 16_384.
+	compaction_threshold: 32_768,
+	// Recent tokens kept verbatim after a summary (about 1-2 turns at 20K).
+	compaction_keep_recent: 20_000,
+	// Pause after a spontaneous reply before the same bot may join in again.
+	cooldown_ms: 2_000,
+	// Per-attempt provider timeout and extra retries (backoff 10s/20s/40s ...).
 	provider_timeout_ms: 300_000,
 	provider_retries: 2,
-	// Total on-disk bytes of context images that triggers an extra compaction. Images ship
-	// as base64 on every request, so this bounds transport size independently of tokens.
-	// Compaction charges each retained image ~1_100 tokens (measured against the production
-	// endpoint) toward compaction_keep_recent, so a 20K keep window holds at most ~15 images.
-	// Default: 10_000_000 (~50 resized photos ≈ 40 MB of base64 per request).
+	// Images in context are resent as base64 on every request; past this many bytes an extra
+	// summary is made.
 	context_image_budget_bytes: 10_000_000,
-	max_suffix_tokens: 12_000, // cap on new-message tokens attached per provider call
-	max_message_tokens: 4_096, // per-message token cap
+	max_suffix_tokens: 12_000, // new-message tokens per request
+	max_message_tokens: 4_096, // tokens per single message
 
-	// ===== Files and secret references =====
-
-	db_path: "data/agent.db", // SQLite location
-	// .env key for the routing HMAC secret (deterministic probability sampling).
-	// Auto-generated and persisted by the daemon when absent; usually no need to set it.
-	router_secret_env: "router_secret",
-	// .env key for the TinyFish search API key. Required only when a bot enables tools.search.
-	tinyfish_key_env: "tiny_fish_api_key",
-
-	// ===== Media handling: how images/videos reach a model =====
-	// mode "vision" (default): the auxiliary visual model describes each media item and the chat
-	//   model reads the text description. Works with any chat model; costs one extra model call
-	//   per new media item (cached per file, shared by all bots).
-	// mode "context": photos and static stickers are attached to the chat model directly as
-	//   images (~1.1K tokens each); videos (incl. video stickers and GIF animations) are sampled
-	//   into 1-3 frames. No vision-model call is made. The chat model must accept image input
-	//   (checked at startup). voice / audio / document / TGS animated stickers stay text
-	//   placeholders in both modes.
+	// ===== Media: how images and videos reach a model =====
+	// "off" (default): media are text placeholders such as [photo].
+	// "describe": vision_model describes each new image / video once as text (shared by all bots);
+	//   works with any chat model.
+	// "context": images and 1-3 video frames go to the main model directly; it must accept image
+	//   input (checked at startup). No vision model is called.
+	// Voice, audio, files and TGS animated stickers stay placeholders. Videos need ffmpeg.
 	media: {
-		mode: "vision", // "vision" (default) | "context" (main model must support image input)
-		max_images_per_turn: 4, // context mode: images attached per provider call
-		download_concurrency: 2, // context mode: parallel media downloads / frame extractions
+		mode: "off",
+		vision_model: "openai-codex/gpt-5.6-luna:low", // "describe" only
+		max_per_turn: 2, // media described ("describe", default 2) or attached ("context", default 4) per turn
+		concurrency: 2, // parallel vision calls or downloads / frame extractions
 	},
 
-	// ===== Vision mode only (off by default; bounded when on) =====
-	vision: {
-		enabled: false,
-		foreground_media_limit: 2, // media understood inline per bot turn
-		concurrency: 2, // deployment-wide vision work; includes full video pipelines
-	},
-
-	// ===== Retention in days (defaults: 90 / 30 / 365) =====
-	telemetry_retention_days: 90, // telemetry and cost records
+	// ===== Retention in days =====
+	telemetry_retention_days: 90, // usage and cost records
 	raw_update_retention_days: 30, // raw Telegram updates
 	message_event_retention_days: 365, // message events
 
-	// Admin Telegram usernames (@-prefixed). Only admins may use /compact and /set.
-	// Empty means the admin-only group commands are denied for everyone.
+	// Numeric Telegram user ids allowed to use /model, /new, /compact and /set (usernames can
+	// change hands, so they are not accepted). Empty denies those commands to everyone.
 	telegram_admins: [],
 
-	// ===== Bots: add one entry per bot; keep routing_p sum <= 1 =====
+	// ===== Bots: one entry per bot; routing_p across all bots must total <= 1 =====
+	// Any setting in the "Models" and "Context" sections above can also be overridden per bot.
 	bots: [
 		{
 			// Stable id for Pi commands, sessions, routing, and telemetry. Do not rename later.
 			id: "friend",
 			// Display name in the group; also the trigger word when addressed by name.
 			name: "Mochi",
-			// .env holds the token value; this is only the key name.
+			// .env key holding this bot's token.
 			token_env: "telegram_bot_token",
 			// Persona file. Copy a public template to an ignored local file before personalizing.
 			persona_path: "personas/template.en.md",
-			// Probability of joining an unaddressed human conversation.
-			// Direct replies and name mentions always route regardless of this value.
+			// Chance of joining an unaddressed human message; mentions, replies and the name always route.
 			routing_p: 0.1,
-			// Sticker sets baked into the system prompt; the bot sends them by short_id.
+			// Sticker sets baked into the system prompt; the bot sends them by short id.
 			sticker_sets: [],
 			tools: {
 				send: true,
-				// Enable only after adding tiny_fish_api_key to .env.
-				search: false,
-				run_js: true,
+				search: false, // needs tiny_fish_api_key in .env
+				run_js: false, // sandboxed calculation; off by default
 			},
 		},
 	],

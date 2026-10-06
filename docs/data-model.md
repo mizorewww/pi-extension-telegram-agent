@@ -37,7 +37,7 @@ SQLite（WAL），默认 `data/agent.db`，schema 在 `src/db/schema.sql`，启�
 
 ## 媒体、事件与遥测
 
-- `media`：`file_unique_id` 是共享身份；`short_id` 由 rowid 分配（不能用 COUNT+1）；`vision`（vision 模式描述 JSON）与 `context_files`（context 模式派生图片 `[{name, mime}]`）按身份持久化、跨 bot 复用；`local_path` 只存 `data/media` 下的文件名。
+- `media`：`file_unique_id` 是共享身份；`short_id` 由 rowid 分配（不能用 COUNT+1）；`vision`（describe 模式描述 JSON）与 `context_files`（context 模式派生图片 `[{name, mime}]`）按身份持久化、跨 bot 复用；`local_path` 只存 `data/media` 下的文件名。
 - `media_file_ids(bot_id, file_id, file_unique_id)`：bot 专属的可发送/可下载能力。
 - `aliases(chat_id, user_id) → u<N>`：无 username 发送者的稳定别名（rowid 分配）。
 - `agent_events`：只追加的本地行为流（assistant 文本、thinking、tool、send、错误、压缩、控制审计……）。一次 agent run 的原始事件带 `activity_id`，结束时另追加一条 `agent_activity` 作为 TUI 卡片。不存 token、prompt、完整 URL 或路径。

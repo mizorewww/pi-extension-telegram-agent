@@ -58,8 +58,9 @@ Telegram create 不可回滚，所以：
 
 `media.mode` 决定媒体怎么到达模型。两种模式下语音、音频、非视频文件、TGS 动画贴纸都只有文字占位（Pi 只支持 image 内容块）。视频（含视频贴纸、GIF、video note）都用 `ffprobe`/`ffmpeg` 抽 1–3 帧；缺少 FFmpeg 时视频在下载前跳过，只留占位，不阻塞 daemon。
 
-- **vision（默认）**：`vision.enabled: true` 时，辅助视觉模型为每个媒体生成一次文字描述，按 `file_unique_id` 持久化在 `media.vision` 并跨 bot 复用；描述作为 `media_update` delta 追加，主模型看到文字。每轮最多 `vision.foreground_media_limit` 个、全局并发 `vision.concurrency`。
-- **context（opt-in）**：不调用视觉模型，图片/抽帧直接作为 image block 交错进主模型上下文，派生文件记录在 `media.context_files`。每轮最多 `media.max_images_per_turn` 张，每张按 1,100 token 计入预算，超出降级为文字占位。主模型必须支持图片输入，否则启动失败（`image_input_unsupported`）。
+- **off（默认）**：只有文字占位。
+- **describe**：视觉模型（`media.vision_model`）为每个媒体生成一次文字描述，按 `file_unique_id` 持久化在 `media.vision` 并跨 bot 复用；描述作为 `media_update` delta 追加，主模型看到文字。每轮最多 `media.max_per_turn` 个、全局并发 `media.concurrency`。
+- **context（opt-in）**：不调用视觉模型，图片/抽帧直接作为 image block 交错进主模型上下文，派生文件记录在 `media.context_files`。每轮最多 `media.max_per_turn` 张，每张按 1,100 token 计入预算，超出降级为文字占位。主模型必须支持图片输入，否则启动失败（`image_input_unsupported`）。
 - 下载严格把 `file_id` 与拥有它的那个 bot 的 Bot API 配对；回复 bot 没有 mapping 时可用其他已配置 bot 的。
 - 本地文件是可再生缓存：成功压缩后，所有已配置 bot 都不再引用（不可见、无待回复、无未消费 event）的文件按 ≤256 个一批删除；媒体行、描述、short id 与 file mapping 保留。
 
@@ -86,7 +87,7 @@ Telegram create 不可回滚，所以：
 
 ## Telegram 控制命令
 
-- 只识别 offset 0 的 `bot_command` entity：`/help`、`/status` 公开；`/model`、`/compact`、`/new`、`/set` 需要 `telegram_admins` 中的人类账号。带 `@bot_username` 时定向到该 bot，否则作用于收到命令的 bot。
+- 只识别 offset 0 的 `bot_command` entity：`/help`、`/status` 公开；`/model`、`/compact`、`/new`、`/set` 需要 `telegram_admins` 中的人类账号（只接受数字 user id）。带 `@bot_username` 时定向到该 bot，否则作用于收到命令的 bot。
 - 命令和回复的 message id 永久记录在 `telegram_control_messages`，**永不进入任何 provider context**。变更类命令串行执行，不 abort 在途回复；bot busy 时返回“请稍后”。
 - `/model`：按钮分页列出 Pi 当前已认证的全部模型；`/new`：用当前模型开新 session。两者共用同一个 session 切换：先建好新 session，再在一个事务里写 epoch、manifest、清空可见集，失败时旧 session 原样保留；旧 session 文件留在磁盘。
 - `/set routing_p|cooldown_ms` 校验后写穿 `telegram.config.ts` 并更新内存中的同一 `BotConfig`。
@@ -102,7 +103,7 @@ Telegram create 不可回滚，所以：
 
 ## 进程管理与配置
 
-- 配置只有 `telegram.config.ts`（受信本机代码，`defineConfig()` 提供类型）+ `.env`（`key: value`，只放项目自己的 secret）+ Pi auth store（模型凭据）。校验一次收集全部错误。
+- 配置只有 `telegram.config.ts`（受信本机代码，`defineConfig()` 提供类型）+ `.env`（`key: value`，只放项目自己的 secret：bot token、`tiny_fish_api_key`、可选 `router_secret`）+ Pi auth store（模型凭据）。校验一次收集全部错误，未知或已废弃的字段直接报错并提示替代写法。
 - daemon 启动最早一步用 `openSync(wx)` 独占 pid 文件；存活但无法确认身份的 pid 一律视为占用，绝不让两个 daemon 轮询同一 token。身份校验：Linux 读 `/proc/<pid>/cmdline` 与 `cwd`，macOS 用 `ps` + `lsof`，支持路径含空格。
 - CLI `restart` 会停掉本 deployment 的 pid owner 和孤儿进程，等 PID、pid 文件、socket 全部消失后才启动新进程；新 socket 能真实连接才算 ready。生产推荐 systemd user unit（见 [runbook](runbooks/daemon.md)）。
 - 一个工作目录只对应一个群：`data/`、DB、session、pid、socket 都由工作目录决定。多群必须用隔离的 clone。

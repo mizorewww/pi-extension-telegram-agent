@@ -58,7 +58,7 @@ bun run debug -- --bot A --show-provider-content   # 敏感，见下
 1. `messages.media` 与 `media_file_ids`：哪个 bot 拥有可用的 `file_id`。
 2. `media.local_path` 与 `media_cache_ready/skip/error`：本地文件是否就绪（不代表已送入模型）。
 3. 视频先看 `video_transcoder`；`video_probe_failed` / `video_frame_extraction_failed` 是本地抽帧失败。
-4. vision 模式：`agent_events.kind=vision` 的 outcome，非空 `media.vision` 与对应 `media_update` event。context 模式：非空 `media.context_files`，以及 `llm_runs.images_attached` 与 `context_packed`。
+4. describe 模式：`agent_events.kind=vision` 的 outcome，非空 `media.vision` 与对应 `media_update` event。context 模式：非空 `media.context_files`，以及 `llm_runs.images_attached` 与 `context_packed`。
 5. 压缩后的 `media_cache.post_compaction_pruned` 只给聚合数字。
 
 ## 日志契约

@@ -100,7 +100,7 @@ bot 的上下文被带偏（例如反复纠结某个误解）时，管理员在�
 | Telegram 409 | 同一 token 被另一个进程轮询；确认只有一个 daemon（systemd 与手动 start 不要并存） |
 | 401 / 404 | token 被撤销或错误：修正 `.env` 后重启；daemon 会整体退出而不是留下半个进程 |
 | 数据库报 “predates the current schema” | 旧库不迁移：停 daemon，把 `data/agent.db*` 移到别处，重启从空库开始 |
-| 群内命令报“权限不足” | 检查发送者 numeric user id 或 `@username` 是否在 `telegram_admins` |
+| 群内命令报“权限不足” | 检查发送者的数字 user id 是否在 `telegram_admins` |
 | 手动发送提示结果未知 | 先在群里确认是否已出现，再决定是否重发 |
 
 ## 真实环境验证（opt-in）

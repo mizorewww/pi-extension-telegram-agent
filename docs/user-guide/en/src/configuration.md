@@ -50,7 +50,7 @@ Each bot has its own token, personality, session and statistics. They share the 
 ## When a bot replies
 
 - **Always**: when someone @mentions it, replies to its message, or writes its `name`.
-- **Sometimes**: an ordinary message goes to one bot with probability `routing_p` (all bots together may not exceed 1). If the chosen bot is busy or cooling down (`sampling_cooldown_ms`, default 2000), the message is skipped rather than handed to another bot; a chosen bot may still decide to stay quiet.
+- **Sometimes**: an ordinary message goes to one bot with probability `routing_p` (all bots together may not exceed 1). If the chosen bot is busy or cooling down (`cooldown_ms`, default 2000), the message is skipped rather than handed to another bot; a chosen bot may still decide to stay quiet.
 - `routing_p: 0` only turns off spontaneous replies; mentions still work.
 - Messages from bots never trigger other bots.
 
@@ -70,7 +70,7 @@ tools: { send: true, search: false, run_js: false }
 
 - `send`: post in the group, send stickers, add reactions. Turn it off for a bot that only watches.
 - `search`: search the web or read one public page (TinyFish). Requires `tiny_fish_api_key` in `.env`. Links in the group are not opened automatically, and private network addresses are refused.
-- `run_js`: run small JavaScript snippets in a sandbox for exact calculations. The sandbox still has residual risk, so it is off by default.
+- `run_js`: run small JavaScript snippets in a sandbox for exact calculations; off by default. On Linux with bubblewrap (`bwrap`) installed, the code runs confined and cannot see project files or the network; install it before enabling.
 
 ## Images and videos
 
@@ -78,26 +78,29 @@ tools: { send: true, search: false, run_js: false }
 
 | Mode | How | Requirement |
 |---|---|---|
-| `"vision"` (default) | with `vision.enabled: true`, a helper vision model (`auxiliary_visual_model`) describes each image or video as text, shared by all bots | none for the main model |
-| `"context"` | images and video frames go straight to the main model without a vision model; at most `media.max_images_per_turn` (default 4) per request | the main model must accept image input |
+| `"off"` (default) | media show up as text placeholders such as `[photo]` | none |
+| `"describe"` | a vision model (`media.vision_model`) describes each new image or video once as text, shared by all bots | none for the main model |
+| `"context"` | images and video frames go straight to the main model; no vision model is called | the main model must accept image input |
 
-Voice, audio, ordinary files and TGS animated stickers are text placeholders in both modes. Videos require FFmpeg on the host.
+`media.max_per_turn` caps media handled per turn (2 by default for describe, 4 for context) and `media.concurrency` caps parallel jobs (default 2). Voice, audio, ordinary files and TGS animated stickers are placeholders in every mode. Videos require FFmpeg on the host.
 
 ## Limits and defaults
 
 | Field | Default | Purpose |
 |---|---|---|
 | `context_window` | 65,536 | the most context the main model uses |
-| `compaction_threshold` | 32,768 | context beyond this is summarized (at most `context_window − 16,384`) |
-| `compaction_keep_recent` | 1 | recent tokens kept verbatim after a summary; 1 keeps only the summary and the last turn, 20,000 is recommended for group chats |
+| `compaction_threshold` | half of `context_window` | context beyond this is summarized (at most `context_window − 16,384`) |
+| `compaction_keep_recent` | 20,000 | recent tokens kept verbatim after a summary (about 1–2 turns) |
 | `max_suffix_tokens` / `max_message_tokens` | 12,000 / 4,096 | caps on new messages per turn and on one message |
 | `context_image_budget_bytes` | 10,000,000 | an extra summary is made when images in context exceed this many bytes |
 | `provider_timeout_ms` / `provider_retries` | 300,000 / 2 | per-request timeout and automatic retries |
 | `cache_retention` | `"short"` | provider prompt cache retention |
 | `telemetry_retention_days` etc. | 90 / 30 / 365 | days to keep usage, raw updates and message events |
-| `telegram_admins` | empty | who may use admin commands in the group (numeric user id or `@username`) |
+| `telegram_admins` | empty | numeric user ids of people who may use admin commands (usernames are not accepted because they can change hands) |
 
-Most of these can also be overridden per bot.
+Most of these can also be overridden per bot. Misspelled or retired fields fail at startup with a hint about what to write instead.
+
+Don't know your numeric user id? Message [@userinfobot](https://t.me/userinfobot) privately.
 
 After you change the model, personality, tools, media mode or other settings that affect what the model sees, each bot starts a new session on restart (the old session file is kept). This is expected.
 
