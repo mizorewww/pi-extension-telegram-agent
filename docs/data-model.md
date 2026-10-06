@@ -19,7 +19,6 @@
 ### telegram_control_messages
 
 - `(chat_id, message_id)` 主键，永久保存 control command/reply 的排除身份，与 telemetry 保留期独立。
-- 启动迁移一次性从历史 `agent_events` 的 control claim/reply 回填现存身份，并记录 `control_identity_migrated`；后续读写只有本表。此前已被 retention 删除的身份无法凭空恢复。
 
 ### messages
 

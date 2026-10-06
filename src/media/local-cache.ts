@@ -168,10 +168,6 @@ export function isDisplayReadyPath(path: string | null): boolean {
 	return isReadyPath(path, staticMediaMimeForPath, MEDIA_CACHE_MAX_BYTES);
 }
 
-export function isSourceReadyPath(path: string | null): boolean {
-	return isReadyPath(path, sourceMediaMimeForPath, MEDIA_DOWNLOAD_MAX_BYTES);
-}
-
 /** Resolve a cache-relative source filename inside this deployment's media directory. */
 export function resolveMediaSourcePath(cacheDir: string, storedPath: string | null): string | null {
 	if (!storedPath || storedPath.includes("\0")) return null;
@@ -184,38 +180,6 @@ export function resolveMediaSourcePath(cacheDir: string, storedPath: string | nu
 export function resolveMediaCachePath(cacheDir: string, storedPath: string | null): string | null {
 	const sourcePath = resolveMediaSourcePath(cacheDir, storedPath);
 	return sourcePath && staticMediaMimeForPath(sourcePath) ? sourcePath : null;
-}
-
-/**
- * Canonicalize legacy absolute cache paths after a checkout/deployment move. Existing files are
- * addressed by basename inside the configured cache directory; missing/unsupported entries are
- * cleared so the bounded display-media queue can acquire them again.
- */
-export function reconcileMediaCachePaths(db: Database, cacheDir: string): { migrated: number; invalidated: number } {
-	const rows = db.query("SELECT file_unique_id, local_path FROM media WHERE local_path IS NOT NULL").all() as {
-		file_unique_id: string;
-		local_path: string;
-	}[];
-	let migrated = 0;
-	let invalidated = 0;
-	const update = db.query("UPDATE media SET local_path = ? WHERE file_unique_id = ?");
-	const reconcile = db.transaction(() => {
-		for (const row of rows) {
-			const resolved = resolveMediaSourcePath(cacheDir, row.local_path);
-			if (resolved && isSourceReadyPath(resolved)) {
-				const canonical = basename(resolved);
-				if (row.local_path !== canonical) {
-					update.run(canonical, row.file_unique_id);
-					migrated++;
-				}
-				continue;
-			}
-			update.run(null, row.file_unique_id);
-			invalidated++;
-		}
-	});
-	reconcile();
-	return { migrated, invalidated };
 }
 
 function readExisting(path: string): { bytes: Uint8Array; mimeType: SourceMediaMime; sourceExtension: string } | null {

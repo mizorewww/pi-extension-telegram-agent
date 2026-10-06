@@ -24,7 +24,6 @@ import { parsePiModelReference } from "../agent/model-ref.ts";
 import { assertPiVisionExecutorReady, createPiVisionExecutor } from "../media/vision.ts";
 import { VisionScheduler } from "../media/vision-scheduler.ts";
 import { MediaCacheQueue } from "../media/media-cache.ts";
-import { reconcileMediaCachePaths } from "../media/local-cache.ts";
 import { composeDeployment, composePollers } from "./composition.ts";
 import type { IngestResult } from "../telegram/ingest.ts";
 import { claimRoutingDecision, finishRoutingClaim } from "../db/routing-claims.ts";
@@ -101,10 +100,6 @@ const { sharedModelRuntime, sharedVisionExecutor } = await (async () => {
 const visionScheduler = visualModel ? new VisionScheduler(config.vision.concurrency) : null;
 const db = openDb(config.dbPath);
 const mediaDir = join(config.dataDir, "media");
-const mediaPathReconciliation = reconcileMediaCachePaths(db, mediaDir);
-if (mediaPathReconciliation.migrated > 0 || mediaPathReconciliation.invalidated > 0) {
-	log.info("media_cache", "paths_reconciled", mediaPathReconciliation);
-}
 const unconfiguredRows = pruneUnconfiguredBotState(
 	db,
 	config.bots.map((bot) => bot.id),
