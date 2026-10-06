@@ -1,208 +1,85 @@
 # Cache 工程
 
-本文是 provider context、cache identity 与 compaction 的当前权威说明。
+provider prefix cache 是本项目的第一成本杠杆。本文是“哪些字节对 provider 可见、怎样改它们”的唯一权威。
 
 ## Invariants
 
-1. 稳定 prefix 的首字节始终来自共享群聊协议，之后才是 persona；固定顺序的 tool name、description 与 parameter schema 属于同一 cache cohort。
-2. Telegram 消息正文只能以新的结构化 session entry 追加，不得改写；recent sticker candidates是唯一例外，它不属于正文——持久化 content 永不携带候选，候选只存于 structured details，由 context 投影在每请求时挂到当前最后一批消息后（compaction 直接读持久化字节，因此永远看不到候选）。context 模式下媒体的图片块随消息事件一同首次写入，此后同样不可变。
-3. `messages` 是 UI/canonical 最新读模型；provider 只消费不可变 `message_events`。edit、metadata enrichment 与 vision 模式的 vision completion（`media_update`）都追加 delta；context 模式的媒体没有事后 delta——图片在事件首次打包时就位或永远缺席。
-4. 已消费位置与当前可见性分离：`bot_cursors.consumed_seq` 只单调前进，`bot_visible_messages` 可在成功 compaction 或 session 轮换时替换。
-5. 只有完整 context fingerprint 相同且 manifest 指向的 session 文件存在时才恢复 session。cache-visible 身份改变必须在 restore 前创建新 session/context epoch。
-6. UI、IPC、日志、operator command 与本地媒体准备不得改变 provider payload。
-7. provider 输入和工具输出必须有界；不能把 raw update、Rich Message JSON 或无界历史塞入 context。sticker catalog 以 ≤`STICKER_CATALOG_MAX` 条 `s<id>: <emoji> <描述>` 行固定进 prefix；最近上下文候选最多 8 条，只经 context 投影追加在当前最后一批消息后，每请求重建、只出现一次。
+1. **永不改写已发出的 prefix**，新信息只作为新 suffix 追加。
+2. system prompt 顺序固定：共享群聊协议 → persona → sticker 目录。tool 的 name/description/schema 及顺序固定。
+3. Telegram 内容只以新的结构化 session entry 追加；已写入 session 的字节不重算。edit、reply metadata、vision 描述都作为 delta 追加（`message_edit` / `message_metadata` / `media_update`）。
+4. 唯一的每请求动态尾部是 sticker 候选：只存在 `details.stickerCandidates`，由 `context` 事件投影成紧跟最后一批消息的〔系统附注〕独立消息，**永不写入持久化 content**（compaction 直接读持久化字节）。
+5. 只有完整 context fingerprint 相同且 session 文件存在时才恢复 session；否则在打开旧 session **之前**新建 session、推进 epoch，旧文件保留。
+6. UI、IPC、日志、控制命令、本地媒体准备都不得改变 provider payload。
+7. 所有 provider 输入有界：每轮 suffix 默认 ≤12,000 token，单条消息 ≤4,096 token，网页正文 ≤2,048 token，sticker 候选 ≤8 条。
 
-## CACHE_SCHEMA_VERSION
+## 哪些东西是 cache-visible
 
-当前：**25**。
+- 共享协议、persona 及其顺序（`src/agent/prompt.ts`）；
+- tool name/description/schema 与顺序（`src/agent/tools.ts`）；
+- Telegram 序列化 grammar（`src/agent/serialize.ts`）、context details 版本、sticker 候选 grammar；
+- 摘要 prompt 与摘要输入 envelope、所选 compaction model；
+- extension 顺序、`[no_send]` 持久化策略、每轮固定的触发消息与补答提示；
+- provider/api/model/reasoning/cache retention、Pi 版本、`media.mode`、该 bot 的 sticker 目录快照。
 
-v25：最近上下文 sticker 候选不再拼在最后一批消息正文末尾，而是作为紧随其后的独立 `telegram_sticker_candidates` 投影消息，以「〔系统附注〕」开头；群聊协议说明附注由系统附加、群成员不可见。原因：拼接时模型把候选读成最后发言者粘贴的内容（2026-10 生产事故）。同时摘要输入去掉 assistant thinking，摘要 prompt 要求只记录群消息中实际出现的内容。上一批 context 消息在下一轮不再变化，前缀可多复用一段。
+以上全部进入 `src/agent/context-fingerprint.ts` 的 fingerprint。
 
-v24：Telegram 的嵌入父消息正文作为 `reply_snapshot` 随当前消息及不可变 event 保存，包含 text/caption 或 Rich Message 的 plain projection；旧 event 仍可按主键读取本地父消息。引用不再只显示 40 字，selected quote 不再只显示 60 字，两者与当前正文共同受单 event 和 suffix token 预算约束，超长内容保留首尾及截断标记。只有同一新 batch 内已提供的父消息才省略重复正文，防止 `prompt()` preflight 压缩旧窗口后只剩 ID。父消息不会作为新消息入库或路由；不额外调用模型，不回写已持久化的 provider prefix。serializer 升为 v5，更新 event grammar golden；重启按 fingerprint 创建新 epoch，旧 session 保留。
+## 改动 cache-visible 内容的流程
 
-v23：Telegram turn 经 `session.prompt()` 原生 preflight 启动，`before_agent_start` 注入本轮 `telegram_context_v2`，保证第一次请求已包含完整 system/persona/tools。Pi 0.86 的 `sendCustomMessage(triggerTurn)` 绕过该 preflight，冷启动首轮会遗漏 prompt；不再使用这个入口。每轮增加一条固定短触发消息 `Process the new Telegram context.`，单独锁定 golden；群消息、摘要、工具 grammar 不变，不增加模型调用次数。触发消息在持久历史中只追加，前缀不回写；异常时清理尚未提交的本轮引用，避免污染下一次请求。新 epoch 不恢复旧的缺失前缀。
+1. bump `src/agent/prompt.ts` 的 `CACHE_SCHEMA_VERSION`，在下方“版本记录”加一行理由；
+2. 跑 `bun test test/cache.test.ts`，确认失败的正是你预期改变的那几项 golden，再更新 expected；
+3. 部署后每个 bot 会新建 session（新 epoch），首个请求冷缓存，旧 session 文件保留。
 
-v22：Pi 四包同步升级到 0.86.0，provider stream 改用 Pi 原生 normalized transcript（system prompt 与 tools 从 system message 读取），满足 Devin/SWE-2 扩展的最低 SDK 要求。项目 system/tools/消息/摘要 grammar 的 golden hash 不变；SDK provider boundary 改变，因此保守轮换 epoch，保留旧 session，首次请求冷缓存。daemon 和 smoke 明确关闭 Pi 新增的 `cacheWarming`，不产生后台预热请求。
-
-v21：send 工具新增可选 `reaction` 参数，经 Bot API `setMessageReaction` 在 `reply_to` 消息上点一个固定枚举内的 reaction emoji（本地白名单 preflight，VS16 规范化），作为不必回复时的表态通道。reaction 不是消息 create：幂等、best-effort——reaction-only 失败直接抛回模型安全重试，已提交消息后的 reaction 失败只记 `reaction_failed` 事件、不降级 send 结果；reaction-only 成功不产生 sent id，因此不算 direct-address 的公开回应（v20 补答与 obligation 语义不变）。send 的 name/description/parameter schema 与共享协议能力声明同步更新（system/tools golden 变化），消息/摘要序列化 grammar 不变。升级会为每个 bot 创建新 epoch，旧 session 文件保留，首次请求冷缓存。
-
-v20：明确寻址但没有公开发送的健康 turn 最多追加一次固定补答 suffix，仍未发送则保留待办。新增补答指令 golden，主聊天 system/tools/消息序列化 hash 不变。
-
-v19：支持 image 输入的 compaction model 接收待丢弃消息中按原位置交错的图片；不支持时仍只传文字，缺失文件与未传图片以脱敏计数记录。摘要请求超出模型窗口的保守估算时，在 provider 调用前拒绝，不写入残缺摘要。图片计量移到 Pi preparation 之前，Pi 继续拥有合法切点、split-turn 与原生阈值触发。新增摘要 envelope golden，主聊天 system/tools/消息序列化 hash 不变。各次升级均按既有 fingerprint 规则创建新 session/epoch，保留旧 session，不改写旧 prefix；首次请求冷缓存。
-
-v18 修复压缩输入遗漏：摘要同时接收 Pi 的 `messagesToSummarize` 与被丢弃的 `turnPrefixMessages`，不再遗漏拆分 turn 的前半段。图片压力改由原生 compaction 临时缩小保留窗口，不删除共享文件来改变 provider 内容。system/tools/序列化 grammar 的 golden hash 不变；由于摘要输入语义改变，保守开启新 epoch，旧 session 文件保留，首次请求会有一次冷缓存。
-
-v17 收敛 sticker 的模型可见文本并关闭 context 模式的描述注入。消息行 sticker 占位删掉 ` set:<集合名>` 元数据（serializer v4：有描述 `[sticker 😺: 描述]`，无描述 `[sticker 😺]`，emoji 也缺时 `[sticker]`；图片块或描述已紧随其后，集合名是纯噪音）。sticker 目录块与近期上下文候选统一为 `s<id>: <emoji> <描述>` 行：目录头部精简为 `# Sticker 目录`（发送规则由 send 工具 description 承载），候选头部改为 `可发 sticker（近期上下文）：`，描述沿用持久化 vision 文本（`media.vision` JSON 的 `text`，空白压缩、≤60 字符），缺失时逐级降级为 `s<id>: <emoji>`、`s<id>`；set 名与 format 不再出现在任何模型可见文本；send 工具 sticker 参数描述里的候选块引用同步为新名（tools golden 随 v17 更新）。catalog snapshot hash 纳入描述文本，描述落地即开新 epoch。context 模式不再产生任何 `media_update` 事件：live 路径本就只在 vision 模式运行，旧 vision 缓存的 ingest 回放与 bot 自发 sticker 的持久化路径改为按模式 gate；已持久化的历史事件字节不变，vision 模式行为完全不变。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
-
-v16 引入双媒体模式（`media.mode: "vision"` 默认 / `"context"` opt-in）：共享协议的媒体占位符一行改为同时覆盖两种形态（vision 模式占位符内联持久化文字描述 / context 模式占位符之后紧跟该媒体的实际图片），context fingerprint 新增 `mediaMode`——切换模式即开启新 context epoch，旧 session 不跨模式 resume。上下文扩展 details 升级 v4 新增 `blocks`（text|image 交错，供 context 模式投影 image 内容块；vision 模式 resolver 不接线，投影保持纯字符串）。vision 模式的 provider grammar 不变：message segment 仍 pin `resolveVision:false`，描述仍以 `media_update` delta 追加，event serializer hash 不变。图片只随新 event 追加进 suffix，不改写已有 prefix。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
-
-v15 在共享协议末尾增加「可用工具」声明（search / run_js / send 三个工具及被问能力时的如实回答规则），修复模型对自身工具能力不自知、被问"能不能搜索/查资料/看网页"时误答的问题。trade-off：声明是双 bot 共享 prefix 的一部分，若某 bot 关闭工具开关（如 `tools.search: false`），需同步评估此声明是否仍成立——它假设三个工具都可用，与 per-bot 开关配置存在潜在不一致，会破坏共享 prefix 假设。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
-
-v14 修复引用历史消息的可见性：可见集 walker 不再信任 compaction entry 携带的 `visibleMessageIds`（那是同一 walker 算出的累积并集，clear 永远清不干净），只从 compaction 边界后的活跃窗口内 custom_message 并集恢复可见集；引用渲染对纯媒体父消息输出媒体占位（`[图片]`/`[sticker 😺]`/`[video]` 等，事件日志路径 `resolveVision:false` 不触发 vision 表 live lookup），父消息缺失时追加 `(原消息不可见)` 标记。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
-
-v13 把最近 sticker 候选从每个历史 Telegram entry 的永久正文拆为结构化字段；context 投影只在最后一个 Telegram batch 后追加一次候选，因此历史形态从 `msg1+candidates, msg2+candidates, msg3+candidates` 变为 `msg1, msg2, msg3+candidates`。这会让相邻请求从上一轮候选位置分叉，但把候选总量从随turn线性增长降为恒定最多8条；对当前缺少provider cache usage的deployment，选择显著更小的64K输入。主模型有效窗口同时固定为64K，Pi估算32K时触发compaction，压缩后按 `compaction_keep_recent` token 预算保留近期原文。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
-
-v12 修正 custom Telegram message 的 compaction 输入：严格按 Pi 官方流程先调用 `convertToLlm()`，再把 provider messages 交给 `serializeConversation()`。旧实现用 cast 绕过类型并直接序列化 `AgentMessage[]`，可能让 Telegram context 在摘要输入中消失。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
-
-v11 给固定 catalog 与最近上下文 sticker 候选增加 `static` / `animated` / `video` 格式，并明确 `send.sticker` 支持三种格式。格式来自 Telegram `is_animated` / `is_video`，以 MIME metadata 持久化；catalog fingerprint 包含它。升级会为每个 bot 创建新 epoch，旧 session 文件保留。
-
-v10 恢复一个更窄的动态 sticker 能力：从当前 bot generation 真正可见的消息中选最近 8 个不同的用户 sticker，只保留该 bot 有 `file_id` mapping、因而可发送的 identity，并把 short_id、emoji 与有界描述追加到本轮 `telegram_context_v2` provider text 的最末尾。它不扫描全库做语义 top-K，也不改写任何已持久 entry；候选块若超出本轮 suffix budget 就整体省略。`send.sticker` 的 tool description 同步接受固定目录或最新候选块中的 short_id。
-
-v9 合并以下有意的 provider-visible 变化：固定 sticker catalog 以 identity-only 形式（set + emoji + short_id，不含 vision 文本）固化进 system prompt、删除每轮 top-K 检索 suffix 与 catalog vision 回填，shared protocol 去掉双 bot 硬编码假设，send/search/run_js description 打磨。fingerprint 的 catalog snapshot 同步改为只 hash identity 字段，异步 vision 回填不再令前缀失效。
-
-v8 合并以下有意的 provider-visible 变化：共享 protocol 置于 persona 前、`telegram_context_v2` 结构化消息、immutable edit/metadata/media delta、动态 sticker top-K，以及 unpublished assistant prose 的 `[no_send]` 持久化策略。
-
-cache-visible protocol 包括：
-
-- shared protocol 与 persona 的内容及顺序；
-- tool name、description、parameter schema 与顺序；
-- Telegram serializer、最近上下文 sticker 候选 grammar 与 custom-message details 版本；
-- compaction prompt、details 与所选 compaction model；
-- extension 顺序和 assistant persistence policy；
-- provider/api/model/reasoning/cache retention；
-- Pi 版本及当前 bot 的 sticker catalog identity snapshot。
-
-`CACHE_SCHEMA_VERSION` 是 fingerprint 中的强制失效字段，不是恢复 session 后再补记的一项 telemetry。任何上述内容变化都必须先 bump version、更新本文件与 golden；runtime 在打开旧 session **之前**计算 fingerprint，不匹配时保留旧文件、创建新 session 并推进 epoch。
-
-## Schema history
-
-每次 bump 的一句话理由（追溯细节见 git 历史）：
-
-- v1：初始 cache grammar——日期分隔 / `#id` / `@username` / `↪` 引用 / 媒体占位的确定性消息序列化，persona + 共享 protocol 固定结构。
-- v2：sticker 目录块首次进入 system prompt。
-- v3：sticker 候选按 bot 可发送性隔离，prefix 移除当前 bot 不可发送的目录项。
-- v4：tool/persona/system 稳定 prefix 修订——send 成功 ACK 固定为 `ok`、persona 去除与 protocol 重复的 send 教程、toolsHash 覆盖 description。
-- v5：send tool description 切换为 Rich Markdown 发送。
-- v6：search 工具 schema 增加 `url` 字段与说明（page fetch）。
-- v7：send 改为确定性 Markdown → text/entities 转换，message 参数增加 4096 code points 约束。
-- v8：共享 protocol 前置到 persona 之前、`telegram_context_v2` 结构化消息、immutable edit/metadata/media delta、动态 sticker top-K 候选、`[no_send]` 持久化策略。
-- v9：固定 sticker catalog 以 identity-only 形式固化进 system prompt，删除每轮 top-K suffix 与 catalog vision 回填，protocol 去双 bot 硬编码，tool description 打磨（详见上文）。
-- v10：恢复当前可见上下文中最近 8 个、该 bot 可发送的用户 sticker，作为本轮消息后的最终动态 suffix；更新 send tool description。
-- v11：固定 catalog、最近候选与 send tool description 显式标注 static / animated / video sticker。
-- v12：compaction 先用 Pi `convertToLlm` 投影 custom Telegram messages，再序列化 summary 输入。
-- v13：recent sticker candidates只投影在最后一个Telegram batch；主模型有效窗口固定64K并在Pi估算32K时压缩到摘要+最后turn。
-- v14：引用渲染对纯媒体父消息输出媒体占位、父消息缺失追加 `(原消息不可见)`；可见集 walker 不再从 compaction entry 的 `visibleMessageIds` 重灌（详见上文）。
-- v15：共享协议末尾增加可用工具声明（search / run_js / send 及被问能力时的如实回答规则），修复模型能力自知缺失；trade-off 见上文（per-bot 工具开关与共享 prefix 假设的潜在不一致）。
-- v16：双媒体模式——共享协议占位符行同时覆盖 vision 描述与 context 内联图片，fingerprint 新增 `mediaMode`，details v4 新增 `blocks`；vision 模式 grammar 不变（详见上文）。
-- v17：sticker 占位删 ` set:` 元数据（serializer v4）；目录/候选统一 `s<id>: <emoji> <描述>` 行，set 名与 format 退出模型可见文本，描述纳入 catalog fingerprint；context 模式不再产生 `media_update`（详见上文）。同期修复（非 schema 变更，provider payload 字节不变）：候选块不再焊入持久化 content——v13 把候选移进投影层后，`sendCustomMessage` 的 content 仍携带候选副本，每轮一块累计驻留并被 compaction 原样读入；现持久化 content 为纯消息字节，候选只经投影到达 provider。
-- v21：send 工具新增可选 `reaction` 参数（Telegram `setMessageReaction`，落在 `reply_to` 消息上，固定 reaction emoji 白名单 preflight）；工具 schema 与共享协议能力声明更新（详见上文）。
+golden 意外失败是报警：先查原因，不要直接改 expected。
 
 ## Provider payload 结构
 
 ```text
-system: SHARED_PROTOCOL + separator + persona [+ separator + sticker catalog（s<id>: <emoji> <描述> 行）]
-messages: structured Telegram projections + assistant/tool/summary entries; recent-context sticker candidates only follow the last Telegram projection
-tools: [{ name, description, parameters }] in fixed order
+system:   共享协议 --- persona [--- sticker 目录]
+messages: Telegram 批次（custom message）、assistant/tool/summary entries；
+          〔系统附注〕sticker 候选只跟在最后一批 Telegram 消息之后
+tools:    send, search, run_js（按 bot 开关过滤，顺序不变）
 ```
 
-- context 模式下 Telegram projection 内部是 text|image 交错内容块：每个事件一段文本，媒体事件的图片块紧跟其文本段；vision 模式或无图片的 entry 投影为纯字符串，与历史字节一致（details v4 `blocks`）。
-- `src/agent/prompt.ts` 拥有 shared protocol/persona 组装。
-- `src/agent/tools.ts` 是 provider-facing 工具参数、调用、错误和终止语义的唯一权威；persona 不复制工具参数表。
-- `src/agent/extensions/context.ts` 从 `telegram_context_v2.details.providerText/blocks/stickerCandidates` 投影 provider 内容；旧 entry 只投影消息正文，候选只跟在当前最后一个 Telegram entry 后。恢复 cursor/visible ids 只读 structured details，绝不解析渲染文本。
-- `send` 成功后 provider 只看到有界 ACK 与 sent message ids；本地发送详情继续写 SQLite/event。
-- 未通过 `send` 发布的 assistant prose 写入本地 `agent_events`，session 中用固定 `[no_send]` 代替；thinking/tool protocol entry 保留。
+- context 模式下一批消息内部是 text|image 交错的内容块；没有图片时投影为纯字符串。
+- send 成功后模型只看到固定 ACK（`ok sent_message_ids=#…` 或 `no_retry`），发送详情只留本地。
+- 没调 send 的 assistant 文本在 session 里替换为 `[no_send]`。
 
-## Telegram 消息 grammar（serializer v2）
+## Telegram 消息 grammar
 
 ```text
 --- 2026-08-07 ---
 [17:31:42] #18452 Alice (@alice · tag:admin): 文本
 [17:31:55] #18453 Bob (u17) ↪ #18452: 文本
-[17:31:56] #18454 Bob (u17) ↪ #18455 @alice [图片]: 看这个
+[17:31:56] #18454 Bob (u17) ↪ #18455 @alice "被回复的正文": 看这个 [图片]
 [17:31:57] #18456 Bob (u17) ↪ #999999 (原消息不可见): 这个看不到
 [message_edit #18453] 修改后的文本
 [message_metadata #18453] ↪ #18452
 [media_update #18453] [图片: 新的视觉描述]
 ```
 
-`media_update` 行只出现在 vision 模式（描述持久化后追加的 delta）；context 模式没有独立 delta 事件，媒体事件首次追加时占位符文本段之后即紧跟该媒体的 image 内容块（准备好时）。
+- 无 username 的发送者用稳定别名 `u<N>`（rowid 分配）。
+- 引用父消息优先用随消息保存的 `reply_snapshot`；父消息在同一新批次里时只写裸 `↪ #id`。
+- `media_update` 只出现在 vision 模式；context 模式的图片在消息首次打包时就位，或永远不出现。
 
-- message event 保留原有日期、时间、sender、reply、quote、forward 与媒体占位符语义。
-- 引用父消息优先使用当前 event 的 `reply_snapshot`，旧 event 可读取本地父消息；输出 `↪ #id @who "正文"`。纯媒体父消息输出媒体占位（`[图片]`/`[sticker 😺]`/`[video]` 等，事件路径禁用 vision live lookup）。两种来源都缺失时追加 `(原消息不可见)`；Telegram 的跨群 `external_reply` 不提供原文时，只能展示随消息提供的 selected quote。
-- runtime 只对同一新 batch 中已提供的父消息保留裸 `↪ #id`，不依赖可能被 prompt preflight 压缩掉的旧可见集。edit/metadata delta 同样带引用正文。引用快照本身不将父消息 ID 标为完整可见，也不增加媒体下载或模型调用。
-- message/event bytes 一旦写入 session 就不重算；后续变化使用 `edit`、`metadata`、`media_update`（vision 模式）delta。
-- `telegram_context_v2.details` 同时保存 `consumedSeq`、本 entry 的 event refs、`visibleMessageIds`、固定消息 projection 与独立 sticker candidates。
-- session 写入成功或启动 reconcile 能从 structured details 证明写入后，SQLite cursor 才前进。provider 失败不会靠文本猜测状态。
+## Compaction
 
-## 有界 suffix 与 sticker catalog
+- 摘要输入 = Pi 的 `messagesToSummarize` + `turnPrefixMessages`，经 `convertToLlm` + `serializeConversation`；去掉 assistant thinking（推测不能变成“事实”）。摘要 prompt 要求只记录群消息里实际出现的内容。
+- 摘要模型支持图片时，待丢弃的图片按原位置一起发送；不支持时只发文字。输入保守估算超过摘要模型窗口则不调用、取消压缩。图片总字节超预算时只缩小这次摘要请求里的图片（Pi `resizeImage`），持久文件不动。
+- 摘要请求 `cacheRetention: "none"`。成功后替换可见集合、推进 epoch；cursor 不回退。
 
-- runtime 每轮最多索引读取 256 条近期 event，并额外读取最多 64 条 direct-address obligation event；不扫描整张 `messages` 表。
-- direct-address obligation 优先打包；普通 event 从最新端选择后恢复时间顺序。默认 suffix 上限 12,000 tokens，单 event 正文上限 4,096 tokens，当前正文、父消息正文与 selected quote 共享此预算；短文本优先保全，长文本保留首尾及截断标记。最终 suffix 计入 sender、引用等格式开销，并为输出、reasoning 与 tool follow-up 预留空间。
-- 普通溢出 event 可以被 cursor 消费但不标 visible；direct-address obligation 只有在结构化 commit marker 证明交付后才删除。
-- sticker catalog 在启动时同步进 DB 后以 `s<id>: <emoji> <描述>` 行（描述为持久化 vision 文本，缺失时逐级降级为 `s<id>: <emoji>`、`s<id>`；按 set 名 + rowid 排序，set 名本身不渲染）固化在 system prompt 尾部；prefix 由配置 + DB catalog 唯一决定，重启间稳定。catalog identity 或描述变化通过 fingerprint snapshot 开新 epoch。
-- runtime 另从 `bot_visible_messages` 与本轮新打包消息的并集取最近 8 个不同的用户 sticker；只保留当前 bot 有 mapping 的项。候选只存于 structured details，持久化 content 是纯消息字节；provider projection 从所有旧 Telegram entry 移除候选，只在当前最后一批消息后追加一次；预算不足时不追加。
-- page fetch 先受 8,000 字符本地护栏约束，再受 2,048 provider tokens 上限约束；query 与工具失败输出同样有界。
+## 遥测
 
-## 媒体模式与 provider boundary
+`tg-cache-observer` 在 `before_provider_request` 对 payload 分段（system / tools / 每条 message / 完整 payload）计算 deployment 本地 HMAC，记录相对上一请求的首个分叉位置，并按形状估算 system/tools/摘要/messages 的 token 占比。不保存明文。
 
-`media.mode` 选择媒体到达模型的方式：`"vision"`（默认）由辅助视觉模型把媒体描述成文字，`"context"`（opt-in）把图片作为 image 内容块直接交给主模型。两种模式下 voice、audio、非视频 document 与 TGS 动态贴纸都只有文本占位——Pi 1.0.4 只支持 image 内容块，这是硬限制；视频都靠 `ffmpeg`/`ffprobe` 抽帧，缺失时视频在 Telegram 下载前即降级/跳过，不占主对话 token、不阻塞 daemon ready，CLI/operator log/debug 提示安装用途，群内上下文不增加提示文字。
+provider 没有返回 cache 用量时，若相邻两次请求的 system、tools 相同且上一次的 message hash 列表是这一次的严格前缀，就把上一次的 prompt token 记为 `cache_read_estimated`，界面用 `≈` 标出。这是结构上可复用的量，不是 provider 实际命中，也不改写原始 usage 与费用。字段口径见 [telemetry.md](telemetry.md)。
 
-### Vision（默认模式）
+## 版本记录
 
-Vision 默认关闭；只有显式 `vision.enabled: true` 才会执行。`auxiliary_visual_model` 只选择任务模型，不隐式开启功能。
+当前：**25**。更早的版本见 git 历史。
 
-- foreground 每轮最多 `vision.foreground_media_limit`（默认 2）个 media、deployment 并发 `vision.concurrency`（默认 2）。图片在provider边界占slot；视频在Telegram下载前预留同一个全局slot，并一直持有到本地抽帧和单次vision请求结束，避免多bot并行放大FFmpeg负载。scheduler只有一个FIFO并发门，不维护重启即丢失的小时/每日计数。
-- persistent media identity cache（`media.vision`）在 bots 间复用。新的非空结果只追加 `media_update` event，不改写旧 message entry；描述经 additive IPC `vision_update` 与 snapshot/history 的 `mediaDesc` 到达 TUI，都是 provider 外 side channel。
-- Telegram下载严格配对bot-specific `file_id`与对应Bot API；回复bot缺mapping时可复用其他已配置接收bot的source。这是provider外的确定性本地准备，不改变消息grammar或主对话每turn token。
-- video、animation、video note、video MIME document与video sticker按时长取1–3帧；位置固定为中点、三分点或20%/50%/80%，再在一次独立vision请求中提交全部帧。结果仍只追加既有`media_update` grammar；persistent/cross-bot hit不增加调用。
-- `ffmpeg`/`ffprobe`缺失在Telegram下载前成为provider外no-op：无vision调用、无动态provider payload、无主对话token，也不写terminal vision cache；static image vision 不受影响。
-- photo/sticker display cache、`media_ready` 与 TUI card 都是 provider 外 side channel。
-- compaction 单独使用配置的廉价模型与 `cacheRetention: "none"`；vision/compaction 不继承主模型的 reasoning 默认。
-
-### Context（opt-in）
-
-没有视觉模型调用；主模型直接接收上下文图片。主模型必须支持 image input，否则 daemon 在任何 Telegram 调用前 fail fast（`image_input_unsupported`）。
-
-- 进入上下文的媒体：photo 与静态 sticker（webp/gif 先转 png，再过 Pi `resizeImage` 字节/尺寸双上限）；video、animation、video note、video MIME document 与 video sticker 按时长抽 1–3 帧（中点、三分点或 20%/50%/80%），每帧一个 image block。
-- 准备在 flush 打包前执行：只有 Telegram 下载与本地转码，零 LLM 调用。每轮最多 `media.max_images_per_turn`（默认 4）个媒体身份，下载/抽帧并发 `media.download_concurrency`（默认 2）。失败只记 `error` event（`stage=context_media`），消息仍以纯文本占位进入上下文。
-- 派生图片以 hash basename 写入 `data/media`（`<sha256(fileUniqueId#ctx)>.png|jpg`、视频逐帧 `<sha256(fileUniqueId#frameN)>.jpg`），DB `media.context_files` 记录 `[{name, mime}]`；同一 media identity 跨 bot 只准备一次并持久化复用。
-- 每张上下文图片按固定 1,100 token 计入 suffix 预算（`CONTEXT_IMAGE_TOKEN_ESTIMATE`）；超预算或超上限的媒体降级为纯文本占位，被 force-cap 保留的 mandatory event 永远纯文本。图片只随新 event 追加，不存在事后回填，因此 prefix 永不失效。
-- Telegram下载严格配对bot-specific `file_id`与对应Bot API；回复bot缺mapping时可复用其他已配置接收bot的source。这是provider外的确定性本地准备，不改变消息grammar。
-
-## Compaction 与 context epoch
-
-- 主模型传给Pi的有效context window为配置的 `context_window`（缺省 65,536，会钳制 Pi catalog 值）；compaction 触发公式为 `contextTokens > contextWindow - reserveTokens`，其中 `reserveTokens = max(16,384, context_window - compaction_threshold)`，所以 threshold 最高生效值为 `context_window - 16,384`（config 校验拒绝超过它的值，避免 requested/effective 静默分叉）。缺省/示例为 65,536/32,768（提前触发，缓冲 Pi 对 CJK token 与上下文图片的估算偏差）；生产可随窗口上调，如 131,072/114,688。`tg-compaction` 用状态导向 prompt 生成不超过800字的摘要，并保留最近 `compaction_keep_recent` token 原文（注意单位是 token 不是 turn：缺省 1 token 连一条消息都装不下，压缩后实际只剩摘要；生产推荐 20,000，约 1-2 个完整 turn 原文）。更早原文不再进入provider，只有摘要仍可见。
-- 图片预算遍历真实 `custom_message.details` 的图片引用；超预算只多触发一次普通 compaction。Pi preparation 前按每张 1,100 token 把 `compaction_keep_recent` 换算成临时文本预算：自动路径在 `agent_end`（持久化结束、原生 preparation 之前）更新，手动/图片压力路径在 `compact()` 前更新。Pi 自己选择合法切点与 split-turn；settled 或手动路径 finally 恢复配置值。不能只在 `session_before_compact` 修切点，因为全文文字小于预算时 Pi 会提前返回，根本不触发该事件。预算是估算，切点可保留跨过阈值的完整 entry，CJK 仍沿用 Pi chars/4；不承诺精确 token 上限。文件回收只有下述 media lifecycle 一个入口。
-- summary 输入包含 `messagesToSummarize` 和 `turnPrefixMessages`，使用 Pi 的 `serializeConversation(convertToLlm(messages))`，因此 Telegram custom message 与 Pi 原生消息遵循同一 provider projection。
-- 摘要只使用配置的 compaction model，遵守统一 retry 次数、单次完整请求 deadline 和 compaction signal；不切换主模型。空摘要、重试耗尽的 provider failure 或 abort 会 cancel；cursor、visible refs 与 epoch 均不伪造变化。
-- 摘要模型 catalog `input` 包含 `image` 时，复用 context 图片 resolver，在对应消息位置传入图片，覆盖完整丢弃段与 split-turn 前缀；动态 sticker 候选永不进入摘要，base64 不持久化。不支持图片或文件缺失时保留已有文字，不额外逐图调用视觉模型。输入采用 UTF-8 bytes/2 + 1,100/图的保守估算，预留输出与 2,048 安全余量；超窗口拒绝调用，应改用足够窗口的摘要模型。正常聊天无额外调用，压缩时增加实际图片输入成本。
-- 请求前以 active entries 加 pending batch 检查 `context_image_budget_bytes`（原始图片字节，base64 会进一步增大），超限先走 Pi 原生压缩并复查；失败或仍超预算时不发送主请求、不追加 batch，保留 cursor 与 obligation。该检查覆盖恢复 session 和前一 turn 失败。摘要图片总字节超预算时仅缩小本次摘要输入，复用 Pi `resizeImage` 且保留所有图片与顺序；无法缩到预算内则 cancel。持久图片、聊天 prefix、system/tools 与序列化 grammar 均不改写，摘要仍为 `cacheRetention: none`，无需 cache schema 迁移。
-- direct-address 的完成条件为 send 的 terminal outcome，不是 provider 正常 stop。只有零公开发送、健康 turn、send 已启用且待回复消息仍可见时，最多追加一次带有界消息 ID 的 `REPLY_RECOVERY_PROMPT`；普通概率沉默不补答，provider error 不叠加补答预算。二次沉默留待下一触发，不无限循环；committed/partial/unknown 都不自动重发，unknown 在本地 commit 中单独标识。
-- 成功结果的 structured details 保存当前 `consumedSeq` 与 retained `visibleMessageIds`。runtime 用这些 details 替换 visibility、推进 epoch；`consumedSeq` 永不回退。
-- visibility与epoch提交后，provider外observer按所有当前配置bot的visible refs、未消费event与reply obligation，对本地媒体cache做最多256项回收。它清可再生文件、`local_path`与 `context_files` 派生图片，失败不改变compaction结果；startup backfill复用同一引用边界，避免重新下载已回收历史。
-- 媒体回收不修改session、summary、message/event serialization或provider payload，因此不改变cache schema，也不增加LLM call/token；派生图片可按 `context_files` 记录随时重建。
-- 手工 `/compact` 复用同一边界，不向模型注入 operator 指令。
-
-## Payload 诊断与 telemetry
-
-`tg-cache-observer` 在 `before_provider_request` 对 canonical payload 计算 deployment-local HMAC：system、tools、每条 message 与完整 payload 分段记录 hash，并记录相对上次请求的首个 divergence segment/index/byte offset。SQLite 不保存 plaintext payload、prompt、secret 或 HMAC key。
-
-每次 provider response 还记录 provider/api/model/session hash/cache retention、epoch、context/input/cache read/cache write/output/reasoning/latency/cost、trigger、public send、vision calls（vision 模式）/附带图片数 `images_attached`（context 模式）/tool rounds，以及 input event/token estimate/rows scanned。保留期默认 90 天，因此 UI 的 lifetime 表示**当前 SQLite 保留窗口**，不是永久累计。
-
-若 provider/Pi 返回的 cache read/write 都为 0，telemetry 可对同 cohort 的相邻两次 raw chat payload 做本地严格前缀估算：system/tools 必须相同，前一次完整 message hash 列表必须逐项等于后一次前缀，且 bot/provider/api/model/epoch/session/cache retention 均不变。估算单独写入 `cache_read_estimated`，原始 usage/cost 不改写，UI 用 `≈` 标出；它证明理论可复用结构，不证明 provider 实际命中。该 observer-side 计算不改变 provider payload、cache identity 或 `CACHE_SCHEMA_VERSION`，也不增加 LLM call/token；完整口径见 `docs/telemetry.md`。
-
-2026-08-07 的 50-run DeepSeek 数据按当前统一公式 `R / (↑ + R + W)`（该样本 `W=0`）测得 90.0% cache hit。该数字仅是历史 deployment 样本，不代表当前 schema 版本、其他模型或未来负载；完整字段口径见 `docs/telemetry.md`。
-
-## Golden
-
-`test/cache.test.ts` 当前锁定：
-
-| 项目 | 值 |
-| --- | --- |
-| schema | `23` |
-| zh system | `a4c784e00a37` |
-| en system | `b89a39b52e87` |
-| legacy message serializer | `68a17d6e5c05` |
-| immutable event serializer | `4a57de738bf9` |
-| tools | `98440e1b8d0c` |
-| compaction prompt | `045a5241fdd7` |
-| multimodal compaction envelope | `e2da2b8b68fa` |
-| reply recovery suffix | `4fc7e277e338` |
-| Telegram turn trigger | `43bb809c775c` |
-| extension order | `e04f7032d531` |
-| context protocol | `2e1c7762b239` |
-| sticker catalog block | exact-string lock（`s<id>: <emoji> <描述>` 行，set/format 不渲染） |
-| recent-context sticker suffix | exact-string lock（最近、去重、user-only、bot-sendable、与目录同一行语法携带持久化描述、最终尾部） |
-| quote reference | exact-string lock（媒体占位 / 事件日志路径 `resolveVision:false` 不带描述 / 缺失标记 / 可见裸引用） |
-
-测试必须 pin `TZ=Asia/Singapore`；`bun test` 自身强制 UTC。若 hash 有意变化，先解释 cache impact，再更新 version 与 golden；不要只改 expected value。
+- **v25**：sticker 候选改为紧跟最后一批消息的〔系统附注〕独立消息（以前拼在最后一条正文末尾，模型把它读成最后发言者粘贴的内容，2026-10 生产事故）；协议说明附注由系统附加、群成员不可见；摘要输入去掉 thinking，摘要 prompt 要求只记录实际发生的事。
+- **v24**：引用父消息正文随消息以 `reply_snapshot` 保存，与当前正文共享单条预算（serializer v5）。
+- **v23**：Telegram turn 经 `session.prompt()` 原生 preflight 发出，每轮带固定触发消息。
+- **v22**：Pi 升级到 0.86，provider stream 改用 Pi 原生 normalized transcript。
+- **v21**：send 新增可选 `reaction`。
+- **v20**：直接点名但没发言的健康 turn 最多追加一次补答提示。

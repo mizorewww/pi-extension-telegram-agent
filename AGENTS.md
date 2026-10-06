@@ -5,26 +5,23 @@
 ## 1. 项目哲学
 
 - **极简，最少机制**：一套设计，不留兼容层。Breaking change 随时可以做，只要求迁移干净、一步到位。
-- **Pi 原生优先**：动手前先查 `node_modules/@earendil-works` 各包导出了什么；Pi 能做的事不自造轮子（审计结论见 `docs/engineering/code-review-2608.md`）。
+- **Pi 原生优先**：动手前先查 `node_modules/@earendil-works` 各包导出了什么；Pi 能做的事不自造轮子（结论见 `docs/engineering/decisions.md`）。
 - **不花冤枉钱**：能用确定性代码解决的不花 LLM token；任何功能先评估 cache hit 率与每 turn 新增 token（`docs/cache.md`、`docs/engineering/development-guide.md`）。
 - 删代码优先于加抽象；防御代码只防真实可能的分支。
 
 ## 2. 仓库地图
 
 - `docs/index.md` — 文档总索引
-- `docs/project.md` — 项目目标、约束、术语
-- `docs/architecture.md` — 架构边界与 invariant
-- `docs/cache.md` — provider cache 工程（prefix invariant / CACHE_SCHEMA_VERSION）
-- `docs/data-model.md` — SQLite schema
-- `docs/testing.md` — 测试策略与规范命令
-- `docs/engineering/development-guide.md` — 日常开发流程
-- `docs/engineering/debugging-guide.md` — 结构化日志与 Debug impact
-- `docs/engineering/documentation-guide.md` — 文档写作规范
-- `docs/engineering/code-review-2608.md` — 2026-08 全面 review 结论与 Pi 能力审计
-- `docs/engineering/code-review-2608-2.md` — 2026-08-13 四路并行 review:误报记录、修复决策与未采纳清单
-- `docs/engineering/code-review-2608-3.md` — 2026-08-20 六区并行 review:造轮子 / hack / 过度防御 / 冗余清理
-- `docs/engineering/code-review-2609-2.md` — 2026-09-16 生产故障诊断（图片 compaction 切点 / developer role / 失败 turn）与全面整改
-- `docs/runbooks/daemon.md` — daemon 运维
+- `docs/project.md` — 目标、哲学、术语、部署边界
+- `docs/architecture.md` — 消息路径、发送边界、上下文、媒体、控制命令、IPC
+- `docs/cache.md` — provider 可见字节、fingerprint、改动流程（CACHE_SCHEMA_VERSION）
+- `docs/data-model.md` — SQLite schema 与保留期
+- `docs/telemetry.md` — 用量字段与公式
+- `docs/testing.md` — 测试守卫与规范命令
+- `docs/engineering/development-guide.md` — 开发流程、文档与提交规范
+- `docs/engineering/debugging-guide.md` — 诊断报告、证据梯、日志契约
+- `docs/engineering/decisions.md` — 长期有效的设计取舍与生产事故（新结论加在这里）
+- `docs/runbooks/daemon.md` — 启停、systemd、部署、故障恢复
 - `docs/user-guide/` — 双语用户指南
 
 动手前只读与受影响边界相关的章节，不要把无关文档塞进上下文。
@@ -76,11 +73,12 @@
 ## 8. 已知坑
 
 - `bun test` 强制 UTC：涉时间序列化的测试必须 pin TZ（参考 `test/cache.test.ts`，生产为 Asia/Singapore）。
-- Bun `socket.write` 返回字节数且可能部分写入：必须编码成 Uint8Array 后按字节偏移排队写（参考 `src/ipc.ts`）。
+- Bun `socket.write` 返回字节数且可能部分写入：必须编码成 Uint8Array 后按字节偏移排队写（参考 `src/daemon/ipc-server.ts`）。
+- 本机 `telegram.config.ts`/`.env` 可能与生产共用 bot token：不要在开发机启动 daemon 或跑 e2e，两个 poller 会抢同一 token（409）并造成线上停摆。需要真实验证时在服务器上做。
 - `.env` 是 `key: value` 冒号格式，由 `src/config.ts` 自解析，不是 dotenv 的 `KEY=value`。
 - Pi 四包精确锁定 registry `1.0.4`；升级必须同一原子提交更新 manifest、lock 并做兼容性验证。交互式 `bun run pi` 使用本机 PATH 中的 Pi。
 - sticker / alias 的 short_id 用 rowid 分配，不用 COUNT+1（并发 / 删除下撞号）。
-- `streamFunction` 包装（`src/agent/runtime.ts`）是 Pi 的官方注入形态（`Agent.streamFunction` 是公开可变字段，函数包函数注入 `cacheRetention`）；`createAgentSession()` 不接受 streamFn 选项，只能事后覆盖。升级 Pi 时仍必须验证该包装（见 `docs/engineering/code-review-2608.md`）。
+- `streamFunction` 包装（`src/agent/runtime.ts`）是 Pi 的官方注入形态（`Agent.streamFunction` 是公开可变字段，函数包函数注入 `cacheRetention`）；`createAgentSession()` 不接受 streamFn 选项，只能事后覆盖。升级 Pi 时仍必须验证该包装（见 `docs/engineering/decisions.md`）。
 
 ## 9. 指南更新规则
 

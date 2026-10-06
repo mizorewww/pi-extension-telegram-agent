@@ -1,37 +1,24 @@
 # 文档索引
 
-## 用户文档
+## 用户
 
-- `../README.md` / `../README.en.md` — 中文 / English 产品入口与三步启动
-- `user-guide/zh/src/README.md` — 中文用户指南
-- `user-guide/en/src/README.md` — English user guide
-- `https://mizorewww.github.io/pi-extension-telegram-agent/` — Pages 双语语言入口（由 Documentation workflow 发布）
+- [README](../README.md) / [README.en](../README.en.md)：产品入口与快速开始
+- [中文用户指南](user-guide/zh/src/README.md) · [English user guide](user-guide/en/src/README.md)（发布在 <https://mizorewww.github.io/pi-extension-telegram-agent/>）
 
-## 规范性文档
+## 开发与运维
 
-- `../AGENTS.md` — agent 路由、安全、验证入口（常载）
-- `project.md` — 项目目标、约束、术语
-- `architecture.md` — 稳定的架构边界与 invariant
-- `cache.md` — provider cache 工程：prefix invariant / CACHE_SCHEMA_VERSION / schema history / telemetry
-- `telemetry.md` — Pi `/tg status` 与 Telegram `/status` 的统一 usage/status 读模型、字段和公式
-- `data-model.md` — SQLite schema 与去重规则
-- `engineering/development-guide.md` — **LLM 开发指南，日常开发流程以此为准**（含提交与追溯规则）
-- `engineering/documentation-guide.md` — 文档写作规范
-- `engineering/debugging-guide.md` — **结构化日志、只读诊断与新功能 Debug impact 规范**
-- `testing.md` — 测试策略、规范命令、当前状态
-- `runbooks/` — 可重复操作流程（daemon 运维）
+| 文档 | 内容 |
+|---|---|
+| [`../AGENTS.md`](../AGENTS.md) | agent 常载：哲学、路由、硬约束、已知坑 |
+| [project.md](project.md) | 目标、哲学、术语、部署边界 |
+| [architecture.md](architecture.md) | 进程、消息路径、发送边界、上下文、媒体、控制命令、IPC |
+| [cache.md](cache.md) | provider 可见字节、fingerprint、改动流程、版本记录 |
+| [data-model.md](data-model.md) | SQLite 表与保留期 |
+| [telemetry.md](telemetry.md) | 用量与状态的字段和公式 |
+| [testing.md](testing.md) | 验证漏斗与测试守卫清单 |
+| [engineering/development-guide.md](engineering/development-guide.md) | 开发流程、文档与提交规范 |
+| [engineering/debugging-guide.md](engineering/debugging-guide.md) | 诊断报告、证据梯、日志契约 |
+| [engineering/decisions.md](engineering/decisions.md) | 长期有效的设计取舍与生产事故 |
+| [runbooks/daemon.md](runbooks/daemon.md) | 启停、systemd、部署、备份、故障恢复 |
 
-## 审查记录
-
-- [2026-09 设计审查与整改](engineering/code-review-2609.md)
-- [2026-09-16 生产故障诊断与全面整改](engineering/code-review-2609-2.md)
-- [2026-09-19 双 bot 运行与上下文审查](engineering/code-review-2609-3.md)
-- [2026-09-29 稳定性、成本与 SWE-2 上线审查](engineering/code-review-2609-4.md)
-
-## 写作规则
-
-- 一个事实一个权威来源，其余地方链接而不是复制。
-- 稳定事实放 architecture / cache / data-model；开发流程放 engineering/development-guide。
-- 明确写清每篇文档的适用范围。
-- 规范用词用 MUST / SHOULD / MAY；规范必须可验证或可 review。
-- 模糊成本高的地方给具体例子。
+一个事实只在一处是权威，其它地方链接过去。

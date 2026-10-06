@@ -1,132 +1,50 @@
 # 数据模型
 
-> 描述当前 schema 真正表达的内容。schema 变化时同步更新。
+SQLite（WAL），默认 `data/agent.db`，schema 在 `src/db/schema.sql`，启动时幂等执行。早于当前 schema 的库不迁移，`openDb` 直接报错（移走旧库重新开始）。改 schema 必须同步本文。
 
-存储：SQLite（WAL），默认单文件 `data/agent.db`。`messages` 是最新读模型；`message_events` 是 provider-facing 的不可变消费源。
+`messages` 是最新读模型（UI 用）；provider 只消费不可变的 `message_events`。
 
-## Telegram source 与读模型
+## Telegram 来源
 
-### raw_updates
+| 表 | 主键 | 用途 |
+|---|---|---|
+| `raw_updates` | `(bot_id, update_id)` | 完整 update JSON，去重与诊断；默认保留 30 天，仍被 pending dispatch 引用的不删 |
+| `pending_telegram_dispatch` | `bot_id` | 每个 poller 至多一条未交付的 routing/control handoff，与 ingest、offset 同事务写入；回调成功后删除 |
+| `messages` | `(chat_id, message_id)` | canonical 最新投影：发送者、reply/quote/forward、text/caption/entities、Rich Message（source ≤256 KiB，`text` 是确定性纯文本投影）、`reply_snapshot`、media JSON |
+| `message_revisions` | `(chat_id, message_id, edit_date)` | 被替换的旧版本，key 用旧版本自己的时间 |
+| `message_events` | `ingest_seq`（自增），`event_key` 唯一 | 不可变事件流：`message`、`edit`、`metadata`、`media_update`；由 trigger 在同一事务追加 |
+| `telegram_control_messages` | `(chat_id, message_id)` | 控制命令与回复的永久排除名单，不受遥测保留期影响 |
 
-- `(bot_id, update_id)` 主键，保存完整 Telegram update JSON，用于去重、诊断和 replay。
-- retention 默认 30 天；仍被 pending dispatch 引用的来源不会删除。poller offset 与 ingest、pending dispatch 在同一事务提交。
+- 只更新更大的 `edit_date`；多个 poller 乱序送达的旧 edit 不会回退 canonical。
+- 第二个 bot 的副本只能补齐空缺的 `reply_to_sender_id` / `reply_snapshot`，并追加一条 metadata event。
+- `idx_messages_media_identity` 是 `CAST(json_extract(media, '$.file_unique_id') AS TEXT)` 的表达式索引，media lifecycle 必须使用完全相同的表达式。
+- trigger 用 `CREATE TRIGGER IF NOT EXISTS`；改 trigger body 需要新库或手工 DROP。
 
-### pending_telegram_dispatch
+## 每 bot 状态
 
-- `bot_id` 主键，每个 poller 最多保存一条未交付 handoff；保存 update/message identity、kind 与 route_version，不复制正文。
-- `(bot_id, update_id)` 外键引用 `raw_updates`。routing/control 回调成功后删除，失败和重启先交付再拉取新 update；accepted routing claim 防止重放重复触发。
+| 表 | 主键 | 用途 |
+|---|---|---|
+| `bot_cursors` | `(bot_id, chat_id)` | 已消费到的 `ingest_seq`，只增不减 |
+| `bot_visible_messages` | `(bot_id, chat_id, message_id)` + `context_epoch` | 当前 context 真正包含完整内容的消息；压缩或换 session 时整组替换 |
+| `bot_session_manifest` | `bot_id` | 当前 session id、文件路径、完整 fingerprint |
+| `reply_obligations` | `(bot_id, chat_id, message_id)` | 直接点名后待回复的消息身份（不存正文） |
+| `routing_claims` | `(chat_id, message_id, bot_id, route_version)` | 防止同一消息对同一 bot 重复启动 |
+| `bot_state` | `(bot_id, key)` | epoch、Telegram offset、bot user id / username |
+| `daemon_state` | `key` | router secret、当前 cache schema 等单例 |
 
-### telegram_control_messages
+- 新配置的 bot 没有 cursor 时，默认从 `message_events_backfill_max_seq`（若存在）开始，不重放更早历史。
+- daemon 启动删除已不在配置中的 bot 的 cursor 与回复义务，否则它们会永久卡住 `message_events` 的保留期清理。
 
-- `(chat_id, message_id)` 主键，永久保存 control command/reply 的排除身份，与 telemetry 保留期独立。
+## 媒体、事件与遥测
 
-### messages
+- `media`：`file_unique_id` 是共享身份；`short_id` 由 rowid 分配（不能用 COUNT+1）；`vision`（vision 模式描述 JSON）与 `context_files`（context 模式派生图片 `[{name, mime}]`）按身份持久化、跨 bot 复用；`local_path` 只存 `data/media` 下的文件名。
+- `media_file_ids(bot_id, file_id, file_unique_id)`：bot 专属的可发送/可下载能力。
+- `aliases(chat_id, user_id) → u<N>`：无 username 发送者的稳定别名（rowid 分配）。
+- `agent_events`：只追加的本地行为流（assistant 文本、thinking、tool、send、错误、压缩、控制审计……）。一次 agent run 的原始事件带 `activity_id`，结束时另追加一条 `agent_activity` 作为 TUI 卡片。不存 token、prompt、完整 URL 或路径。
+- `llm_runs`：每次成功 provider 响应一行：usage、费用、延迟、thinking/send 耗时、provider/api/model、session hash、payload HMAC 与首个分叉位置、上下文构成估算、trigger、公开发送数、图片数等。口径见 [telemetry.md](telemetry.md)。
 
-- `(chat_id, message_id)` 主键；多个 bot 看到同一群消息只保留一条 canonical 最新投影。
-- 保存 sender、reply/quote/forward、text/caption/entities、bounded Rich Message source、edit time 与 media identity。仅更新更大的 edit_date，跨 bot 乱序或同时间副本不会倒退 canonical 或追加 edit event。
-- `reply_to_sender_id` 是 Telegram 嵌入父消息 sender 的有界 snapshot；缺失时 router 可查询 canonical parent。
-- `reply_snapshot` 是 Telegram 嵌入父消息的一层 JSON 快照，保存 display_name、username、text（含 caption / Rich Message 的 plain projection）和 media。与当前消息的 event 一起持久化，即使父消息早于 bot 入群或 raw update 已清理，正文仍可用；不将父消息插入 `messages`，也不为它创建路由任务。副本只补空缺快照并追加 metadata event，正文补全本身不重复触发回复。
-- Rich Message source 上限 256 KiB；`text` 是确定性、最多 32,768 code points 的 plain projection。IPC/Pi/provider 不接收 raw source。
+## 保留期
 
-- `idx_messages_media_identity` 对非空 media 的 `CAST(json_extract(media, '$.file_unique_id') AS TEXT)` 建部分表达式索引；media lifecycle 使用完全相同的 TEXT 表达式按身份查找，避免每个文件重扫消息历史。
+启动时和之后每 24 小时执行：`agent_events` 与 `llm_runs` 90 天，`raw_updates` 30 天，`message_events` 365 天。旧 `message_events` 只有在所有已配置 bot 的 cursor 都已越过、且没有回复义务或 pending dispatch 引用时才删除。canonical 消息、revision、media 行与 session 文件不按时间清理；本地媒体文件由成功压缩后的引用回收处理（见 [architecture.md](architecture.md#媒体)）。
 
-### message_revisions
-
-- `(chat_id, message_id, edit_date)` 主键，保存被替换版本的 text/caption/entities/rich source。
-- revision key 使用被替换版本自己的时间：原始版本用 `date`，后续版本用当时的 `edit_date`。
-
-### message_events
-
-- `ingest_seq INTEGER PRIMARY KEY AUTOINCREMENT` 是全局单调位置；`event_key` 唯一保证 replay 幂等。
-- `(chat_id, ingest_seq)` 索引是 agent 增量读取主路径；另有 message/时间索引用于 obligation 与 retention。
-- kind 为 `message | edit | metadata | media_update`。payload 是该事件发生时的 bounded snapshot；旧 event 不因 canonical row、vision 或 edit 改写。
-- message insert、edit 和 reply metadata enrichment 由事务内 trigger 追加；vision 模式下非空 vision completion 追加独立 `media_update`，context 模式不追加媒体 event——图片以 image 内容块随所属 message event 一起进入 provider context。schema v16 migration 是纯 additive（只增列），不删除或改写任何历史 event。
-- 旧库 migration 从 canonical `messages` backfill baseline event，并把已知 bot cursor 初始化到 backfill high-water，避免把历史当 fresh context 重放。
-- reply snapshot 迁移只增 `messages.reply_snapshot` 列，并在同一事务内替换 insert/edit/metadata trigger；保留已有 event 字节与 cursor。后续 event 带快照，旧 event 缺失的引用可从本地父消息解析，已有 session 文本不重写。
-
-## 每 bot context 与 routing 状态
-
-### bot_cursors
-
-- `(bot_id, chat_id) → consumed_seq`，表示业务消费到的 `message_events` high-water。
-- cursor 只单调前进；compaction、visibility replacement 与 epoch 轮换不得回退它。
-- daemon 启动删除不在当前配置中的 bot id 的 cursor 与 `reply_obligations` 行：retention 以配置 bot 的 `MIN(consumed_seq)` 为界，失效 id 不得永久钉住它。
-- `messages`/`message_events` 的 trigger 以 `CREATE TRIGGER IF NOT EXISTS` 建立；修改 trigger body 时 `migrate()` 必须先 `DROP TRIGGER`，否则旧库不会更新。
-
-### bot_visible_messages
-
-- `(bot_id, chat_id, message_id)` 主键，并记录 `context_epoch`。
-- 只表示完整消息内容当前真实存在于 Pi context；delta 或被预算跳过的 event 不会伪造 full-message visibility。
-- 成功 send 返回的本 bot message id 可加入 visibility。成功 compaction 按 structured retained details 替换整组；新 session 清空旧 epoch visibility。
-
-### bot_session_manifest
-
-- 每 bot 保存 `session_id`、`session_file`、完整 `context_fingerprint` 与创建时间。
-- runtime 在 restore 前计算 fingerprint；只有 fingerprint 相同且文件存在才 resume。mismatch 保留旧 session 文件并原子指向新 session。
-
-### reply_obligations
-
-- `(bot_id, chat_id, message_id)` 主键，只保存必须交给目标 bot 的 direct human address identity（explicit @mention / reply / 配置名称点名），不保存正文。
-- 所有 direct-address obligation 由 runtime trigger 按最终目标在消息尚未可见时幂等创建（INSERT OR IGNORE）；创建前的路由窗口由 pending dispatch 保护，不在 ingest 预建另一个目标。
-- runtime 每次有界读取最多 64 条；只有 session 中的结构化 context commit marker 证明 delivery 后才删除。crash/restart reconcile 幂等。
-
-### routing_claims
-
-- `(chat_id, message_id, bot_id, route_version)` 主键，记录 reason、status 和 timestamps。
-- insert/enrichment/replay 都通过 durable claim 防止同一 bot 重复启动。pending/nonaccepted claim 可重取；accepted started/coalesced 是永久抑制证据。
-
-### bot_state / daemon_state
-
-- `bot_state` 保存 per-bot epoch、Telegram update offset 与 bot identity（`bot_user_id` / `bot_username`）；legacy `exposed_ids` migration 后删除，不再承担 context 状态。routing/cooldown 的运行时调整不写 DB——`/set` 直接写穿 `telegram.config.ts`（见 `docs/architecture.md` 配置节）。
-- `daemon_state` 保存 deployment-wide router secret、schema/cache version 等 singleton metadata。
-- bot id 均为 `TEXT`，配置定义实际 bot 集合，代码不假设 A/B。
-
-## 媒体、agent 与 telemetry
-
-### media / media_file_ids
-
-- `media.file_unique_id` 是共享身份；`media_file_ids(bot_id,file_id,file_unique_id)` 是 bot-specific 可发送能力。
-- short id 由 rowid 单调分配；不能用 `COUNT+1`。
-- `vision`（JSON `{model,kind,text,at}`）保存 vision 模式的文字描述，`context_files`（JSON `[{name,mime}]`）保存 context 模式派生图片引用；两者都按 identity 持久化并跨 bot 复用，同一 identity 只识别/准备一次。Sticker 的 `mime` 规范化为 `image/webp`、`application/x-tgsticker` 或 `video/webm`，供 catalog 标注格式；可发送性仍以 bot-specific mapping 为准。≤1 MiB static display image与≤20 MiB video source先写0600临时文件再同目录rename；bytes与绝对path不进SQLite，`local_path`只保存当前`data/media`内的cache-relative basename。daemon启动按basename迁移旧绝对值，缺失或不支持的目标清空；video path与`context_files`派生图片只供本地抽帧/投影读盘，不进入IPC。
-- `local_path` 与 `context_files` 都是可再生cache指针，不是媒体事实。任一当前配置bot的visible message、pending reply obligation或未消费非`media_update` event构成活跃引用；成功compaction提交visibility后最多清理256个无引用identity：source与派生图片一起unlink，两列同时置空，其他失败保留以便重试；启动backfill也只恢复仍有活跃引用的static display缺口。回收不删除media row、vision结果、short id、format、file mapping、canonical history或session；重新需要时可下载source且不重付已有vision结果，或重新准备派生图片。
-
-### agent_events
-
-- append-only 本地行为流：assistant/tool/vision/usage/compaction/error/send/control/context commit 等；context 模式媒体准备失败记 error（`stage=context_media`），不阻断打包，消息仍以纯文本占位进上下文。
-- unpublished assistant prose 可以留在本地审计，但 provider session 仅保留 `[no_send]`。
-- 一次agent run的原始assistant/tool/send事件用payload内的`activity_id`关联；settle时另追加一条有界`agent_activity`作为TUI单卡投影。原始行仍是debug authority，timeline只隐藏带`activity_id`的新式原始行，不重写旧历史。
-- error/send/vision telemetry 使用固定 category 与 bounded fields，不保存 token、正文、prompt、response、完整 URL、path 或 stack。
-
-### llm_runs
-
-- 每次 provider response 记录 usage/cost/latency/epoch、thinking/send耗时，以及 provider/api、session id hash、cache retention、system/tools/messages/full payload HMAC 与首次 divergence 位置。`system/tools/compacted_history/message_tokens`保存按payload形状归一到实际provider总token的分段估算；`cache_read/cache_write/cache_miss` 保留 provider 原值。
-- 同时记录 trigger message、public send count、vision calls（vision 模式）、本轮附加进上下文的图片数 `images_attached`（context 模式）、tool follow-up rounds、input event 数、保守 token estimate 与 rows scanned。schema v16 migration 只新增 `images_attached` 列（additive），旧 `vision_calls` 列保留。
-- status 的 lifetime totals 聚合**当前保留行**（含 compaction）；current context 只取最新 `compaction = 0` 主对话 run，不累计 occupancy。字段和公式以 `docs/telemetry.md` 为准。
-
-## 其他表
-
-- `aliases`：`(chat_id,user_id) → u<N>`，为无 username sender 提供稳定别名。
-- Telegram control 的排除身份存于 `telegram_control_messages`；`agent_events` 只保留可过期的行为审计。
-
-## Retention 与安全删除
-
-daemon 启动时执行一次、之后每 24 小时执行 maintenance，并做 passive WAL checkpoint/optimize。默认：
-
-- `agent_events` 与 `llm_runs`：90 天；
-- `raw_updates`：30 天；
-- `message_events`：365 天。
-
-旧 `message_events` 只有在 `ingest_seq <=` 该 chat 所有已知 bot cursor 的最小值，且没有 reply obligation 或 pending dispatch 引用该 message 时才删除。canonical `messages`/revisions/media/session 文件不由这条定时 retention 清理；可再生的`media.local_path`与`context_files`派生文件另由成功compaction后的引用回收处理。
-
-## ID / dedupe 边界
-
-- update：`(bot_id, update_id)`；raw/canonical/event/pending dispatch/offset 在同一 transaction 内提交，失败整体回滚。
-- canonical message：`(chat_id, message_id)`；second-bot duplicate 只允许幂等 enrichment。
-- provider event：唯一 `event_key` + 单调 `ingest_seq`；edit 与 vision 模式 media completion 追加 delta。
-- bot 自发消息：Telegram send result 立即 normalize/insert，随后 poller 副本按 canonical/event key 去重。
-
-LLM 序列化 grammar 与 fingerprint 边界见 `docs/cache.md`。
-
-## 非SQLite本地日志
-
-`data/daemon.log`不是业务表，也不是恢复authority。它是schema v1 JSONL side channel，固定8 MiB后轮转并保留`.1`–`.3`，文件0600；debug报告最多读当前文件尾64 KiB。字段、隐私和关联契约见`docs/engineering/debugging-guide.md`。SQLite retention与log rotation彼此独立。
+`data/daemon.log` 不是业务数据，见 [debugging-guide.md](engineering/debugging-guide.md)。

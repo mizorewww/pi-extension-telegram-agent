@@ -1,117 +1,85 @@
 # Debug 指南
 
-> 本文是新功能可诊断性与故障调查的权威契约。适用于 daemon、Telegram、agent、tool、SQLite、IPC 与 media；不授权真实网络调用或扩大日志内容。
+怎样调查故障，以及新功能必须满足的可诊断性要求。
 
-## Invariant
+## 原则
 
-1. **先区分边界，再猜原因。** response opportunity、provider run、tool调用、Telegram remote commit与本地持久化是不同事实。
-2. **业务状态是authority。** SQLite/session决定正确性；`daemon.log`是有界side channel，丢日志不得改变行为。
-3. **日志只记身份与状态，不记内容。** 禁止消息正文、caption、persona、prompt、provider response/thinking、tool args、token/key、完整URL/path、stack与媒体identity。唯一例外是下述显式本机provider-context取证，它只写当前命令stdout，不进入日志/DB。
-4. **所有输入有界。** 单条日志≤4096 bytes、最多24 fields、string≤256；debug报告每bot最多20 claims、20 runs、50 events、100 logs，窗口最长7天。
-5. **可关联但不新建平行真相。** 使用已有`bot_id/message_id/run id/epoch/ingest_seq/request_id`；新增业务状态必须进入职责拥有表，而不是藏在日志里。
-6. **测试默认零输出、零外网。** fixture显式捕获logger sink；真实provider/Telegram只能在用户授权的e2e中使用。
+1. **先定位边界再猜原因。** 收到消息、得到回应机会、provider 调用、工具调用、Telegram 提交、本地持久化是不同的事实。
+2. **SQLite 与 session 是权威，日志不是。** `daemon.log` 丢了也不能改变任何行为。
+3. **日志只记身份与状态，不记内容。** 禁止正文、caption、persona、prompt、provider 响应、thinking、tool 参数、token/key、完整 URL/路径、stack、媒体身份。
+4. **一切有界。** 单条日志 ≤4096 字节、≤24 个字段、字符串 ≤256；debug 报告每 bot 最多 20 claims / 20 runs / 50 events / 100 logs，窗口最长 7 天。
+5. **用已有 identity 关联**（`bot_id`、`message_id`、run id、epoch、`ingest_seq`、`request_id`），不在日志里建平行状态。
 
-## 第一入口：只读诊断报告
+## 第一入口：`bun run debug`
 
 ```bash
 bun run debug -- --since 30m
 bun run debug -- --bot A --since 2h
-bun run debug -- --bot A --show-provider-content  # 敏感：显式读取完整当前provider上下文
+bun run debug -- --bot A --show-provider-content   # 敏感，见下
 ```
 
-命令只读取deployment配置、本机Pi模型目录、readonly SQLite/Pi session、PATH工具可用性与最后64 KiB结构化日志，不访问网络、不写DB、不输出credential。输出JSON包含daemon存活/socket状态、每bot cursor/high-water/reply obligations、最近claims/runs/safe events/logs、`findings`、`video_transcoder`与`provider_contexts`。run 中的 `cache_read/cache_write/cache_miss` 是 provider 原值；nullable `cache_read_estimated` 是相邻 raw payload 严格前缀的本地理论复用量，不能当作 provider 命中证明。模型能力诊断只输出provider/model与requested/effective/supported reasoning；`model_reasoning_available`明确标记本次是否成功读取模型目录，失败时业务报告仍然生成且`model_reasoning`为`null`。
+只读：配置（不读 secret、不查 Pi 默认）、本机 Pi 模型目录、只读 SQLite 与 Pi session、PATH 工具、日志尾部 64 KiB。不联网、不写库。输出 JSON：daemon 存活与 socket、每 bot 的 cursor / high-water / 回复义务 / pending dispatch、最近 claims、runs、事件、日志、`findings`，以及重建的 provider 上下文结构（只有 hash 与长度）。
 
-`provider_contexts`默认列出完整的模型输入结构：provider/model/api/cache元数据、system长度/hash、完整tool description/schema，以及每条消息的role、content types/长度/hash、tool name/call id/error；消息与system正文省略。这样可以机械回答“search schema是否注册”“TinyFish toolResult是否与call id配对”“follow-up前结果是否仍在active branch”。`--show-provider-content`必须同时指定单个`--bot`，才把完整system prompt和当前compaction-aware消息投影写到stdout；其中可能含persona、群正文、tool args/result与历史thinking，不得贴issue、重定向到长期文件或纳入自动日志。它是当前session的pre-adapter重建，不伪称历史最后一次HTTP request；历史精确边界仍以`llm_runs`哈希为准。
+`--show-provider-content` 必须配合单个 `--bot`，把完整 system prompt 与当前消息投影写到 stdout，可能包含 persona、群聊正文、工具结果与 thinking。只在本机短暂查看，不要贴进 issue 或存成文件。
 
-`findings`固定语义：
-
-| code | 已证明的事实 | 下一步 |
+| finding | 含义 | 下一步 |
 |---|---|---|
-| `unsupported_reasoning_effort` | 配置requested档位不在该模型supported levels中，Pi会静默clamp为effective档位 | 将main/compaction/vision配置改为supported值；daemon启动也会fail fast |
-| `video_transcoder_unavailable` | 当前模式需要视频抽帧（vision已启用或context模式），但PATH缺少`ffmpeg`或`ffprobe`；finding同时给出`impact=video_recognition_disabled`与`action=install_ffmpeg_and_restart` | 安装FFmpeg发行包并restart；它只用于视频抽帧，缺失时vision模式跳过视频识别、context模式视频降级为文本占位，daemon、聊天、图片链路与sticker发送不受影响 |
-| `cursor_backlog` | 该bot尚未消费全部immutable events | 看最近claim与runtime state；没有trigger时可正常 |
-| `pending_reply_obligation` | direct address（explicit @mention / reply / 配置名称点名）尚未被structured commit确认交付 | 查flush/provider失败；restart后应自动recover |
-| `route_without_run` | started claim超过120秒仍无匹配的主聊天`llm_runs.trigger_message_id`，查询独立于最近20条run展示样本 | 查`agent_runtime.flush_failed`、`provider_attempt_failed`与provider readiness |
-| `model_silence` | 主聊天run公开send为0，且同一trigger附近有已settled的`model_silence`日志（包括`[no_send]`） | 明确寻址最多补答一次，仍无发送保留obligation；不能仅凭LOCAL文本认定沉默 |
-| `tool_preflight_failed` | send在Telegram create前被本地确定性拒绝 | 按category修输入/visibility/catalog，不查Telegram |
-| `send_degraded` | create结果处于committed/partial/unknown边界 | `committed/partial/unknown`都不得自动重试；按stage修本地副作用 |
+| `unsupported_reasoning_effort` | 配置的 reasoning 不在该模型支持列表中 | 改成支持的档位（启动也会拒绝） |
+| `video_transcoder_unavailable` | 当前模式需要抽帧但缺 `ffmpeg`/`ffprobe` | 安装 FFmpeg 后重启；不影响其它功能 |
+| `cursor_backlog` | 有未消费的事件 | 结合最近 claim 判断；没有触发时属正常 |
+| `pending_reply_obligation` | 直接点名的消息还没回复 | 查 flush/provider 失败；重启会自动恢复 |
+| `pending_telegram_dispatch` | 有一条 update 的路由交接没完成 | 查 `telegram_poller.dispatch_pending`；不要手删 |
+| `route_without_run` | 启动的 claim 120 秒后仍没有对应 run | 查 `flush_failed`、`provider_attempt_failed` |
+| `model_silence` | run 没有公开发言 | 直接点名会补答一次；单凭本地文本不能认定沉默 |
+| `tool_preflight_failed` | send 在 Telegram 调用前被本地拒绝 | 按 category 修输入/可见性/目录 |
+| `send_degraded` | 发送处于 committed/partial/unknown | 都不能自动重试；按 stage 修本地副作用 |
 
-报告是线索而非历史证明：旧自由文本log不解析；窗口之外或retention删除的证据会缺失；概率trigger可合法沉默或busy-skip。
+报告是线索不是历史证明：窗口外或被保留期删掉的证据会缺失；概率触发合法地沉默或跳过。
 
-provider-context 的 `images` 统计引用、可用、缺失数量及文件字节；可用图片出现在对应消息的 content types 中，但即使显式显示正文也只输出图片占位，不读出 base64。主聊天 API/tools 元数据排除摘要 run。`compaction_input` 记录 vision capability、图片附带/缺失计数和输入估算；`compaction_input_rejected{category:model_window_exceeded}` 表示尚未调用 provider。`reply_repair_started` 表示明确寻址的一次补答；`provider_turn_settled.send_outcome` 区分 none/sent/unknown，不能把 unknown 当已确认送达。所有新增诊断保持零正文、零图片字节、零路径，业务判断不依赖日志。
+## 回应链证据梯
 
-`auto_compact_skipped{reason:threshold,last_turn_failed:true}` 表示最近 assistant 失败后主动取消阈值压缩，没有摘要调用；它不更新最近手动压缩结果。真正的 overflow 仍允许 Pi 压缩恢复。`provider_attempt_failed{category:provider_request_too_large}` 表示 stream guard 将 HTTP 413 / Request Entity Too Large 归一为 Pi overflow；原生仅 compact-and-retry 一次。`auto_compact_triggered{stage:preflight}` 表示主请求追加 batch 前已发现图片预算超限；`context_input_rejected{category:compaction_failed|image_budget_exceeded}` 表示压缩失败或仍超预算，主请求尚未调用、batch 未追加、cursor/obligation 保留。`compaction_input_rejected{category:image_budget_exceeded}` 表示摘要图片无法经 Pi 缩放满足字节预算，摘要 provider 未调用。全零摘要尝试不再产生 `llm_runs`，错误与重试看既有日志；历史零用量行保留，不能据其数量推断成功压缩或实际账单。
+按顺序检查，停在第一个缺失或失败的环节：
 
-## 响应链证据梯
+1. `telegram_ingest.update_committed` / canonical 行 / event：update 是否落库。
+2. `routing.decision` + `routing_claims`：目标、原因、started/skipped/coalesced。
+3. `agent_runtime.flush_started`：bot 是否得到回应机会。
+4. `agent_runtime.context_packed`：`input_events`、`visible_count`、`obligation_count`、`suffix_budget` 是否合理。
+5. `llm_runs` + `provider_turn_settled` / `flush_failed` / `model_silence`：provider 完成、失败还是沉默。
+6. `agent_tool.execution_started|finished`：调了哪个工具、是否出错。
+7. `agent_send.preflight_failed|reaction_dropped|started|committed|degraded`：Telegram 提交前还是提交后。
+8. canonical 发送行、`agent_events.send` / `send_degraded`、IPC 事件：远端结果之后的本地记账。
 
-按顺序停止在第一处缺失/失败：
+不要用“看到模型输出”推断已发到群里，也不要用“群里没消息”推断 provider 没运行。
 
-1. `telegram_ingest.update_committed` / canonical row / immutable event：Telegram update是否durable。
-2. `routing.decision` + `routing_claims`：目标、reason、started/skipped/coalesced是否明确。
-3. `agent_runtime.flush_started`：runtime是否得到response opportunity。
-4. `agent_runtime.context_packed`：`input_events/visible_count/obligation_count/rows_scanned/suffix_budget`是否合理；不查看正文。
-5. `llm_runs` + `agent_runtime.provider_turn_settled|flush_failed|model_silence`：provider是否完成、失败还是沉默；run同时给出system/tools/compacted/messages分段与thinking/send耗时，便于核对status。
-6. `agent_tool.execution_started|finished`：哪个tool、是否error；args只在受限本地`agent_events`已有契约内，不进入daemon log/debug报告。
-7. `agent_send.preflight_failed|started|committed|degraded`：Telegram create之前或之后的准确commit boundary。
-8. canonical sent row、`agent_events.send/send_degraded`与IPC event：远端结果后的本地持久化/展示是否完成。
+压缩相关：`auto_compact_skipped{last_turn_failed:true}` 是故障期间主动跳过；`auto_compact_triggered{stage:preflight}` 是请求前发现图片超预算；`context_input_rejected` 表示压缩失败或仍超预算，本轮未发请求、义务保留；`compaction_input_rejected` 表示摘要请求在调用前被拒（窗口不足或图片无法缩到预算）；`provider_attempt_failed{category:provider_request_too_large}` 是 413 进入 Pi overflow 恢复。
 
-不要用“看到模型有输出”推断公开发送，也不要用“群里没消息”推断provider没运行。
+## 媒体证据梯
 
-### 图片与视频理解证据梯
+1. `messages.media` 与 `media_file_ids`：哪个 bot 拥有可用的 `file_id`。
+2. `media.local_path` 与 `media_cache_ready/skip/error`：本地文件是否就绪（不代表已送入模型）。
+3. 视频先看 `video_transcoder`；`video_probe_failed` / `video_frame_extraction_failed` 是本地抽帧失败。
+4. vision 模式：`agent_events.kind=vision` 的 outcome，非空 `media.vision` 与对应 `media_update` event。context 模式：非空 `media.context_files`，以及 `llm_runs.images_attached` 与 `context_packed`。
+5. 压缩后的 `media_cache.post_compaction_pruned` 只给聚合数字。
 
-媒体到达模型由`media.mode`决定：默认vision模式由辅助视觉模型生成文字描述，context模式把图片/抽帧直接交给主模型。按顺序停止在第一处缺失/失败：
-
-1. canonical `messages.media`与`media_file_ids`证明哪个bot拥有可用`file_id`；`file_id`只能交给同一bot的Bot API。
-2. `media.local_path`与`media_cache_ready/skip/error`证明本地媒体source准备，不证明vision provider或上下文投影已经运行。视频path只是本地抽帧输入，不会进入IPC。
-3. 成功compaction后，`media_cache.post_compaction_pruned`只聚合`scanned/deleted/stale/failed`；`failed>0`保留DB path供下次重试，全部无候选时合法静默。`prune_observer_failed`表示observer自身失败，但compaction仍已提交。两者都不得加入media identity或path。
-4. 视频先检查`video_transcoder`；`video_transcoder_unavailable`在Telegram下载与FFmpeg之前立即no-op（vision模式）或降级为文本占位（context模式），可在安装并restart后重试。CLI只提醒operator，daemon log带`blocking=false`，不向群内发送告警。`video_probe_failed`/`video_frame_extraction_failed`证明失败发生在provider前的本地抽帧。不得记录命令stderr或path。
-5. vision模式：`agent_events.kind=vision`的固定`outcome`、`frames`与`providerCalled`证明foreground识别结果；deployment并发门会在视频下载前排队。context模式：非空`media.context_files`证明派生图片已持久化并会随消息事件的文本段进入provider上下文；准备失败记`agent_events`的`error`（`stage=context_media`）。跨bot路由时应使用任一已配置且有mapping的接收bot，`file_id_unavailable`只表示所有可用source均缺失。
-6. vision模式：非空`media.vision`与对应`message_events.kind=media_update`证明描述已持久化并进入append-only provider队列；主模型选择别的话题不等于没有识图。context模式：图片就位与否以`llm_runs.images_attached`与本轮`context_packed`日志为证。
-7. `/tg attach`的snapshot/history直接读display cache path与`media.vision`（`mediaDesc`），live路径读`vision_update`；媒体inline展示与provider上下文图片是两条独立链路。全局、A、B等filter都应显示同一群消息描述，filter只限制LOCAL/usage。
-
-不得把私人图片、OCR正文、`file_unique_id`、`file_id`或本地path复制进daemon日志；内容取证只在明确授权的本机SQLite/provider-context检查中短暂查看。
-
-## 结构化日志契约
-
-每行是schema v1 JSON：
+## 日志契约
 
 ```json
-{"schema":1,"ts":"...","level":"info","component":"agent_send","event":"committed","fields":{"bot_id":"A","sent_count":1,"trigger_message_id":42}}
+{"schema":1,"ts":"...","level":"info","component":"agent_send","event":"committed","fields":{"bot_id":"A","sent_count":1}}
 ```
 
-- 调用`src/observability/log.ts`的`log.debug/info/warn/error(component,event,fields)`；production daemon模块不得裸用`console.*`。
-- `component/event`使用稳定snake_case；字段只传boolean、有限number、短enum/identity。Error只先转固定category，不传message/stack。
-- 高频progress只按固定批次记录；禁止token delta、typing heartbeat、每字节/chunk日志。
-- 新event必须说明它区分了哪个相邻状态；如果现有event/DB已能回答，就不要新增。
-- `data/daemon.log`在受控spawn前按8 MiB轮转，保留`.1`–`.3`，mode 0600。foreground也输出同一JSONL。
+- 生产 daemon 代码只用 `src/observability/log.ts` 的 `log.debug/info/warn/error(component, event, fields)`，不用 `console.*`。
+- `component`/`event` 用稳定 snake_case；字段只放 boolean、有限数字、短枚举或身份。Error 先转固定 category。
+- 不记高频进度（token delta、typing 心跳、每个 chunk）。
+- `data/daemon.log` 在每次受控 start/restart 前（systemd unit 的 `ExecStartPre` 同样执行）按 8 MiB 轮转，保留 `.1`–`.3`，权限 0600。
 
-Telegram `/model` 复用 `telegram_control` 审计的 command/target/authorized/outcome；busy、permission_denied、stale_menu、image_input_unsupported 与 config_write_failed 可区分。成功切换另有 `agent_runtime/model_changed` 的 bot/provider/model/reasoning/epoch，准备或本地提交失败为 `model_change_failed` 的固定category；菜单远端失败复用 `telegram_control/operation_failed` 的 callback_answer/menu_edit operation，不重试远端创建。模型身份、epoch与现有manifest足以关联，无callback data、凭据或异常原文进入日志。
+## 新功能的 Debug impact
 
-## 新功能强制 Debug impact 检查
+动手前回答并写进任务说明：
 
-每个新功能/行为改动在实现前回答，并写进任务说明：
+1. 成功、合法 no-op/沉默、可重试失败、不可重试/结果未知分别怎么观察？
+2. 用哪些已有 identity 跨边界关联？
+3. 哪些字段绝不能记？每个事件/查询/队列的上限是多少？
+4. `bun run debug` 能否判断故障停在哪一层？需要新 finding 吗？
+5. Cache impact 是否仍为 NONE、0 新增 LLM 调用？
 
-1. 成功、合法no-op/沉默、可重试失败、不可重试/unknown commit分别如何观察？
-2. 用哪些已有identity跨边界关联？是否误把log当业务authority？
-3. 哪些字段绝不能记录？每事件/查询/队列上限是多少？
-4. `bun run debug`能否判断故障停在哪层？需要新增finding还是现有证据足够？
-5. 回归测试是否捕获稳定event/category并放入secret/content canary？
-6. 是否仍为Cache impact NONE、0新增LLM call/token？若不是，按cache流程另行处理。
-
-完成前必须跑相关logger/report测试，并用fixture验证至少成功与一个失败/no-op路径。只写“加日志”而没有状态区分、隐私边界与验证，不算完成。
-
-## 调查与修复模板
-
-1. 保存只读报告参数和聚合结论，不复制群正文。
-2. 用message/run/epoch在SQLite与JSONL间关联，标出第一处状态分叉。
-3. 建确定性fixture复现该分叉；外部服务故障优先fake，不用生产群注入失败。
-4. 修职责拥有层；日志只补缺失的可观察状态，不能用重试掩盖unknown commit。
-5. 验证回归、source audit、cache golden、全量unit/typecheck；真实smoke单独说明授权与成本。
-
-参考案例一（精确回复失败）：route/run/send 均存在，`agent_send.preflight_failed{category:reply_not_visible}` 证明失败发生在 Telegram create 前；修复的是 turn-local visibility 时序，而不是重试 Telegram 或要求模型更积极。
-
-参考案例二（provider context 取证）：历史 session 里的 `search` call/result 证明 TinyFish 返回没有被 context extension 过滤；当时 context inventory 显示当前工具只剩 `send`，再回溯配置归一化即可定位“省略字段被改成禁用”，无需猜模型为何不调用。
-
-## 未交付的 Telegram 路由
-
-`debug` 的每 bot `pending_dispatch` 显示尚未交付的 update_id、message_id 与 kind，并产生 `pending_telegram_dispatch` finding。非空时 poller 会先恢复这条 handoff，尚未继续拉取；结合 `telegram_poller.dispatch_pending` 的固定 category 判断路由/本地存储失败。回调成功后该字段变为 null。报告不包含 raw update、正文或完整 URL，不应手动删 pending 行来跳过失败。
+只写“加日志”而没有状态区分、隐私边界与验证，不算完成。修复时改职责拥有层，日志只补缺失的可观察状态，绝不用重试掩盖结果未知的提交。
