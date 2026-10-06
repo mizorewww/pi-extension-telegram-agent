@@ -11,6 +11,7 @@ import {
 	DefaultResourceLoader,
 	SessionManager,
 	SettingsManager,
+	resizeImage,
 	VERSION as PI_VERSION,
 	type AgentSession,
 	type AgentSessionEvent,
@@ -920,6 +921,39 @@ export class BotRuntime {
 			});
 			return { failure: "summary input exceeds model window" };
 		}
+		// Recovery must not send the same oversized image payload to the summary model.
+		// Resize only this uncached summary request; stored files and chat prefixes stay intact.
+		if (Array.isArray(content)) {
+			const images = content.filter((block) => block.type === "image");
+			const imageBytes = images.reduce((sum, image) => sum + Buffer.from(image.data, "base64").length, 0);
+			if (imageBytes > this.bot.contextImageBudgetBytes) {
+				const maxBytes = Math.floor(this.bot.contextImageBudgetBytes / images.length);
+				const resized = new Map<string, Awaited<ReturnType<typeof resizeImage>>>();
+				for (const image of images) {
+					signal.throwIfAborted();
+					const bytes = Buffer.from(image.data, "base64");
+					if (bytes.length <= maxBytes) continue;
+					const key = `${image.mimeType}:${image.data}`;
+					if (!resized.has(key))
+						resized.set(
+							key,
+							maxBytes > 0
+								? await resizeImage(bytes, image.mimeType, { maxBytes: Math.floor(maxBytes / 3) * 4 })
+								: null,
+						);
+					const result = resized.get(key);
+					if (!result || Buffer.from(result.data, "base64").length > maxBytes) {
+						log.warn("agent_runtime", "compaction_input_rejected", {
+							bot_id: this.bot.id,
+							category: "image_budget_exceeded",
+						});
+						return { failure: "summary images exceed transport budget" };
+					}
+					image.data = result.data;
+					image.mimeType = result.mimeType;
+				}
+			}
+		}
 		const request = {
 			systemPrompt: COMPACTION_SUMMARY_PROMPT,
 			messages: [{ role: "user" as const, content, timestamp: Date.now() }],
@@ -1262,6 +1296,7 @@ export class BotRuntime {
 		// Native prompt preflight installs system/tools even on the first request; the
 		// before_agent_start extension appends this batch as a persistent custom message.
 		// Make packed references addressable during the turn; durable visibility commits below.
+		await this.checkContextImageBudget(details);
 		for (const messageId of packed.visibleMessageIds) this.visibleMessageIds.add(messageId);
 		this.pendingTurnContext = details;
 		try {
@@ -1374,6 +1409,35 @@ export class BotRuntime {
 		if (!Number.isSafeInteger(messageId) || messageId <= 0) return;
 		const chatId = this.config.groupChatId;
 		removeReplyObligations(this.db, this.bot.id, [{ chatId, messageId }]);
+	}
+
+	/** Check before appending the batch, including after a failed or restored turn. */
+	private async checkContextImageBudget(pending: TelegramContextDetails): Promise<void> {
+		if (!this.session || this.config.media.mode !== "context") return;
+		const imageBytes = () =>
+			contextImageBytes(
+				this.session!.sessionManager.buildContextEntries(),
+				join(this.config.dataDir, "media"),
+				pending,
+			);
+		const bytes = imageBytes();
+		if (bytes <= this.bot.contextImageBudgetBytes) return;
+		log.info("agent_runtime", "auto_compact_triggered", {
+			bot_id: this.bot.id,
+			stage: "preflight",
+			image_bytes: bytes,
+			image_budget: this.bot.contextImageBudgetBytes,
+		});
+		try {
+			await this.compactSession();
+		} catch (error) {
+			log.warn("agent_runtime", "context_input_rejected", { bot_id: this.bot.id, category: "compaction_failed" });
+			throw error;
+		}
+		if (imageBytes() > this.bot.contextImageBudgetBytes) {
+			log.warn("agent_runtime", "context_input_rejected", { bot_id: this.bot.id, category: "image_budget_exceeded" });
+			throw new Error("context image budget exceeded after compaction");
+		}
 	}
 
 	/** Enforce image transport pressure after the durable batch commit; lifecycle owns file deletion. */

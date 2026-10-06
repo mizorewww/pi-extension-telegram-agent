@@ -711,6 +711,17 @@ export default function (pi) {
 			entry(2, ["b.jpg"]);
 			const entries = manager.buildContextEntries();
 			expect(contextImageBytes(entries, root)).toBe(3000);
+			const pending = {
+				version: 4 as const,
+				consumedSeq: 3,
+				providerText: "text",
+				blocks: [{ type: "image" as const, name: "a.jpg", mime: "image/jpeg" }],
+				stickerCandidates: "",
+				visibleMessageIds: [3],
+				events: [],
+			};
+			expect(contextImageBytes(entries, root, pending)).toBe(4000);
+			expect(manager.buildContextEntries()).toEqual(entries);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

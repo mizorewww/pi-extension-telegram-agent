@@ -80,8 +80,13 @@ export function isTelegramContextDetails(value: unknown): value is TelegramConte
 }
 
 /** File bytes per image occurrence in the active Pi context, before base64 encoding. */
-export function contextImageBytes(entries: readonly SessionEntry[], mediaDir: string): number {
+export function contextImageBytes(
+	entries: readonly SessionEntry[],
+	mediaDir: string,
+	pending?: TelegramContextDetails,
+): number {
 	let bytes = 0;
+	const details: TelegramContextDetails[] = pending ? [pending] : [];
 	for (const entry of entries) {
 		if (
 			entry.type !== "custom_message" ||
@@ -89,7 +94,10 @@ export function contextImageBytes(entries: readonly SessionEntry[], mediaDir: st
 			!isTelegramContextDetails(entry.details)
 		)
 			continue;
-		for (const block of entry.details.blocks) {
+		details.push(entry.details);
+	}
+	for (const detail of details) {
+		for (const block of detail.blocks) {
 			if (block.type !== "image") continue;
 			try {
 				bytes += statSync(join(mediaDir, block.name)).size;

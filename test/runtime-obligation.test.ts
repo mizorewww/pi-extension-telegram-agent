@@ -10,6 +10,8 @@ import { Database } from "bun:sqlite";
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { guardProviderCall } from "../src/agent/provider-guard.ts";
+import { getConsumedSeq } from "../src/db/message-events.ts";
 import { BotRuntime } from "../src/agent/runtime.ts";
 import type { AppConfig, BotConfig } from "../src/config.ts";
 import type { BotApi } from "../src/telegram/api.ts";
@@ -863,7 +865,7 @@ for (const supportsImages of [true, false]) {
 	});
 }
 
-for (const failure of ["auth", "overflow"] as const) {
+for (const failure of ["auth", "overflow", "transport", "persistent_transport"] as const) {
 	test(`native compaction skips failed-turn thresholds but preserves ${failure} recovery semantics`, async () => {
 		const root = mkdtempSync(join(tmpdir(), "tg-failed-compaction-"));
 		const { rt, db } = setup();
@@ -908,7 +910,7 @@ for (const failure of ["auth", "overflow"] as const) {
 		let calls = 0;
 		session.agent.streamFunction = () => {
 			const stream = createAssistantMessageEventStream();
-			if (++calls === 1 || failure === "auth") {
+			if (++calls === 1 || failure === "auth" || failure === "persistent_transport") {
 				stream.push({
 					type: "error",
 					reason: "error",
@@ -916,12 +918,20 @@ for (const failure of ["auth", "overflow"] as const) {
 						...assistantResult(0),
 						content: [],
 						stopReason: "error",
-						errorMessage: failure === "auth" ? "401 Unauthorized" : "maximum context length exceeded",
+						errorMessage:
+							failure === "auth"
+								? "401 Unauthorized"
+								: failure === "overflow"
+									? "maximum context length exceeded"
+									: "GetChatMessage HTTP 413: Request Entity Too Large",
 					},
 				});
 			} else stream.push({ type: "done", reason: "stop", message: assistantResult() });
 			return stream;
 		};
+		const upstream = session.agent.streamFunction;
+		session.agent.streamFunction = (model, context, options) =>
+			guardProviderCall(() => upstream(model, context, options), model, options?.signal, { timeoutMs: 1000 });
 		try {
 			await session.prompt("x".repeat(140_000));
 			expect(summaries).toBe(failure === "auth" ? 0 : 1);
@@ -1009,3 +1019,118 @@ test("an oversized summary input is refused before any paid request and records 
 		db.close();
 	}
 });
+
+for (const compactResult of ["success", "failed", "unchanged"] as const) {
+	const compactSucceeds = compactResult === "success";
+	test(`image budget preflight after a failed turn preserves delivery (${compactResult})`, async () => {
+		const root = mkdtempSync(join(tmpdir(), "tg-image-preflight-"));
+		const { rt, db, sent } = setup();
+		mkdirSync(join(root, "media"));
+		writeFileSync(join(root, "media", "photo.png"), new Uint8Array(100));
+		(rt as any).config.dataDir = root;
+		(rt as any).config.media.mode = "context";
+		(rt as any).bot.contextImageBudgetBytes = 200;
+		const session = (rt as any).session;
+		session.sessionManager.appendCustomMessageEntry("telegram_context_v2", "old images", false, imageDetails(1));
+		(rt as any).lastTurnFailed = true;
+		let compactions = 0;
+		session.compact = async () => {
+			compactions++;
+			if (compactResult === "failed") throw new Error("summary unavailable");
+			if (compactResult === "unchanged") return;
+			const marker = session.sessionManager.appendCustomEntry("retained_marker", {});
+			session.sessionManager.appendCompaction("summary", marker, 40000, { visibleMessageIds: [] });
+		};
+		const prompt = session.prompt;
+		session.prompt = async () => {
+			expect(session.sessionManager.buildContextEntries().filter((e: any) => e.type === "custom_message")).toHaveLength(
+				0,
+			);
+			await prompt();
+		};
+		insertMessage(db, 9901, "private-preflight-canary @bot");
+		const logs: string[] = [];
+		const restoreLogs = setLogSink((line) => logs.push(line));
+		const cursor = getConsumedSeq(db, BOT_ID, CHAT_ID);
+		try {
+			rt.trigger("explicit", { reason: "explicit", chatId: CHAT_ID, messageId: 9901 });
+			await (rt as any).flushPromise;
+			expect(compactions).toBe(1);
+			expect(sent).toHaveLength(compactSucceeds ? 1 : 0);
+			expect(obligationCount(db)).toBe(compactSucceeds ? 0 : 1);
+			if (!compactSucceeds) {
+				expect(getConsumedSeq(db, BOT_ID, CHAT_ID)).toBe(cursor);
+				expect(
+					logs.map((line) => JSON.parse(line)).find((line) => line.event === "context_input_rejected")?.fields.category,
+				).toBe(compactResult === "failed" ? "compaction_failed" : "image_budget_exceeded");
+				expect(db.query("SELECT COUNT(*) AS n FROM bot_visible_messages WHERE message_id=9901").get()).toEqual({
+					n: 0,
+				});
+				expect(session.sessionManager.getBranch().filter((e: any) => e.type === "custom_message")).toHaveLength(1);
+			}
+			expect(logs.join("")).not.toContain("private-preflight-canary");
+			expect(logs.join("")).not.toContain(root);
+		} finally {
+			restoreLogs();
+			db.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+for (const validImage of [true, false]) {
+	test(`summary image transport budget preserves all images or refuses the call (${validImage})`, async () => {
+		const root = mkdtempSync(join(tmpdir(), "tg-summary-budget-"));
+		const { rt, db } = setup();
+		mkdirSync(join(root, "media"));
+		const png = Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=",
+			"base64",
+		);
+		writeFileSync(
+			join(root, "media", "photo.png"),
+			validImage ? Buffer.concat([png, Buffer.alloc(4096)]) : Buffer.alloc(4096),
+		);
+		(rt as any).config.dataDir = root;
+		(rt as any).bot.contextImageBudgetBytes = 1000;
+		(rt as any).compactionModel = { ...fakeModel(), input: ["text", "image"] };
+		let calls = 0;
+		(rt as any).modelRuntime = {
+			streamSimple: (_model: unknown, request: any) => {
+				calls++;
+				const images = request.messages[0].content.filter((b: any) => b.type === "image");
+				expect(images).toHaveLength(8);
+				expect(images.reduce((n: number, b: any) => n + Buffer.from(b.data, "base64").length, 0)).toBeLessThanOrEqual(
+					1000,
+				);
+				const stream = createAssistantMessageEventStream();
+				stream.push({ type: "done", reason: "stop", message: assistantResult() });
+				return stream;
+			},
+		};
+		const messages = [1, 2].map((id) => ({
+			role: "custom",
+			customType: "telegram_context_v2",
+			content: `photo #${id}`,
+			display: false,
+			timestamp: id,
+			details: imageDetails(id),
+		}));
+		const original = JSON.stringify(messages);
+		try {
+			const result = await (rt as any).generateCompactionSummary(
+				{ messagesToSummarize: messages, turnPrefixMessages: [] },
+				new AbortController().signal,
+			);
+			expect(calls).toBe(validImage ? 1 : 0);
+			expect(result).toMatchObject(
+				validImage ? { summary: "summary" } : { failure: "summary images exceed transport budget" },
+			);
+			expect(JSON.stringify(messages)).toBe(original);
+			expect(readFileSync(join(root, "media", "photo.png")).length).toBeGreaterThan(1000);
+		} finally {
+			db.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
