@@ -3,7 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager, buildSessionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { DebugDeploymentIdentity } from "../config.ts";
+import type { AppConfig } from "../config.ts";
 import { getSessionManifest } from "../db/message-events.ts";
 import { projectTelegramContext } from "../agent/extensions/context.ts";
 import { buildSystemPrompt } from "../agent/prompt.ts";
@@ -59,7 +59,7 @@ function messageMetadata(message: AgentMessage, index: number) {
  */
 export function inspectProviderContext(
 	db: Database,
-	deployment: DebugDeploymentIdentity,
+	deployment: AppConfig,
 	botId: string,
 	includeContent = false,
 	reasoning?: DebugModelReasoning,

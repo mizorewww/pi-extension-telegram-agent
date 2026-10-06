@@ -20,7 +20,7 @@ export default defineConfig({
 	// Provider prefix cache retention: none / short / long. "short" is the cheapest choice.
 	cache_retention: "short",
 	// Model used for context compaction (provider/model:thinking). Runs rarely; pick a cheap one.
-	// If this model's request fails, compaction retries once with the bot's main model.
+	// A failed summary keeps the old context; it never falls back to the bot's main model.
 	compaction_model: "openai-codex/gpt-5.6-luna:low",
 	// Vision model that describes images and sampled video frames for the chat model.
 	// Only used in the default media mode ("vision") when vision.enabled is true.

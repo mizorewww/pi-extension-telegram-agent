@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { loadDebugDeploymentIdentity } from "../src/config.ts";
+import { loadConfig } from "../src/config.ts";
 import { readPid, pidAlive } from "../src/daemon/pid.ts";
 import { buildDebugReport, parseDebugDuration, type DebugModelReasoning } from "../src/observability/debug-report.ts";
 import { readStructuredLogTail } from "../src/observability/log.ts";
@@ -51,16 +51,17 @@ export async function main(args = process.argv.slice(2), rootDir = process.cwd()
 
 	let db: Database | null = null;
 	try {
-		const config = loadDebugDeploymentIdentity(rootDir);
+		const config = loadConfig(rootDir, { identityOnly: true });
+		const configuredIds = config.bots.map((bot) => bot.id);
 		if (showProviderContent && botId == null) {
 			process.stderr.write(
 				"--show-provider-content requires --bot <id> to prevent an accidental multi-bot content dump.\n",
 			);
 			return 2;
 		}
-		const botIds = botId == null ? config.botIds : [botId];
-		if (botId != null && !config.botIds.includes(botId)) {
-			process.stderr.write(`Unknown bot id. Valid ids: ${config.botIds.join(", ")}\n`);
+		const botIds = botId == null ? configuredIds : [botId];
+		if (botId != null && !configuredIds.includes(botId)) {
+			process.stderr.write(`Unknown bot id. Valid ids: ${configuredIds.join(", ")}\n`);
 			return 2;
 		}
 		let modelReasoning: DebugModelReasoning[] | undefined;
@@ -76,7 +77,7 @@ export async function main(args = process.argv.slice(2), rootDir = process.cwd()
 							scope: "main" as const,
 							provider: bot.provider,
 							model: bot.model,
-							requested: (bot.reasoningEffort ?? "off") as ModelThinkingLevel,
+							requested: bot.reasoningEffort as ModelThinkingLevel,
 						},
 						{
 							bot_id: bot.id,
@@ -87,7 +88,7 @@ export async function main(args = process.argv.slice(2), rootDir = process.cwd()
 						},
 					];
 				}),
-				...(config.visionEnabled && config.media.mode === "vision"
+				...(config.vision.enabled && config.media.mode === "vision"
 					? (() => {
 							const vision = parsePiModelReference(config.auxiliaryVisualModel)!;
 							return [
@@ -121,7 +122,7 @@ export async function main(args = process.argv.slice(2), rootDir = process.cwd()
 			daemon: { pid, alive: pid != null && pidAlive(pid), socket: existsSync(join(config.dataDir, "daemon.sock")) },
 			modelReasoning,
 			videoTranscoder: {
-				required: config.visionEnabled || config.media.mode === "context",
+				required: config.vision.enabled || config.media.mode === "context",
 				...inspectVideoTranscoder(),
 			},
 		});
