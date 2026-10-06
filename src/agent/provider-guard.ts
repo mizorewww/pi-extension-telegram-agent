@@ -14,6 +14,18 @@ export function providerRetryPolicy(maxRetries: number): RetryPolicy {
 
 export type GuardedCall = (signal: AbortSignal) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
 
+/** Pi recognizes request_too_large, but not a proxy's HTML HTTP 413 response. */
+function normalizeRequestSizeError(message: AssistantMessage): AssistantMessage {
+	if (
+		message.stopReason !== "error" ||
+		!/\b(?:HTTP\s+413|413\s+(?:Request Entity Too Large|Payload Too Large)|request entity too large|payload too large)\b/i.test(
+			message.errorMessage ?? "",
+		)
+	)
+		return message;
+	return { ...message, errorMessage: "request_too_large: provider request exceeds transport size limit" };
+}
+
 function failure(model: Model<Api>, stopReason: "error" | "aborted", errorMessage: string): AssistantMessage {
 	return {
 		role: "assistant",
@@ -53,7 +65,7 @@ export function guardProviderCall(
 	const fail = (reason: "error" | "aborted", message: string) => {
 		if (finished) return;
 		cleanup();
-		const result = failure(model, reason, message);
+		const result = normalizeRequestSizeError(failure(model, reason, message));
 		output.push({ type: "error", reason, error: result });
 		output.end(result);
 		controller.abort();
@@ -68,7 +80,7 @@ export function guardProviderCall(
 			const stream = await call(controller.signal);
 			for await (const event of stream) {
 				if (finished) return;
-				output.push(event);
+				output.push(event.type === "error" ? { ...event, error: normalizeRequestSizeError(event.error) } : event);
 				if (event.type === "done" || event.type === "error") {
 					cleanup();
 					output.end();
@@ -79,7 +91,7 @@ export function guardProviderCall(
 				const result = await stream.result();
 				if (finished) return;
 				cleanup();
-				output.end(result);
+				output.end(normalizeRequestSizeError(result));
 			}
 		} catch (error) {
 			fail("error", error instanceof Error ? error.message : "provider request failed");

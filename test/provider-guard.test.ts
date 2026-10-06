@@ -2,12 +2,14 @@ import { expect, test } from "bun:test";
 import {
 	createAssistantMessageEventStream,
 	isRetryableAssistantError,
+	isContextOverflow,
 	retryAssistantCall,
 	type Api,
 	type Model,
 } from "@earendil-works/pi-ai";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { guardProviderCall, providerRetryPolicy } from "../src/agent/provider-guard.ts";
+import { classifyPiProviderFailure } from "../src/agent/model-runtime.ts";
 import { runSmokePrompt } from "../scripts/smoke-pi.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
@@ -152,3 +154,46 @@ test("smoke rejects resolved provider failures, empty or stale replies, and inco
 		else await expect(runSmokePrompt(session)).rejects.toThrow("SMOKE FAILED");
 	}
 });
+
+for (const phase of ["throw", "stream"] as const) {
+	test(`HTTP 413 from ${phase} enters Pi overflow recovery without retrying the request`, async () => {
+		let calls = 0;
+		const result = await guardProviderCall(
+			() => {
+				calls++;
+				const errorMessage = "GetChatMessage HTTP 413: <html>413 Request Entity Too Large</html>";
+				if (phase === "throw") throw new Error(errorMessage);
+				const stream = createAssistantMessageEventStream();
+				stream.push({
+					type: "error",
+					reason: "error",
+					error: {
+						role: "assistant",
+						content: [],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "error",
+						errorMessage,
+						timestamp: Date.now(),
+					},
+				});
+				return stream;
+			},
+			model,
+			undefined,
+			{ timeoutMs: 1000 },
+		).result();
+		expect(isContextOverflow(result, model.contextWindow)).toBe(true);
+		expect(classifyPiProviderFailure(result.errorMessage)).toBe("provider_request_too_large");
+		expect(calls).toBe(1);
+	});
+}

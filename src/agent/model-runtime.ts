@@ -164,6 +164,7 @@ export type PiProviderFailureCategory =
 	| "provider_auth_failed"
 	| "provider_timeout"
 	| "provider_aborted"
+	| "provider_request_too_large"
 	| "provider_request_failed";
 
 /** Collapse untrusted provider/OAuth error text into a bounded non-secret category. */
@@ -178,5 +179,6 @@ export function classifyPiProviderFailure(error: unknown): PiProviderFailureCate
 	if (/\bauth\b|unauthori[sz]ed|forbidden|\b401\b|\b403\b/i.test(text)) return "provider_auth_failed";
 	if (/timeout|timed out/i.test(text)) return "provider_timeout";
 	if (/abort/i.test(text)) return "provider_aborted";
+	if (/request_too_large/i.test(text)) return "provider_request_too_large";
 	return "provider_request_failed";
 }
