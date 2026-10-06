@@ -7,10 +7,10 @@ provider prefix cache 是本项目的第一成本杠杆。本文是“哪些字�
 1. **永不改写已发出的 prefix**，新信息只作为新 suffix 追加。
 2. system prompt 顺序固定：共享群聊协议 → persona → sticker 目录。tool 的 name/description/schema 及顺序固定。
 3. Telegram 内容只以新的结构化 session entry 追加；已写入 session 的字节不重算。edit、reply metadata、vision 描述都作为 delta 追加（`message_edit` / `message_metadata` / `media_update`）。
-4. 唯一的每请求动态尾部是 sticker 候选：只存在 `details.stickerCandidates`，由 `context` 事件投影成紧跟最后一批消息的〔系统附注〕独立消息，**永不写入持久化 content**（compaction 直接读持久化字节）。
+4. **每个请求都必须是下一个请求的严格前缀。** 生产数据显示，只要上一请求的末尾在下一请求里消失，provider 就要回退到更早的缓存点，每轮多 miss 一万多 token。所以不存在“只挂在最后一条”的动态尾部：每批消息的 sticker 附注（只列该批新出现、本 bot 能发、不在固定目录里的 sticker）存在 `details.stickerCandidates`，由 `context` 事件投影成紧跟**该批**的〔系统附注〕独立消息，之后永远原样保留；它**永不写入持久化 content**（compaction 直接读持久化字节）。
 5. 只有完整 context fingerprint 相同且 session 文件存在时才恢复 session；否则在打开旧 session **之前**新建 session、推进 epoch，旧文件保留。
 6. UI、IPC、日志、控制命令、本地媒体准备都不得改变 provider payload。
-7. 所有 provider 输入有界：每轮 suffix 默认 ≤12,000 token，单条消息 ≤4,096 token，网页正文 ≤2,048 token，sticker 候选 ≤8 条。
+7. 所有 provider 输入有界：每轮 suffix 默认 ≤12,000 token，单条消息 ≤4,096 token，网页正文 ≤2,048 token，每批 sticker 附注 ≤8 条。
 
 ## 哪些东西是 cache-visible
 
@@ -35,8 +35,8 @@ golden 意外失败是报警：先查原因，不要直接改 expected。
 
 ```text
 system:   共享协议 --- persona [--- sticker 目录]
-messages: Telegram 批次（custom message）、assistant/tool/summary entries；
-          〔系统附注〕sticker 候选只跟在最后一批 Telegram 消息之后
+messages: Telegram 批次（custom message，各自后面可能跟一条〔系统附注〕sticker 附注）、
+          assistant/tool/summary entries
 tools:    send, search, run_js（按 bot 开关过滤，顺序不变）
 ```
 
@@ -75,7 +75,9 @@ provider 没有返回 cache 用量时，若相邻两次请求的 system、tools 
 
 ## 版本记录
 
-当前：**25**。更早的版本见 git 历史。
+当前：**26**。更早的版本见 git 历史。
+
+- **v26**：sticker 附注改为每批各一条、永久保留（只列该批新出现的、不在固定目录里的可发送 sticker），让每个请求成为下一请求的严格前缀；系统提示里的工具声明按 bot 实际开启的工具生成（三个工具全开时字节不变）。
 
 - **v25**：sticker 候选改为紧跟最后一批消息的〔系统附注〕独立消息（以前拼在最后一条正文末尾，模型把它读成最后发言者粘贴的内容，2026-10 生产事故）；协议说明附注由系统附加、群成员不可见；摘要输入去掉 thinking，摘要 prompt 要求只记录实际发生的事。
 - **v24**：引用父消息正文随消息以 `reply_snapshot` 保存，与当前正文共享单条预算（serializer v5）。

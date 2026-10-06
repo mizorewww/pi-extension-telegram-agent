@@ -65,12 +65,12 @@ Telegram create 不可回滚，所以：
 ## Sticker
 
 - `media.file_unique_id`/`short_id` 是共享身份；`media_file_ids(bot_id, file_id)` 才代表某个 bot 能发。
-- system prompt 末尾是该 bot 可发送的固定目录（`s<id>: <emoji> <描述>`）。另有最多 8 条“近期群里出现过、本 bot 也能发”的候选，以〔系统附注〕独立消息投影在最后一批消息之后，不写入持久化内容（见 [cache.md](cache.md)）。
+- system prompt 末尾是该 bot 可发送的固定目录（`s<id>: <emoji> <描述>`）。群友发出的、目录外但本 bot 也能发的 sticker，在它首次出现的那一批消息之后以一条〔系统附注〕列出（每批 ≤8 条），之后原样保留，不写入持久化内容（见 [cache.md](cache.md)）。
 - `sendSticker` 直接用本 bot 的 `file_id`，不下载重传。
 
 ## 工具
 
-固定为 `send`、`search`、`run_js`，顺序固定（cache 可见）。`src/agent/tools.ts` 是工具说明的唯一权威。
+固定为 `send`、`search`、`run_js`，顺序固定（cache 可见）。`src/agent/tools.ts` 是工具说明的唯一权威；系统提示里的“可用工具”声明按 bot 实际开启的工具生成。
 
 - `search(query | url)`：TinyFish；query 最多 5 条短结果；url 只接受公网 HTTP(S)（本地预检 userinfo、localhost、私网、link-local），正文 ≤8,000 字符再截到 ≤2,048 token，并包在“不可信网页内容”边界里。日志不记录 query、URL 路径或正文。
 - `run_js`：见下节威胁模型。

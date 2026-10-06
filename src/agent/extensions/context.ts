@@ -136,19 +136,16 @@ export const TELEGRAM_STICKER_CANDIDATES_TYPE = "telegram_sticker_candidates";
  * are also persisted as plain-text content for compaction/debugging, but restored sessions never
  * need to parse rendered Telegram grammar to recover message identities.
  *
- * Sticker candidates ride a separate message right after the LAST context message: a tail glued
- * to the chat text reads as if the last speaker had pasted it, and a separate message keeps the
- * context message itself byte-stable once a newer turn moves the candidates on.
+ * Each batch's sticker note rides its own message right after that batch: glued to the chat text
+ * it read as if the last speaker had pasted it, and keeping every note in place makes each
+ * request a strict prefix of the next one.
  */
 export function projectTelegramContext(
 	messages: AgentMessage[],
 	resolveImage?: TelegramContextImageResolver,
 	includeStickerCandidates = true,
 ): AgentMessage[] {
-	const lastTelegramContext = messages.findLastIndex(
-		(message) => message.role === "custom" && message.customType === TELEGRAM_CONTEXT_TYPE,
-	);
-	return messages.flatMap((message, index): AgentMessage[] => {
+	return messages.flatMap((message): AgentMessage[] => {
 		if (message.role === "toolResult" && message.toolName === "send") {
 			const details = message.details as { sent?: unknown; outcome?: unknown } | undefined;
 			const sent = Array.isArray(details?.sent)
@@ -167,8 +164,7 @@ export function projectTelegramContext(
 		if (message.role !== "custom" || message.customType !== TELEGRAM_CONTEXT_TYPE) return [message];
 		if (!isTelegramContextDetails(message.details)) return [message];
 		const projected = { ...message, content: projectContent(message.details, resolveImage) };
-		const candidates =
-			includeStickerCandidates && index === lastTelegramContext ? message.details.stickerCandidates.trim() : "";
+		const candidates = includeStickerCandidates ? message.details.stickerCandidates.trim() : "";
 		if (!candidates) return [projected];
 		return [
 			projected,

@@ -1,14 +1,11 @@
 // Fixed sticker catalog per bot (REQ-STICKER-0001).
 // Each bot can configure Telegram sticker set names; at startup the sets are fetched, media
-// identity + per-bot file_id persisted, and short_ids assigned from rowids. Catalog and recent
-// candidates share one line grammar — `s12: 😺 描述`, degrading to `s12: 😺` then `s12` — where
-// the description is the persisted vision text (media.vision JSON `text`, whitespace-collapsed,
-// ≤60 chars). Set names never appear in model-visible text (cache schema v17). The catalog block
-// sits in the stable system prompt, so the prefix is determined by config + DB catalog, and the
-// snapshot hash covers description text so a landing description starts a new epoch. Recent
-// visible user stickers are a separate bounded dynamic tail (cache schema v11) that lives only
-// in the context-event projection (extensions/context.ts adds it as a labelled message after the
-// last context message at request time); persisted custom message content never carries it.
+// identity + per-bot file_id persisted, and short_ids assigned from rowids. Catalog lines and
+// per-batch candidate notes share one grammar — `s12: 😺 描述`, degrading to `s12: 😺` then
+// `s12` — where the description is the persisted vision text (≤60 chars). Set names never appear
+// in model-visible text. The catalog sits in the stable system prompt (its snapshot hash starts a
+// new epoch when it changes); sendable user stickers outside the catalog are listed once, in a
+// labelled note after the batch where they first appear (extensions/context.ts).
 
 import type { Database } from "bun:sqlite";
 import { SYSTEM_NOTE_LABEL } from "../agent/prompt.ts";
@@ -18,7 +15,6 @@ import type { BotApi } from "../telegram/api.ts";
 
 export const STICKER_CATALOG_MAX = 120; // bounded local inventory and startup work
 export const CONTEXT_STICKER_CANDIDATE_MAX = 8;
-const CONTEXT_STICKER_SCAN_MAX = 64;
 
 export interface CatalogSticker {
 	file_unique_id: string;
@@ -223,63 +219,51 @@ function stickerLine(shortId: string, emoji: string | null, description: string)
 }
 
 /**
- * The newest distinct user stickers genuinely present in this bot's current context generation.
- * Candidates are bot-sendable, bounded, and assigned the global s<media.rowid> identity lazily
- * for historical rows created before ingest assigned sticker short ids.
+ * Sendable user stickers that first appear in one batch, excluding the fixed catalog. Each batch
+ * keeps its own note forever, so consecutive provider requests stay strict prefixes of each other;
+ * candidates get the global s<media.rowid> identity lazily for rows created before ingest did.
  */
-export function recentContextStickerCandidates(
+export function batchStickerCandidates(
 	db: Database,
 	botId: string,
 	chatId: number,
-	epoch: number,
-	newlyVisibleMessageIds: readonly number[],
-	limit = CONTEXT_STICKER_CANDIDATE_MAX,
+	messageIds: readonly number[],
+	catalogSets: readonly string[],
 ): string {
-	const boundedLimit = Math.min(CONTEXT_STICKER_CANDIDATE_MAX, Math.max(0, Math.floor(limit)));
-	if (boundedLimit === 0) return "";
+	if (messageIds.length === 0) return "";
 	const rows = db
 		.query(`
-			WITH visible(message_id) AS (
-				SELECT message_id
-				  FROM bot_visible_messages
-				 WHERE bot_id = ?1 AND chat_id = ?2 AND context_epoch = ?3
-				UNION
-				SELECT CAST(value AS INTEGER) FROM json_each(?4)
-			)
-			SELECT media.rowid, media.file_unique_id, media.short_id,
-			       media.sticker_emoji, media.vision
-			  FROM visible
+			SELECT media.rowid, media.file_unique_id, media.short_id, media.sticker_emoji, media.vision
+			  FROM json_each(?3) batch
 			  JOIN messages message
-			    ON message.chat_id = ?2 AND message.message_id = visible.message_id
+			    ON message.chat_id = ?2 AND message.message_id = CAST(batch.value AS INTEGER)
 			  JOIN media
 			    ON media.file_unique_id = json_extract(message.media, '$.file_unique_id')
 			 WHERE message.is_bot = 0
 			   AND json_extract(message.media, '$.kind') = 'sticker'
+			   AND COALESCE(media.sticker_set, '') NOT IN (SELECT value FROM json_each(?4))
 			   AND EXISTS (
 			     SELECT 1 FROM media_file_ids mapping
 			      WHERE mapping.bot_id = ?1 AND mapping.file_unique_id = media.file_unique_id
 			   )
-			 ORDER BY message.date DESC, message.message_id DESC
-			 LIMIT ?5
+			 ORDER BY message.date, message.message_id
 		`)
 		.all(
 			botId,
 			chatId,
-			epoch,
-			JSON.stringify([...new Set(newlyVisibleMessageIds)]),
-			CONTEXT_STICKER_SCAN_MAX,
+			JSON.stringify([...new Set(messageIds)]),
+			JSON.stringify([...catalogSets]),
 		) as ContextStickerRow[];
 	const seen = new Set<string>();
 	const lines: string[] = [];
 	for (const row of rows) {
-		if (seen.has(row.file_unique_id)) continue;
+		if (seen.has(row.file_unique_id) || lines.length >= CONTEXT_STICKER_CANDIDATE_MAX) continue;
 		seen.add(row.file_unique_id);
 		const shortId = row.short_id ?? `s${row.rowid}`;
 		if (!row.short_id) assignStickerShortId(db, row.file_unique_id);
 		lines.push(stickerLine(shortId, row.sticker_emoji, stickerDescription(row.vision)));
-		if (lines.length >= boundedLimit) break;
 	}
-	return lines.length > 0 ? `${SYSTEM_NOTE_LABEL}近期群里出现过、你也能发送的 sticker：\n${lines.join("\n")}` : "";
+	return lines.length > 0 ? `${SYSTEM_NOTE_LABEL}这批消息里出现了你也能发送的 sticker：\n${lines.join("\n")}` : "";
 }
 
 /** Fingerprint the exact state that shapes the prompt block: identity plus description text. */

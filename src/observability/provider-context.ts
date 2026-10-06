@@ -104,6 +104,7 @@ export function inspectProviderContext(
 	} | null;
 	const system = buildSystemPrompt(
 		readFileSync(bot.personaPath, "utf8"),
+		bot.tools,
 		bot.stickerSets.length > 0 ? stickerCatalogPromptBlock(db, bot.id, bot.stickerSets) : "",
 	);
 	const tools = TOOL_DEFS.filter((tool) =>

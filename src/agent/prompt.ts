@@ -3,17 +3,40 @@
 
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 25; // v25: sticker candidates ride a labelled system-note message
+export const CACHE_SCHEMA_VERSION = 26; // v26: per-batch sticker notes; tool declaration follows enabled tools
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
 
-// Fixed shared protocol is deliberately the first byte of every bot's system prompt so bots in
+export interface EnabledTools {
+	send: boolean;
+	search: boolean;
+	runJs: boolean;
+}
+
+const TOOL_SUMMARIES = [
+	["search", "联网搜索，也可读取一个公开网页"],
+	["run_js", "运行小型计算"],
+	["send", "唯一的公开发言通道，也能对某条消息点 reaction 表态"],
+] as const;
+const COUNT = ["零", "一", "两", "三"] as const;
+
+/** Describe only the tools this bot really has, so it never claims or calls a missing one. */
+export function toolCapabilityDeclaration(tools: EnabledTools): string {
+	const enabled = TOOL_SUMMARIES.filter(([name]) =>
+		name === "search" ? tools.search : name === "run_js" ? tools.runJs : tools.send,
+	);
+	const list = enabled.map(([name, summary]) => `${name}（${summary}）`).join("、");
+	const intro = enabled.length > 0 ? `你有${COUNT[enabled.length]}个工具：${list}。` : "你没有可用工具。";
+	const search = tools.search
+		? `被问"能不能搜索/查资料/看网页"时如实说明；需要外部信息时直接用 search。`
+		: `你不能联网搜索或读取网页，被问到时如实说明。`;
+	const silent = tools.send ? "" : "你不能在群里发言，只能观察。";
+	return `## 可用工具\n\n${intro}${search}${silent}`;
+}
+
+// The shared protocol is deliberately the first byte of every bot's system prompt so bots in
 // the same provider/cache cohort share the longest possible exact prefix.
-export const TOOL_CAPABILITY_DECLARATION = `## 可用工具
-
-你有三个工具：search（联网搜索，也可读取一个公开网页）、run_js（运行小型计算）、send（唯一的公开发言通道，也能对某条消息点 reaction 表态）。被问"能不能搜索/查资料/看网页"时如实说明；需要外部信息时直接用 search。`;
-
 export const SHARED_PROTOCOL = `# 群聊协议
 
 你在一个 Telegram 群里。群消息按时间顺序以如下格式出现在对话里：
@@ -31,12 +54,10 @@ export const SHARED_PROTOCOL = `# 群聊协议
 - 未被点名的概率插话可以按人设保持沉默
 - 人类明确 @你、回复你或使用你的配置名称点名时必须回应，不受概率插话的沉默或防刷屏启发式影响
 - 群里可能还有其他 bot 或成员；他们的消息你能看到，但不要替他们说话，也不要回复其他 bot 的消息
-
-${TOOL_CAPABILITY_DECLARATION}
 `;
 
-export function buildSystemPrompt(personaText: string, stickerCatalog = ""): string {
-	const base = `${SHARED_PROTOCOL}\n---\n\n# 人格与回应策略\n\n${personaText.trim()}`;
+export function buildSystemPrompt(personaText: string, tools: EnabledTools, stickerCatalog = ""): string {
+	const base = `${SHARED_PROTOCOL}\n${toolCapabilityDeclaration(tools)}\n\n---\n\n# 人格与回应策略\n\n${personaText.trim()}`;
 	const catalog = stickerCatalog.trim();
 	return catalog ? `${base}\n\n---\n\n${catalog}` : base;
 }

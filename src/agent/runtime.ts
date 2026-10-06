@@ -44,7 +44,7 @@ import { ensureVision, type VisionExecutor, type VisionUpdateSink } from "../med
 import type { VisionScheduler } from "../media/vision-scheduler.ts";
 import {
 	ensureStickerCatalog,
-	recentContextStickerCandidates,
+	batchStickerCandidates,
 	stickerCatalogPromptBlock,
 	stickerCatalogSnapshotHash,
 } from "../media/sticker-catalog.ts";
@@ -372,7 +372,7 @@ export class BotRuntime {
 		}
 		const stickerCatalog =
 			this.bot.stickerSets.length > 0 ? stickerCatalogPromptBlock(this.db, this.bot.id, this.bot.stickerSets) : "";
-		const systemPrompt = buildSystemPrompt(persona, stickerCatalog);
+		const systemPrompt = buildSystemPrompt(persona, this.bot.tools, stickerCatalog);
 		this.systemHash = sha256Short(systemPrompt);
 
 		const sendTool = {
@@ -1285,12 +1285,12 @@ export class BotRuntime {
 			// Deferred obligations stay pending until the next trigger or a compaction frees budget.
 			return false;
 		}
-		const stickerCandidates = recentContextStickerCandidates(
+		const stickerCandidates = batchStickerCandidates(
 			this.db,
 			this.bot.id,
 			chatId,
-			this.epoch,
 			packed.visibleMessageIds,
+			this.bot.stickerSets,
 		);
 		const stickerCandidateTokens = stickerCandidates ? estimateProviderTokensUpperBound(`\n\n${stickerCandidates}`) : 0;
 		const boundedStickerCandidates =
@@ -1299,11 +1299,9 @@ export class BotRuntime {
 			? estimateProviderTokensUpperBound(`\n\n${boundedStickerCandidates}`)
 			: 0;
 
-		// Persisted content is pure message bytes. The sticker candidate tail lives only in
-		// details.stickerCandidates and reaches the provider through the context-event
-		// projection (extensions/context.ts), which appends it to the last context message at
-		// request time. Never bake it into persisted bytes: compaction reads persisted content
-		// directly, and baked tails would accumulate one stale block per turn.
+		// Persisted content is pure message bytes. The batch's sticker note lives only in
+		// details.stickerCandidates and reaches the provider as a separate projected message after
+		// this batch; compaction reads persisted content directly and never sees it.
 		const selectedIds = new Set(packed.visibleMessageIds);
 		const delivered = obligations.filter((obligation) => selectedIds.has(obligation.messageId));
 		const details: TelegramContextDetails = {

@@ -16,11 +16,10 @@ import {
 	COMPACTION_SUMMARY_PROMPT,
 	TELEGRAM_TURN_PROMPT,
 	REPLY_RECOVERY_PROMPT,
-	SHARED_PROTOCOL,
-	TOOL_CAPABILITY_DECLARATION,
+	toolCapabilityDeclaration,
 } from "../src/agent/prompt.ts";
 import { TOOL_DEFS, toolProtocolHash } from "../src/agent/tools.ts";
-import { recentContextStickerCandidates, stickerCatalogPromptBlock } from "../src/media/sticker-catalog.ts";
+import { batchStickerCandidates, stickerCatalogPromptBlock } from "../src/media/sticker-catalog.ts";
 import {
 	NO_SEND_MARKER,
 	buildCompactionContent,
@@ -32,7 +31,7 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 25,
+	schemaVersion: 26,
 	systemZhTemplate: "929f455372f8",
 	systemEnTemplate: "e3368b9e6674",
 	eventSerialize: "a05c0584eb08",
@@ -74,10 +73,18 @@ function contextMessage(id: number, providerText: string, stickerCandidates = ""
 
 test("prompt, tool and protocol hashes are stable", () => {
 	expect(CACHE_SCHEMA_VERSION).toBe(GOLDEN.schemaVersion);
-	expect(sha256Short(buildSystemPrompt(readFileSync("personas/template.zh.md", "utf8")))).toBe(GOLDEN.systemZhTemplate);
-	expect(sha256Short(buildSystemPrompt(readFileSync("personas/template.en.md", "utf8")))).toBe(GOLDEN.systemEnTemplate);
-	// A golden-only regen must not silently drop the capability declaration.
-	expect(SHARED_PROTOCOL.includes(TOOL_CAPABILITY_DECLARATION)).toBe(true);
+	const allTools = { send: true, search: true, runJs: true };
+	expect(sha256Short(buildSystemPrompt(readFileSync("personas/template.zh.md", "utf8"), allTools))).toBe(
+		GOLDEN.systemZhTemplate,
+	);
+	expect(sha256Short(buildSystemPrompt(readFileSync("personas/template.en.md", "utf8"), allTools))).toBe(
+		GOLDEN.systemEnTemplate,
+	);
+	// A bot is only ever told about the tools it really has.
+	const sendOnly = toolCapabilityDeclaration({ send: true, search: false, runJs: false });
+	expect(sendOnly).toContain("你有一个工具：send");
+	expect(sendOnly).not.toContain("search（");
+	expect(sendOnly).toContain("你不能联网搜索");
 	expect(toolProtocolHash(TOOL_DEFS)).toBe(GOLDEN.tools);
 	expect(sha256Short(COMPACTION_SUMMARY_PROMPT)).toBe(GOLDEN.compactionPrompt);
 	expect(sha256Short(REPLY_RECOVERY_PROMPT)).toBe(GOLDEN.replyRecovery);
@@ -170,7 +177,7 @@ test("summary input keeps image order but never sticker candidates or private re
 	expect(JSON.stringify(buildCompactionContent(messages, undefined, () => null))).not.toContain("speculation-canary");
 });
 
-test("sticker candidates ride a separate labelled message after only the last context batch", () => {
+test("every batch keeps its own sticker note so each request is a strict prefix of the next", () => {
 	const projected = projectTelegramContext([
 		contextMessage(42, "older-batch", "stale-candidate"),
 		contextMessage(43, "newest-batch", "newest-candidate"),
@@ -187,11 +194,12 @@ test("sticker candidates ride a separate labelled message after only the last co
 	// Glued to the chat text, the list read as if the last speaker had pasted it.
 	expect(projected.map((message: any) => message.content)).toEqual([
 		"older-batch",
+		"stale-candidate",
 		"newest-batch",
 		"newest-candidate",
 		[{ type: "text", text: "ok sent_message_ids=#100,#101" }],
 	]);
-	expect(projected[2]).toMatchObject({ role: "custom", customType: "telegram_sticker_candidates" });
+	expect(projected[3]).toMatchObject({ role: "custom", customType: "telegram_sticker_candidates" });
 });
 
 test("sticker catalog and candidate grammar only expose stickers this bot can send", () => {
@@ -233,7 +241,8 @@ test("sticker catalog and candidate grammar only expose stickers this bot can se
 		"# Sticker 目录\n\ns1: 😺 得意的赞同，smug/amused\ns2: 🐱",
 	);
 	expect(stickerCatalogPromptBlock(db, "B", ["Mikufufu"])).toBe("# Sticker 目录\n\ns3: 🅱️ 另一个 bot 的映射");
-	expect(recentContextStickerCandidates(db, "A", CHAT_ID, 1, [1, 2])).toBe(
-		"〔系统附注〕近期群里出现过、你也能发送的 sticker：\ns4: 😺 emotion-1",
+	expect(batchStickerCandidates(db, "A", CHAT_ID, [1, 2], ["Mikufufu"])).toBe(
+		"〔系统附注〕这批消息里出现了你也能发送的 sticker：\ns4: 😺 emotion-1",
 	);
+	expect(batchStickerCandidates(db, "A", CHAT_ID, [], ["Mikufufu"])).toBe("");
 });
