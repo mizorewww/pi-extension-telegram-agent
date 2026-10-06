@@ -90,7 +90,7 @@ Telegram create 不可回滚，所以：
 - 只识别 offset 0 的 `bot_command` entity：`/help`、`/status` 公开；`/model`、`/compact`、`/new`、`/set` 需要 `telegram_admins` 中的人类账号（只接受数字 user id）。带 `@bot_username` 时定向到该 bot，否则作用于收到命令的 bot。
 - 命令和回复的 message id 永久记录在 `telegram_control_messages`，**永不进入任何 provider context**。变更类命令串行执行，不 abort 在途回复；bot busy 时返回“请稍后”。
 - `/model`：按钮分页列出 Pi 当前已认证的全部模型；`/new`：用当前模型开新 session。两者共用同一个 session 切换：先建好新 session，再在一个事务里写 epoch、manifest、清空可见集，失败时旧 session 原样保留；旧 session 文件留在磁盘。
-- `/set routing_p|cooldown_ms` 校验后写穿 `telegram.config.ts` 并更新内存中的同一 `BotConfig`。
+- `/set` 弹出按钮菜单（插话概率、冷却的固定预设，当前值打勾）；回调只接受预设值，校验后写穿 `telegram.config.ts`、更新内存中的同一 `BotConfig`，并原地刷新菜单。
 - `/status` 由确定性代码生成 Markdown，与 bot 发言走同一条本地 Markdown → entities 的经典 `sendMessage`（不用 Rich Message，旧客户端看不到）。
 
 ## Pi 界面与 IPC

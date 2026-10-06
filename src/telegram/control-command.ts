@@ -11,6 +11,7 @@ import type {
 import { updateBotConfigField, updateBotModelConfig } from "../onboarding/config-core.ts";
 import type { InlineKeyboardMarkup } from "./api.ts";
 import { modelMenuKey, renderModelMenu } from "./model-menu.ts";
+import { cooldownLabel, parseSettingsChoice, renderSettingsMenu } from "./settings-menu.ts";
 import { loadBotStats } from "../db/usage.ts";
 import type { RuntimeControlSnapshot } from "../ipc.ts";
 import {
@@ -44,7 +45,7 @@ export type TelegramControlAction =
 	| { kind: "compact" }
 	| { kind: "new" }
 	| { kind: "model"; data?: string }
-	| { kind: "set"; parameter: "routing_p" | "cooldown_ms"; value: number }
+	| { kind: "set"; data?: string }
 	| { kind: "usage" };
 
 export type TelegramControlCommandToken = "help" | "status" | "compact" | "new" | "set" | "model";
@@ -104,7 +105,7 @@ export function parseTelegramControlCallback(
 		!query ||
 		typeof query.id !== "string" ||
 		typeof query.data !== "string" ||
-		!query.data.startsWith("model:") ||
+		!/^(?:model|set):/.test(query.data) ||
 		Buffer.byteLength(query.data) > 64
 	)
 		return null;
@@ -127,7 +128,7 @@ export function parseTelegramControlCallback(
 			isBot: query.from?.is_bot === true,
 			hasSenderChat: message.sender_chat != null && message.from?.is_bot !== true,
 		},
-		action: { kind: "model", data: query.data },
+		action: { kind: query.data.startsWith("set:") ? "set" : "model", data: query.data },
 	};
 }
 
@@ -202,29 +203,7 @@ export function parseTelegramControlCommand(
 
 function parseControlArguments(command: TelegramControlCommandToken, input: string): TelegramControlAction {
 	const tokens = input ? input.split(/\s+/) : [];
-	if (command === "set") {
-		if (tokens.length !== 2) return { kind: "usage" };
-		const parameter = normalizedParameter(tokens[0]!);
-		if (!parameter) return { kind: "usage" };
-		const value = parseControlValue(parameter, tokens[1]!);
-		return value == null ? { kind: "usage" } : { kind: "set", parameter, value };
-	}
 	return tokens.length === 0 ? { kind: command } : { kind: "usage" };
-}
-
-function normalizedParameter(value: string): "routing_p" | "cooldown_ms" | null {
-	const normalized = value.toLowerCase();
-	return normalized === "routing_p" || normalized === "cooldown_ms" ? normalized : null;
-}
-
-function parseControlValue(parameter: "routing_p" | "cooldown_ms", raw: string): number | null {
-	if (parameter === "cooldown_ms") {
-		if (!/^\d+$/.test(raw)) return null;
-		const value = Number(raw);
-		return Number.isSafeInteger(value) ? value : null;
-	}
-	// The pattern only admits 0, 0.x and 1.0, so Number() is always finite here.
-	return /^(?:0(?:\.\d+)?|1(?:\.0+)?)$/.test(raw) ? Number(raw) : null;
 }
 
 export class TelegramControlCommandService {
@@ -242,7 +221,7 @@ export class TelegramControlCommandService {
 	) {}
 
 	async handle(command: ParsedTelegramControlCommand): Promise<TelegramControlResult> {
-		if (command.callbackQueryId) return this.handleModelCallback(command);
+		if (command.callbackQueryId) return this.handleCallback(command);
 		const claimed = this.claim(command);
 		this.consumeEveryRuntime(command.messageId);
 		if (!claimed) return this.result(command, null);
@@ -275,7 +254,7 @@ export class TelegramControlCommandService {
 		return this.result(command, executed.text, executed.markdown);
 	}
 
-	private async handleModelCallback(command: ParsedTelegramControlCommand): Promise<TelegramControlResult> {
+	private async handleCallback(command: ParsedTelegramControlCommand): Promise<TelegramControlResult> {
 		const startedAt = this.now();
 		const authorized = isHuman(command.sender) && this.isAdmin(command.sender);
 		const owned = this.db
@@ -289,7 +268,12 @@ export class TelegramControlCommandService {
 				callbackNotice: "权限不足：此操作仅限 telegram_admins 白名单。",
 				outcome: "permission_denied",
 			};
-		else if (!owned) executed = { text: "", callbackNotice: "菜单已失效，请重新发送 /model。", outcome: "stale_menu" };
+		else if (!owned)
+			executed = {
+				text: "",
+				callbackNotice: `菜单已失效，请重新发送 /${command.action.kind}。`,
+				outcome: "stale_menu",
+			};
 		else if (this.mutations > 0)
 			executed = { text: "", callbackNotice: "有管理操作正在执行，请稍后重试。", outcome: "busy" };
 		else executed = await this.enqueueMutation(() => this.execute(command));
@@ -324,7 +308,7 @@ export class TelegramControlCommandService {
 			case "status":
 				return this.formatStatus(command.replyBotId);
 			case "set":
-				return this.set(command.replyBotId, command.action.parameter, command.action.value);
+				return this.settings(command.replyBotId, command.action.data);
 			case "compact":
 				return await this.compact(command.replyBotId);
 			case "new":
@@ -385,24 +369,29 @@ export class TelegramControlCommandService {
 		};
 	}
 
-	/** Write-through: the config file is the only source of truth, so the new value survives restarts. */
-	private set(botId: string, parameter: "routing_p" | "cooldown_ms", value: number): { text: string; outcome: string } {
+	/** Button menu; a choice writes through to the config file, the only source of truth. */
+	private settings(botId: string, data?: string): ControlExecutionResult {
 		const bot = this.bots.find((candidate) => candidate.id === botId);
 		if (!bot) return { text: `未知 bot：${bounded(botId)}`, outcome: "unknown_bot" };
+		if (!data) return { ...renderSettingsMenu(bot), outcome: "ok" };
+		const choice = parseSettingsChoice(data);
+		if (!choice) return { text: "", outcome: "noop" };
+		const current = choice.parameter === "routing_p" ? bot.routingP : bot.samplingCooldownMs;
+		if (current === choice.value) return { text: "", callbackNotice: "已经是这个值。", outcome: "unchanged" };
 		try {
-			updateBotConfigField(this.rootDir, botId, parameter === "routing_p" ? "routing_p" : "cooldown_ms", value);
+			updateBotConfigField(this.rootDir, botId, choice.parameter, choice.value);
 		} catch (error) {
 			return {
-				text: boundedReply(`未修改：${error instanceof Error ? error.message : String(error)}`),
+				text: "",
+				callbackNotice: `未修改：${error instanceof Error ? error.message : String(error)}`.slice(0, 200),
 				outcome: "config_write_failed",
 			};
 		}
-		if (parameter === "routing_p") bot.routingP = value;
-		else bot.samplingCooldownMs = value;
-		return {
-			text: `${bounded(botId)}.${parameter} = ${value}（已写入 telegram.config.ts，重启后仍然生效）`,
-			outcome: "ok",
-		};
+		if (choice.parameter === "routing_p") bot.routingP = choice.value;
+		else bot.samplingCooldownMs = choice.value;
+		const label =
+			choice.parameter === "routing_p" ? `插话概率已设为 ${choice.value}` : `冷却已设为 ${cooldownLabel(choice.value)}`;
+		return { ...renderSettingsMenu(bot), callbackNotice: label, outcome: "ok" };
 	}
 
 	private async compact(botId: string): Promise<{ text: string; outcome: string }> {
@@ -561,7 +550,7 @@ const USAGE_TEXT = [
 	"/model（管理员）",
 	"/compact（管理员）",
 	"/new（管理员）",
-	"/set <routing_p|cooldown_ms> <value>（管理员）",
+	"/set（管理员）",
 ].join("\n");
 
 const HELP_TEXT = [
@@ -572,6 +561,6 @@ const HELP_TEXT = [
 	"命令默认作用于接收消息的 bot；带 @bot_username 后缀时定向到对应 bot。",
 	"手动 compact 会使用既有摘要模型并产生相应费用。",
 	"/new 丢弃当前上下文开启新会话（旧会话文件保留在本机），之前的群消息不再可见。",
-	"/set 写穿 telegram.config.ts，新值重启后仍然生效。",
+	"/set 用按钮调整插话概率与冷却，写回 telegram.config.ts，重启后仍然生效。",
 	USAGE_TEXT,
 ].join("\n");

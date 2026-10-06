@@ -15,6 +15,7 @@ import { updateBotModelConfig } from "../src/onboarding/config-core.ts";
 import { setLogSink } from "../src/observability/log.ts";
 import {
 	consumedControlMessageIds,
+	parseTelegramControlCallback,
 	parseTelegramControlCommand,
 	TelegramControlCommandService,
 } from "../src/telegram/control-command.ts";
@@ -234,6 +235,43 @@ test("live selection rotates Pi session and epoch, survives reload, and failed w
 	} finally {
 		await runtime.stop();
 		restoreLog();
+		db.close();
+	}
+});
+
+test("/set buttons write only preset values and only for admins", async () => {
+	const { root, config } = fixture();
+	const db = openDb(":memory:");
+	const service = new TelegramControlCommandService(db, config.bots, root, new Map(), [42]);
+	// The menu message must be a control reply this bot owns.
+	db.query("INSERT INTO telegram_control_messages (chat_id, message_id) VALUES (?, 100)").run(CHAT);
+	db.query(
+		"INSERT INTO messages (chat_id, message_id, date, sender_id, display_name, is_bot, first_seen_by) VALUES (?, 100, 1, 777, 'bot', 1, 'A')",
+	).run(CHAT);
+	const tap = (data: string, from = 42) =>
+		service.handle(
+			parseTelegramControlCallback(
+				{
+					update_id: 1,
+					callback_query: {
+						id: "q",
+						from: { id: from, is_bot: false },
+						data,
+						message: { message_id: 100, date: 1, chat: { id: CHAT }, from: { id: 777, is_bot: true } },
+					},
+				},
+				"A",
+				CHAT,
+			)!,
+		);
+	try {
+		expect((await tap("set:r:0.5", 99)).callbackNotice).toContain("权限不足");
+		expect((await tap("set:r:0.33")).text).toBeNull();
+		const applied = await tap("set:r:0.5");
+		expect(applied.callbackNotice).toBe("插话概率已设为 0.5");
+		expect(applied.text).toContain("插话概率：0.5");
+		expect(loadConfig(root).bots[0]!.routingP).toBe(0.5);
+	} finally {
 		db.close();
 	}
 });

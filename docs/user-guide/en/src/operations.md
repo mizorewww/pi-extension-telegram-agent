@@ -29,8 +29,7 @@ Only people in `telegram_admins`:
 | `/model` | pick any model Pi is logged into using buttons; it is saved to the configuration and a new session starts at once |
 | `/new` | drop the current context and start a new session; the bot only sees later messages. Useful when a bot is stuck on a misunderstanding |
 | `/compact` | summarize the context now (calls the summary model, which costs a little) |
-| `/set routing_p <0–1>` | change how often the bot joins in on its own |
-| `/set cooldown_ms <ms>` | change the pause between spontaneous replies |
+| `/set` | open a button menu to pick how often the bot joins in (0–1) and the pause after a spontaneous reply; takes effect at once |
 
 - `/model` and `/set` are written back to `telegram.config.ts` and survive restarts.
 - While a bot is replying, `/model`, `/new` and `/compact` ask you to retry later instead of interrupting it.
