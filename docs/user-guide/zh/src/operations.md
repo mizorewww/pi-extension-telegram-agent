@@ -50,12 +50,13 @@ bun run restart
 ```text
 /model
 /compact
+/new
 /set <routing_p|cooldown_ms> <value>
 ```
 
 在 Telegram 的 Bot 命令菜单选择 `/model`（多 Bot 群可用 `/model@bot_username`），按提供商和分页按钮浏览 Pi 当前已认证的全部可用模型，包括已安装的 provider 扩展。点选后保存该 Bot 的模型到 `telegram.config.ts`，立即建立新会话，旧会话文件保留；选择当前模型不会重置会话。Bot 忙碌时请稍后重试。Reasoning 尽量沿用当前档位，不支持时按 Pi 的模型能力调整，并在结果中显示；图片上下文模式拒绝不支持图片的模型。菜单本身不调用 LLM，切换模型后的首次对话会建立新缓存。
 
-命令默认作用于接收消息的 bot，带 `@bot_username` 后缀时定向到对应 bot。这些命令由确定性 control plane 消费，不进入 persona/provider context。`compact` 会调用现有辅助摘要模型，可能产生费用；busy bot 不会被 abort。`set` 写穿 `telegram.config.ts`，新值重启后仍然生效。
+命令默认作用于接收消息的 bot，带 `@bot_username` 后缀时定向到对应 bot。这些命令由确定性 control plane 消费，不进入 persona/provider context。`compact` 会调用现有辅助摘要模型，可能产生费用；busy bot 不会被 abort。`new` 丢弃当前上下文、用当前模型开启新会话（旧会话文件保留在本机），bot 之后只看到新消息，适合上下文被带偏时重置；busy 时请稍后重试。`set` 写穿 `telegram.config.ts`，新值重启后仍然生效。
 
 ## 真实验证
 

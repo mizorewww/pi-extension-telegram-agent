@@ -152,6 +152,9 @@ test("callbacks require a human admin, the configured group, and a menu owned by
 		compactForControl: async () => {
 			throw new Error("unused");
 		},
+		newSessionForControl: async () => {
+			throw new Error("unused");
+		},
 		consumeControlMessage: () => {},
 		changeModelForControl: async () => {
 			changes++;
@@ -413,6 +416,14 @@ test("live selection rotates Pi session and epoch, survives reload, and failed w
 		} finally {
 			await restarted.stop();
 		}
+		// /new keeps the model but starts an empty session in a new epoch; old bytes stay on disk.
+		const beforeNew = getSessionManifest(db, bot.id)!;
+		const beforeNewBytes = readFileSync(beforeNew.sessionFile, "utf8");
+		expect(await runtime.newSessionForControl()).toEqual({ ok: true, epoch: 3 });
+		expect(getSessionManifest(db, bot.id)!.sessionId).not.toBe(beforeNew.sessionId);
+		expect(((runtime as any).session as AgentSession).messages).toHaveLength(0);
+		expect(runtime.controlSnapshot()).toMatchObject({ model: "next", epoch: 3 });
+		expect(readFileSync(beforeNew.sessionFile, "utf8")).toBe(beforeNewBytes);
 		expect(JSON.stringify(logs)).not.toContain("secret-canary");
 		expect(logs).toEqual(
 			expect.arrayContaining([

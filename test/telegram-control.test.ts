@@ -143,6 +143,7 @@ describe("Telegram rich control status", () => {
 				lastCompact: { at: 1_786_251_069_000, outcome: "ok" as const },
 			}),
 			compactForControl: async () => ({ ok: false as const, code: "busy" as const }),
+			newSessionForControl: async () => ({ ok: false as const, code: "busy" as const }),
 			changeModelForControl: async () => {
 				throw new Error("unexpected model change");
 			},

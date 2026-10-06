@@ -150,6 +150,10 @@ const ACTIVITY_DETAIL_EVENT_KINDS = new Set(
 	[...ACTIVITY_RAW_EVENT_KINDS].filter((kind) => kind !== "assistant_text" && kind !== "thinking"),
 );
 
+export type NewSessionResult =
+	| { ok: true; epoch: number }
+	| { ok: false; code: "busy" | "stopping" | "unavailable" | "failed" };
+
 export type ManualCompactResult =
 	| { ok: true; epoch: number; tokensBefore: number }
 	| { ok: false; code: "busy" | "stopping" | "unavailable" | "nothing_to_compact" | "failed" };
@@ -1113,11 +1117,7 @@ export class BotRuntime {
 				}
 				// A trigger that arrived between the flushLoop do-while exit and this finally saw
 				// `flushing === true` and only set pendingTrigger, but the loop is already gone.
-				// Re-arm it here once the flag is cleared (same pattern as compactForControl).
-				if (this.pendingTrigger && !this.stopping) {
-					this.pendingTrigger = false;
-					this.trigger("explicit");
-				}
+				this.rearmPendingTrigger();
 			});
 		return "started";
 	}
@@ -1498,20 +1498,12 @@ export class BotRuntime {
 
 	/** Manual compact that never passes instructions and never aborts an active response. */
 	async compactForControl(): Promise<ManualCompactResult> {
-		if (this.stopping) return { ok: false, code: "stopping" };
-		if (!this.session) return { ok: false, code: "unavailable" };
-		if (
-			this.flushing ||
-			this.running ||
-			this.controlCompacting ||
-			this.controlChangingModel ||
-			this.session.isStreaming
-		) {
-			return { ok: false, code: "busy" };
-		}
+		const blocked = this.controlBlocked();
+		if (blocked) return { ok: false, code: blocked };
+		const session = this.session!;
 		// Pi's prepareCompaction returns nothing when the branch already ends in a compaction or
 		// has no discardable turn; check the structure instead of matching its error text.
-		const branch = this.session.sessionManager.getBranch();
+		const branch = session.sessionManager.getBranch();
 		if (branch.at(-1)?.type === "compaction" || !branch.some((entry) => entry.type === "message")) {
 			return { ok: false, code: "nothing_to_compact" };
 		}
@@ -1525,10 +1517,7 @@ export class BotRuntime {
 			return { ok: false, code: "failed" };
 		} finally {
 			this.controlCompacting = false;
-			if (this.pendingTrigger && !this.stopping) {
-				this.pendingTrigger = false;
-				this.trigger("explicit");
-			}
+			this.rearmPendingTrigger();
 		}
 	}
 
@@ -1538,16 +1527,8 @@ export class BotRuntime {
 		modelId: string,
 		persist: (selection: ModelControlSelection) => { finalize(): void; rollback(): void },
 	): Promise<ModelControlResult> {
-		if (this.stopping) return { ok: false, code: "stopping" };
-		if (!this.session) return { ok: false, code: "unavailable" };
-		if (
-			this.flushing ||
-			this.running ||
-			this.controlCompacting ||
-			this.controlChangingModel ||
-			this.session.isStreaming
-		)
-			return { ok: false, code: "busy" };
+		const blocked = this.controlBlocked();
+		if (blocked) return { ok: false, code: blocked };
 		const catalog = this.modelRuntime.getModel(provider, modelId);
 		if (!catalog) return { ok: false, code: "unknown_model" };
 		if (!this.modelRuntime.hasConfiguredAuth(provider)) return { ok: false, code: "unauthenticated_provider" };
@@ -1556,16 +1537,75 @@ export class BotRuntime {
 		const reasoningEffort = clampThinkingLevel(catalog, this.bot.reasoningEffort);
 		if (provider === this.bot.provider && modelId === this.bot.model && reasoningEffort === this.bot.reasoningEffort)
 			return { ok: true, epoch: this.epoch, reasoningEffort };
-		this.controlChangingModel = true;
-		let nextSession: AgentSession | null = null;
+		const nextModel = { ...catalog, contextWindow: Math.min(catalog.contextWindow, this.config.contextWindow) };
 		let write: ReturnType<typeof persist> | undefined;
 		let stage: "failed" | "config_write_failed" = "failed";
-		try {
-			const nextModel = { ...catalog, contextWindow: Math.min(catalog.contextWindow, this.config.contextWindow) };
-			const identity = {
-				...this.contextFingerprintInput,
+		const result = await this.replaceSessionForControl(nextModel, reasoningEffort, {
+			beforeCommit: () => {
+				stage = "config_write_failed";
+				write = persist({ provider, model: modelId, reasoningEffort });
+				stage = "failed";
+			},
+			afterCommit: () => {
+				write!.finalize();
+				write = undefined;
+				Object.assign(this.bot, { provider, model: modelId, reasoningEffort });
+			},
+		});
+		if (result.ok) {
+			log.info("agent_runtime", "model_changed", {
+				bot_id: this.bot.id,
 				provider,
 				model: modelId,
+				reasoning: reasoningEffort,
+				epoch: result.epoch,
+			});
+			return { ok: true, epoch: result.epoch, reasoningEffort };
+		}
+		write?.rollback();
+		if (result.code !== "failed") return { ok: false, code: result.code };
+		log.warn("agent_runtime", "model_change_failed", { bot_id: this.bot.id, category: stage });
+		return { ok: false, code: stage };
+	}
+
+	/** Start an empty Pi session with the current model; the old session file stays on disk. */
+	async newSessionForControl(): Promise<NewSessionResult> {
+		const blocked = this.controlBlocked();
+		if (blocked) return { ok: false, code: blocked };
+		const result = await this.replaceSessionForControl(this.model, this.bot.reasoningEffort);
+		if (result.ok) log.info("agent_runtime", "session_reset", { bot_id: this.bot.id, epoch: result.epoch });
+		else if (result.code === "failed")
+			log.warn("agent_runtime", "session_reset_failed", { bot_id: this.bot.id, category: "failed" });
+		return result;
+	}
+
+	private controlBlocked(): "stopping" | "unavailable" | "busy" | null {
+		if (this.stopping) return "stopping";
+		if (!this.session) return "unavailable";
+		if (
+			this.flushing ||
+			this.running ||
+			this.controlCompacting ||
+			this.controlChangingModel ||
+			this.session.isStreaming
+		)
+			return "busy";
+		return null;
+	}
+
+	/** Swap in a fresh session and epoch atomically; a failure leaves the current session in place. */
+	private async replaceSessionForControl(
+		nextModel: Model<Api>,
+		reasoningEffort: BotConfig["reasoningEffort"],
+		hooks: { beforeCommit?: () => void; afterCommit?: () => void } = {},
+	): Promise<{ ok: true; epoch: number } | { ok: false; code: "stopping" | "failed" }> {
+		this.controlChangingModel = true;
+		let nextSession: AgentSession | null = null;
+		try {
+			const identity = {
+				...this.contextFingerprintInput,
+				provider: nextModel.provider,
+				model: nextModel.id,
 				api: nextModel.api,
 				contextWindow: nextModel.contextWindow,
 				reasoningEffort,
@@ -1578,27 +1618,24 @@ export class BotRuntime {
 			);
 			if (this.stopping) return { ok: false, code: "stopping" };
 			if (!nextSession.sessionFile) throw new Error("persistent session unavailable");
-			stage = "config_write_failed";
-			write = persist({ provider, model: modelId, reasoningEffort });
-			stage = "failed";
+			hooks.beforeCommit?.();
 			const epoch = this.epoch + 1;
+			const committed = nextSession;
 			this.db.transaction(() => {
 				setBotState(this.db, this.bot.id, EPOCH_KEY, String(epoch));
 				replaceVisibleMessageIds(this.db, this.bot.id, this.config.groupChatId, epoch, []);
 				setSessionManifest(this.db, {
 					botId: this.bot.id,
-					sessionId: nextSession!.sessionId,
-					sessionFile: nextSession!.sessionFile!,
+					sessionId: committed.sessionId,
+					sessionFile: committed.sessionFile!,
 					contextFingerprint: fingerprint,
 					createdAt: Date.now(),
 				});
 			})();
-			write.finalize();
-			write = undefined;
-			const previous = this.session;
-			this.session = nextSession;
+			hooks.afterCommit?.();
+			const previous = this.session!;
+			this.session = committed;
 			nextSession = null;
-			Object.assign(this.bot, { provider, model: modelId, reasoningEffort });
 			this.model = nextModel;
 			this.contextFingerprintInput = identity;
 			this.contextFingerprint = fingerprint;
@@ -1607,38 +1644,33 @@ export class BotRuntime {
 			this.lastTurnFailed = false;
 			this.pendingPayloadObservation = null;
 			this.subscribeEvents();
-			// Disposal cannot undo an already committed selection.
+			// Disposal cannot undo an already committed session.
 			try {
-				await previous.dispose();
+				previous.dispose();
 			} catch {
 				log.warn("agent_runtime", "previous_session_dispose_failed", {
 					bot_id: this.bot.id,
 					category: "local_failure",
 				});
 			}
-			log.info("agent_runtime", "model_changed", {
-				bot_id: this.bot.id,
-				provider,
-				model: modelId,
-				reasoning: reasoningEffort,
-				epoch,
-			});
-			return { ok: true, epoch, reasoningEffort };
+			return { ok: true, epoch };
 		} catch {
-			write?.rollback();
-			log.warn("agent_runtime", "model_change_failed", { bot_id: this.bot.id, category: stage });
-			return { ok: false, code: stage };
+			return { ok: false, code: "failed" };
 		} finally {
+			// An uncommitted, empty session owns no work.
 			try {
-				await nextSession?.dispose();
-			} catch {
-				/* An uncommitted, empty session owns no work. */
-			}
+				nextSession?.dispose();
+			} catch {}
 			this.controlChangingModel = false;
-			if (this.pendingTrigger && !this.stopping) {
-				this.pendingTrigger = false;
-				this.trigger("explicit");
-			}
+			this.rearmPendingTrigger();
+		}
+	}
+
+	/** A trigger coalesced while busy must run once the blocking operation releases the bot. */
+	private rearmPendingTrigger(): void {
+		if (this.pendingTrigger && !this.stopping) {
+			this.pendingTrigger = false;
+			this.trigger("explicit");
 		}
 	}
 
@@ -2024,6 +2056,6 @@ export class BotRuntime {
 		if (this.flushPromise) {
 			await Promise.race([this.flushPromise.catch(() => {}), new Promise((r) => setTimeout(r, 30_000))]);
 		}
-		if (this.session) await this.session.dispose();
+		this.session?.dispose();
 	}
 }

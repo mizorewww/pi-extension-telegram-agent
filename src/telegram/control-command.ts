@@ -2,7 +2,12 @@ import type { Database } from "bun:sqlite";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { log } from "../observability/log.ts";
 import type { BotConfig, TelegramAdmin } from "../config.ts";
-import type { ManualCompactResult, ModelControlResult, ModelControlSelection } from "../agent/runtime.ts";
+import type {
+	ManualCompactResult,
+	ModelControlResult,
+	ModelControlSelection,
+	NewSessionResult,
+} from "../agent/runtime.ts";
 import { updateBotConfigField, updateBotModelConfig } from "../onboarding/config-core.ts";
 import type { InlineKeyboardMarkup } from "./api.ts";
 import { modelMenuKey, renderModelMenu } from "./model-menu.ts";
@@ -37,13 +42,14 @@ export type TelegramControlAction =
 	| { kind: "help" }
 	| { kind: "status" }
 	| { kind: "compact" }
+	| { kind: "new" }
 	| { kind: "model"; data?: string }
 	| { kind: "set"; parameter: "routing_p" | "cooldown_ms"; value: number }
 	| { kind: "usage" };
 
-export type TelegramControlCommandToken = "help" | "status" | "compact" | "set" | "model";
+export type TelegramControlCommandToken = "help" | "status" | "compact" | "new" | "set" | "model";
 
-const COMMAND_TOKENS: ReadonlySet<string> = new Set(["help", "status", "compact", "set", "model"]);
+const COMMAND_TOKENS: ReadonlySet<string> = new Set(["help", "status", "compact", "new", "set", "model"]);
 
 export interface ParsedTelegramControlCommand {
 	chatId: number;
@@ -59,6 +65,7 @@ export interface ParsedTelegramControlCommand {
 export interface TelegramControlRuntime {
 	controlSnapshot(): RuntimeControlSnapshot;
 	compactForControl(): Promise<ManualCompactResult>;
+	newSessionForControl(): Promise<NewSessionResult>;
 	consumeControlMessage(messageId: number): void;
 	changeModelForControl(
 		provider: string,
@@ -320,6 +327,8 @@ export class TelegramControlCommandService {
 				return this.set(command.replyBotId, command.action.parameter, command.action.value);
 			case "compact":
 				return await this.compact(command.replyBotId);
+			case "new":
+				return await this.newSession(command.replyBotId);
 			case "model":
 				return await this.model(command.replyBotId, command.action.data);
 			case "usage":
@@ -410,6 +419,17 @@ export class TelegramControlCommandService {
 		return { text: `${bounded(botId)}: ${compactFailureText(result.code)}`, outcome: result.code };
 	}
 
+	private async newSession(botId: string): Promise<{ text: string; outcome: string }> {
+		const runtime = this.runtimes.get(botId);
+		const result: NewSessionResult = runtime
+			? await runtime.newSessionForControl()
+			: { ok: false, code: "unavailable" };
+		if (result.ok) return { text: `${bounded(botId)}: 已开启新会话，epoch=${result.epoch}`, outcome: "ok" };
+		const reason =
+			result.code === "busy" ? "busy，请稍后重试" : result.code === "stopping" ? "正在停止" : `失败（${result.code}）`;
+		return { text: `${bounded(botId)}: 新会话${reason}`, outcome: result.code };
+	}
+
 	private isAdmin(sender: ControlSender): boolean {
 		return this.admins.some((admin) => (typeof admin === "number" ? admin === sender.id : admin === sender.username));
 	}
@@ -431,7 +451,9 @@ export class TelegramControlCommandService {
 	}
 
 	private audit(command: ParsedTelegramControlCommand, authorized: boolean, outcome: string, startedAt: number): void {
-		const target = ["status", "compact", "set", "model"].includes(command.action.kind) ? command.replyBotId : null;
+		const target = ["status", "compact", "new", "set", "model"].includes(command.action.kind)
+			? command.replyBotId
+			: null;
 		const finishedAt = this.now();
 		this.db.query("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES (?, ?, ?, ?)").run(
 			command.replyBotId,
@@ -487,7 +509,7 @@ function isHuman(sender: ControlSender): boolean {
 }
 
 function isMutation(action: TelegramControlAction): boolean {
-	return action.kind === "compact" || action.kind === "set" || action.kind === "model";
+	return action.kind === "compact" || action.kind === "new" || action.kind === "set" || action.kind === "model";
 }
 
 function compactFailureText(code: Exclude<ManualCompactResult, { ok: true }>["code"]): string {
@@ -543,16 +565,18 @@ const USAGE_TEXT = [
 	"/status",
 	"/model（管理员）",
 	"/compact（管理员）",
+	"/new（管理员）",
 	"/set <routing_p|cooldown_ms> <value>（管理员）",
 ].join("\n");
 
 const HELP_TEXT = [
 	"Telegram Agent 控制",
 	"查看：/help、/status",
-	"管理员：/model、/compact、/set",
+	"管理员：/model、/compact、/new、/set",
 	"/model 用按钮选择 Pi 可用模型，保存后立即开启新会话。",
 	"命令默认作用于接收消息的 bot；带 @bot_username 后缀时定向到对应 bot。",
 	"手动 compact 会使用既有摘要模型并产生相应费用。",
+	"/new 丢弃当前上下文开启新会话（旧会话文件保留在本机），之前的群消息不再可见。",
 	"/set 写穿 telegram.config.ts，新值重启后仍然生效。",
 	USAGE_TEXT,
 ].join("\n");

@@ -50,12 +50,13 @@ Only `telegram_admins` may run:
 ```text
 /model
 /compact
+/new
 /set <routing_p|cooldown_ms> <value>
 ```
 
 Choose `/model` in Telegram's bot command menu (or `/model@bot_username` in a group with several bots). Provider and pagination buttons cover every currently authenticated model in Pi, including installed provider extensions. Selecting a model saves this bot's choice in `telegram.config.ts` and starts a fresh session immediately, retaining the old session file. Selecting the current model does not reset its session. Retry later if the bot is busy. Reasoning keeps the current level where supported; otherwise Pi adjusts it to the model's capabilities and the result shows the effective level. Image context mode rejects models without image input. The menu makes no LLM calls; the first conversation after a model change builds a new cache.
 
-A command acts on the bot that received it; append `@bot_username` to target a specific bot. The deterministic control plane consumes these commands outside persona/provider context. `compact` uses the existing auxiliary summarization model and may incur cost. Busy bots are not aborted. `set` writes through to `telegram.config.ts`, so the new value survives restarts.
+A command acts on the bot that received it; append `@bot_username` to target a specific bot. The deterministic control plane consumes these commands outside persona/provider context. `compact` uses the existing auxiliary summarization model and may incur cost. Busy bots are not aborted. `new` drops the current context and starts a fresh session on the current model (the old session file stays on disk); the bot only sees messages sent afterwards. Use it when the context has gone off the rails; retry if the bot is busy. `set` writes through to `telegram.config.ts`, so the new value survives restarts.
 
 ## Real verification
 
