@@ -71,7 +71,7 @@ tools:    send, search, run_js（按 bot 开关过滤，顺序不变）
 
 `tg-cache-observer` 在 `before_provider_request` 对 payload 分段（system / tools / 每条 message / 完整 payload）计算 deployment 本地 HMAC，记录相对上一请求的首个分叉位置，并按形状估算 system/tools/摘要/messages 的 token 占比。不保存明文。
 
-provider 没有返回 cache 用量时，若相邻两次请求的 system、tools 相同且上一次的 message hash 列表是这一次的严格前缀，就把上一次的 prompt token 记为 `cache_read_estimated`，界面用 `≈` 标出。这是结构上可复用的量，不是 provider 实际命中，也不改写原始 usage 与费用。字段口径见 [telemetry.md](telemetry.md)。
+provider 没有返回 cache 用量时，若同一 cache cohort（provider/api/model/epoch/session/retention）的相邻两次请求 system、tools 相同，且上一次的 message hash 列表是这一次的严格前缀（上一次的列表只保存在内存里，重启后第一次请求不估算），就把上一次的 prompt token 记为 `cache_read_estimated`，界面用 `≈` 标出。这是结构上可复用的量，不是 provider 实际命中，也不改写原始 usage 与费用。字段口径见 [telemetry.md](telemetry.md)。
 
 ## 版本记录
 

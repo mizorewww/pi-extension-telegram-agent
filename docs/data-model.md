@@ -41,7 +41,7 @@ SQLite（WAL），默认 `data/agent.db`，schema 在 `src/db/schema.sql`，启�
 - `media_file_ids(bot_id, file_id, file_unique_id)`：bot 专属的可发送/可下载能力。
 - `aliases(chat_id, user_id) → u<N>`：无 username 发送者的稳定别名（rowid 分配）。
 - `agent_events`：只追加的本地行为流（assistant 文本、thinking、tool、send、错误、压缩、控制审计……）。一次 agent run 的原始事件带 `activity_id`，结束时另追加一条 `agent_activity` 作为 TUI 卡片。不存 token、prompt、完整 URL 或路径。
-- `llm_runs`：每次成功 provider 响应一行：usage、费用、延迟、thinking/send 耗时、provider/api/model、session hash、payload HMAC 与首个分叉位置、上下文构成估算、trigger、公开发送数、图片数等。口径见 [telemetry.md](telemetry.md)。
+- `llm_runs`：每次成功 provider 响应一行：usage、费用、延迟、thinking/send 耗时、provider/api/model、session hash、system/tools/完整 payload 的 HMAC 与首个分叉位置（逐条消息的 hash 列表只在内存中用于前缀估算，`messages_hash` 列不再写入）、上下文构成估算、trigger、公开发送数、图片数等。口径见 [telemetry.md](telemetry.md)。
 
 ## 保留期
 

@@ -94,6 +94,7 @@ import {
 	TELEGRAM_CONTEXT_VERSION,
 	TELEGRAM_EXTENSION_ORDER,
 	contextImageBytes,
+	type PreviousProviderPayloadFingerprint,
 	type ProviderPayloadObservation,
 	type TelegramContextDetails,
 } from "./extensions/index.ts";
@@ -169,16 +170,6 @@ export function restoreLastCompaction(db: Database, botId: string): RuntimeContr
 		.get(botId) as { ts: number; kind: string } | null;
 	if (!row) return null;
 	return { at: row.ts, outcome: row.kind === "compaction" ? "ok" : "failed" };
-}
-
-function parseStoredMessageHashes(value: string | null): string[] | null {
-	if (!value) return null;
-	try {
-		const parsed = JSON.parse(value);
-		return Array.isArray(parsed) && parsed.every((entry) => typeof entry === "string") ? parsed : null;
-	} catch {
-		return null;
-	}
 }
 
 /** Insert one row from column names; returns its rowid. */
@@ -285,6 +276,7 @@ export class BotRuntime {
 	private telemetryHmacKey = "";
 	private staticPrefixTokenEstimate = 0;
 	private pendingPayloadObservation: ProviderPayloadObservation | null = null;
+	private previousRequest: (PreviousProviderPayloadFingerprint & { cohort: string }) | null = null;
 	private pendingTurnContext: TelegramContextDetails | null = null;
 	private currentTriggerMessageId: number | null = null;
 	private pendingInputMetrics = emptyInputMetrics();
@@ -1826,55 +1818,23 @@ export class BotRuntime {
 		);
 		const metrics = this.pendingInputMetrics;
 		const sessionIdHash = this.session ? sha256(`${this.telemetryHmacKey}:${this.session.sessionId}`) : null;
-		const previous =
-			usage.cacheRead === 0 &&
-			usage.cacheWrite === 0 &&
-			this.bot.cacheRetention !== "none" &&
-			observation &&
-			sessionIdHash
-				? (this.db
-						.query(`
-					SELECT context_tokens contextTokens, system_hash systemHash,
-					       tools_hash toolsHash, messages_hash messagesHash
-					  FROM llm_runs
-					 WHERE bot_id = ? AND compaction = 0 AND provider = ? AND api = ?
-					   AND model = ? AND epoch = ? AND session_id_hash = ? AND cache_retention = ?
-					 ORDER BY id DESC LIMIT 1
-				`)
-						.get(
-							this.bot.id,
-							this.bot.provider,
-							this.model.api,
-							this.bot.model,
-							this.epoch,
-							sessionIdHash,
-							this.bot.cacheRetention,
-						) as {
-						contextTokens: number | null;
-						systemHash: string | null;
-						toolsHash: string | null;
-						messagesHash: string | null;
-					} | null)
-				: null;
-		const previousMessageHashes = parseStoredMessageHashes(previous?.messagesHash ?? null);
+		// The previous main request of the same cache cohort lives in memory only; after a restart
+		// the first request simply has no estimate.
+		const cohort = `${this.bot.provider}|${this.model.api}|${this.bot.model}|${this.epoch}|${sessionIdHash}|${this.bot.cacheRetention}`;
+		const previous = this.previousRequest?.cohort === cohort ? this.previousRequest : null;
 		const cacheReadEstimated =
-			observation &&
-			previous &&
-			typeof previous.contextTokens === "number" &&
-			previous.systemHash &&
-			previous.toolsHash &&
-			previousMessageHashes
-				? estimateCacheReadFromPrefix(
-						observation,
-						{
-							systemHash: previous.systemHash,
-							toolsHash: previous.toolsHash,
-							messageHashes: previousMessageHashes,
-							contextTokens: previous.contextTokens,
-						},
-						contextTokens,
-					)
+			observation && previous && usage.cacheRead === 0 && usage.cacheWrite === 0 && this.bot.cacheRetention !== "none"
+				? estimateCacheReadFromPrefix(observation, previous, contextTokens)
 				: null;
+		this.previousRequest = observation
+			? {
+					cohort,
+					systemHash: observation.systemHash,
+					toolsHash: observation.toolsHash,
+					messageHashes: observation.messageHashes,
+					contextTokens,
+				}
+			: null;
 		this.lastLlmRunId = insertRow(this.db, "llm_runs", {
 			bot_id: this.bot.id,
 			ts: now,
@@ -1892,7 +1852,6 @@ export class BotRuntime {
 			compaction: 0,
 			system_hash: observation?.systemHash ?? this.systemHash,
 			tools_hash: observation?.toolsHash ?? this.toolsHash,
-			messages_hash: observation ? JSON.stringify(observation.messageHashes) : null,
 			provider: this.bot.provider,
 			api: this.model.api,
 			session_id_hash: sessionIdHash,
