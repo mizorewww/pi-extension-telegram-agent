@@ -1,11 +1,9 @@
 // Serialize immutable Telegram events into the fixed LLM grammar (docs/cache.md, schema v8).
 // Grammar stability is a cache invariant: never change existing output shape.
 //
-// Media renders as a text placeholder (`[图片]` / `[sticker 😄]` / `[video]` ...), optionally
-// carrying the persisted vision-mode description (`[图片: 描述]` / `[sticker 😄: 描述]`). Set
-// names never appear in the placeholder (serializer v4). Event-log serialization pins
-// resolveVision:false so written bytes never change retroactively; a later description arrives as
-// a media_update delta. In context-media mode the actual image bytes additionally travel as
+// Media renders as a text placeholder (`[图片]` / `[sticker 😄]` / `[video]` ...); set names never
+// appear (serializer v4). Written bytes never change retroactively: a later vision description
+// arrives as a media_update delta. In context-media mode the actual image bytes additionally travel as
 // interleaved image content blocks anchored to the event's text segment (token-packer.ts,
 // extensions/context.ts).
 
@@ -64,26 +62,11 @@ function senderLabel(db: Database, m: MessageRow): string {
 	return parts.length > 0 ? `${name} (${parts.join(" · ")})` : name;
 }
 
-/** Fixed text anchor for media; carries the persisted vision description when one exists. */
-export function mediaPlaceholder(db: Database, mediaJson: string, resolveVision = true): string {
-	const media = JSON.parse(mediaJson) as {
-		kind: string;
-		sticker_emoji?: string;
-		file_unique_id?: string;
-	};
-	let vision: string | null = null;
-	if (resolveVision && media.file_unique_id) {
-		const row = db.query("SELECT vision FROM media WHERE file_unique_id = ?").get(media.file_unique_id) as {
-			vision: string | null;
-		} | null;
-		if (row?.vision) vision = (JSON.parse(row.vision) as { text: string }).text;
-	}
-	if (media.kind === "sticker") {
-		const emoji = media.sticker_emoji ?? "";
-		if (vision) return `[sticker${emoji ? " " + emoji : ""}: ${vision}]`;
-		return `[sticker${emoji ? " " + emoji : ""}]`;
-	}
-	if (media.kind === "photo") return vision ? `[图片: ${vision}]` : "[图片]";
+/** Fixed text anchor for media; descriptions arrive later as media_update deltas, never inline. */
+function mediaPlaceholder(mediaJson: string): string {
+	const media = JSON.parse(mediaJson) as { kind: string; sticker_emoji?: string };
+	if (media.kind === "sticker") return `[sticker${media.sticker_emoji ? " " + media.sticker_emoji : ""}]`;
+	if (media.kind === "photo") return "[图片]";
 	return `[${media.kind}]`;
 }
 
@@ -120,8 +103,6 @@ export function replySnapshot(db: Database, row: MessageRow): ReplySnapshot | nu
 export interface SerializeOptions {
 	/** Message ids whose content is already visible in the model's current context. */
 	visibleIds: Set<number>;
-	/** Event-log serialization disables live lookups so prior bytes stay immutable. */
-	resolveVision?: boolean;
 }
 
 function renderReply(db: Database, m: MessageRow, opts: SerializeOptions): string {
@@ -133,7 +114,7 @@ function renderReply(db: Database, m: MessageRow, opts: SerializeOptions): strin
 			if (parent) {
 				line += ` ${parent.username ? `@${parent.username}` : (parent.display_name ?? "?")}`;
 				if (parent.text) line += ` "${parent.text.replace(/\s+/g, " ").trim()}"`;
-				else if (parent.media) line += ` ${mediaPlaceholder(db, JSON.stringify(parent.media), opts.resolveVision)}`;
+				else if (parent.media) line += ` ${mediaPlaceholder(JSON.stringify(parent.media))}`;
 			} else line += ` (原消息不可见)`;
 		}
 	}
@@ -148,30 +129,11 @@ function renderReply(db: Database, m: MessageRow, opts: SerializeOptions): strin
 function renderMessageLine(db: Database, m: MessageRow, opts: SerializeOptions): string {
 	let line = `[${fmtTime(m.date)}] #${m.message_id} ${senderLabel(db, m)}${renderReply(db, m, opts)}`;
 	line += ":";
-	const body = m.text ?? m.caption ?? (m.media ? mediaPlaceholder(db, m.media, opts.resolveVision) : "");
+	const body = m.text ?? m.caption ?? (m.media ? mediaPlaceholder(m.media) : "");
 	if (body) line += ` ${body}`;
-	if (m.media && (m.text || m.caption)) line += ` ${mediaPlaceholder(db, m.media, opts.resolveVision)}`;
+	if (m.media && (m.text || m.caption)) line += ` ${mediaPlaceholder(m.media)}`;
 	if (m.edit_date) line += " (edited)";
 	return line;
-}
-
-/**
- * Serialize a batch of messages (must be same chat, ascending date order).
- * Inserts date separators when the local date changes between messages.
- */
-export function serializeMessages(db: Database, rows: MessageRow[], opts: SerializeOptions): string {
-	const lines: string[] = [];
-	let lastDate: string | null = null;
-	for (const m of rows) {
-		const day = fmtDate(m.date);
-		if (day !== lastDate) {
-			lines.push(`--- ${day} ---`);
-			lastDate = day;
-		}
-		lines.push(renderMessageLine(db, m, opts));
-		opts.visibleIds.add(m.message_id);
-	}
-	return lines.join("\n");
 }
 
 export interface SerializedEventSegment {
@@ -185,9 +147,8 @@ export interface SerializedEventSegment {
  * exact message position. For pure message runs, joining segment texts with "\n" is byte-identical
  * to the historical whole-batch rendering. One deliberate difference: a media_update delta between
  * two same-day messages no longer re-emits the `--- YYYY-MM-DD ---` separator (the day state now
- * spans segments; the old per-batch reset duplicated the line). Message segments pin
- * resolveVision:false: written bytes never change when a vision description arrives later — the
- * description is appended as its own media_update segment.
+ * spans segments; the old per-batch reset duplicated the line). A vision description that
+ * arrives later is appended as its own media_update segment, never rewritten into a message.
  */
 export function serializeMessageEventSegments(
 	db: Database,
@@ -202,7 +163,7 @@ export function serializeMessageEventSegments(
 			const day = fmtDate(row.date);
 			const separator = day !== lastDate ? `--- ${day} ---\n` : "";
 			lastDate = day;
-			segments.push({ event, text: `${separator}${renderMessageLine(db, row, { ...opts, resolveVision: false })}` });
+			segments.push({ event, text: `${separator}${renderMessageLine(db, row, opts)}` });
 			opts.visibleIds.add(row.message_id);
 			continue;
 		}
@@ -216,13 +177,13 @@ export function serializeMessageEventSegments(
 		const row = event.payload as MessageRow;
 		if (event.kind === "edit") {
 			const body = row.text ?? row.caption ?? "";
-			const reply = renderReply(db, row, { ...opts, resolveVision: false });
+			const reply = renderReply(db, row, opts);
 			segments.push({
 				event,
 				text: `[message_edit #${event.messageId}]${reply ? `${reply}:` : ""}${body ? ` ${body}` : " [empty]"}`,
 			});
 		} else {
-			const reply = renderReply(db, row, { ...opts, resolveVision: false }).trim() || "reply metadata updated";
+			const reply = renderReply(db, row, opts).trim() || "reply metadata updated";
 			segments.push({ event, text: `[message_metadata #${event.messageId}] ${reply}` });
 		}
 	}
