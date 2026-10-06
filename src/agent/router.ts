@@ -69,11 +69,19 @@ export function explicitTriggerReason(db: Database, row: MessageRow, bot: BotIde
 	return null;
 }
 
-/** Bot's configured name appears in the message text (e.g. "小雪你怎么看"). */
+/**
+ * Bot's configured name appears in the message text (e.g. "小雪你怎么看"). A name edge made of
+ * ASCII letters/digits must sit on a word boundary and matches case-insensitively, so "Al" does
+ * not fire on "Also"; CJK names have no word boundaries and match as written.
+ */
 export function nameKeywordTrigger(row: MessageRow, bot: BotIdentity): boolean {
 	const text = row.text ?? row.caption;
-	if (!text) return false;
-	return text.includes(bot.name);
+	if (!text || !bot.name) return false;
+	const word = /[A-Za-z0-9_]/;
+	const escaped = bot.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const before = word.test(bot.name[0]!) ? "(?<![A-Za-z0-9_])" : "";
+	const after = word.test(bot.name.at(-1)!) ? "(?![A-Za-z0-9_])" : "";
+	return new RegExp(`${before}${escaped}${after}`, "i").test(text);
 }
 
 /** Shared deterministic value in [0, 1) for a message. */

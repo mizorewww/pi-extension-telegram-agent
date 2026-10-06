@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { openDb } from "../src/db/db.ts";
 import { applyRetention } from "../src/db/retention.ts";
-import { routeMessageDecision } from "../src/agent/router.ts";
+import { nameKeywordTrigger, routeMessageDecision } from "../src/agent/router.ts";
 import type { MessageRow } from "../src/agent/serialize.ts";
 import { ingestUpdate } from "../src/telegram/ingest.ts";
 import { ManualSendService } from "../src/daemon/manual-send.ts";
@@ -133,4 +133,14 @@ test("routing handoff survives a failed handler and restart before another Teleg
 	).toBeNull();
 	expect(attempts).toBe(2);
 	expect(delivered).toMatchObject({ result: { kind: "inserted", messageId: 1 }, update: { update_id: 50 } });
+});
+
+test("ASCII bot names trigger only as whole words, since a name trigger owes a reply", () => {
+	const fires = (name: string, text: string) => nameKeywordTrigger({ text } as MessageRow, { name } as never);
+	expect([
+		fires("Al", "Also"),
+		fires("Al", "hey al, ok?"),
+		fires("Mochi", "mochi2"),
+		fires("小雪", "小雪你怎么看"),
+	]).toEqual([false, true, false, true]);
 });
