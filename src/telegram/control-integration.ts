@@ -7,10 +7,10 @@ import {
 	classifyTelegramCreateFailure,
 	localFailureCategory,
 	retrySqliteBusy,
-	sendRichTextAndPersist,
+	sendMarkdownTextAndPersist,
 	sendTextAndPersist,
 	SentMessagePersistenceError,
-	type RichTextSendApi,
+	type MarkdownTextSendApi,
 } from "./send.ts";
 
 export interface TelegramControlCommandPort {
@@ -18,7 +18,7 @@ export interface TelegramControlCommandPort {
 	consumeReply(botId: string, chatId: number, messageId: number): void;
 }
 
-export interface TelegramControlApi extends RichTextSendApi {
+export interface TelegramControlApi extends MarkdownTextSendApi {
 	answerCallbackQuery(id: string, text?: string): Promise<true>;
 	editMessageText(
 		chatId: number,
@@ -71,14 +71,13 @@ export class TelegramControlCoordinator {
 		}
 
 		try {
-			const { canonical } = result.richText
-				? await sendRichTextAndPersist(
+			const { canonical } = result.markdown
+				? await sendMarkdownTextAndPersist(
 						this.db,
 						api,
 						result.replyBotId,
 						result.chatId,
-						result.richText,
-						result.text,
+						result.markdown,
 						result.replyToMessageId,
 					)
 				: await sendTextAndPersist(

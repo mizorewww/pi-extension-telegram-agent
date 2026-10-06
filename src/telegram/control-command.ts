@@ -79,15 +79,15 @@ export interface TelegramControlResult {
 	replyToMessageId: number;
 	replyBotId: string;
 	text: string | null;
-	/** Telegram InputRichMessage Markdown; text remains the independent safe fallback projection. */
-	richText?: string;
+	/** Markdown sent as classic Telegram entities (old clients cannot show Rich Messages). */
+	markdown?: string;
 	replyMarkup?: InlineKeyboardMarkup;
 	callbackNotice?: string;
 }
 
 interface ControlExecutionResult {
 	text: string;
-	richText?: string;
+	markdown?: string;
 	replyMarkup?: InlineKeyboardMarkup;
 	callbackNotice?: string;
 	outcome: string;
@@ -267,12 +267,12 @@ export class TelegramControlCommandService {
 			return await this.enqueueMutation(async () => {
 				const executed = await this.execute(command);
 				this.audit(command, true, executed.outcome, startedAt);
-				return { ...this.result(command, executed.text, executed.richText), replyMarkup: executed.replyMarkup };
+				return { ...this.result(command, executed.text, executed.markdown), replyMarkup: executed.replyMarkup };
 			});
 		}
 		const executed = await this.execute(command);
 		this.audit(command, true, executed.outcome, startedAt);
-		return this.result(command, executed.text, executed.richText);
+		return this.result(command, executed.text, executed.markdown);
 	}
 
 	private async handleModelCallback(command: ParsedTelegramControlCommand): Promise<TelegramControlResult> {
@@ -380,7 +380,7 @@ export class TelegramControlCommandService {
 		const view = buildBotStatusView(bot, loadBotStats(this.db, bot.id), snapshot);
 		return {
 			text: renderBotStatusPlain(view),
-			richText: boundedRichStatus(statusRichSection(view)),
+			markdown: boundedMarkdownStatus(statusMarkdownSection(view)),
 			outcome: "ok",
 		};
 	}
@@ -471,13 +471,13 @@ export class TelegramControlCommandService {
 		);
 	}
 
-	private result(command: ParsedTelegramControlCommand, text: string | null, richText?: string): TelegramControlResult {
+	private result(command: ParsedTelegramControlCommand, text: string | null, markdown?: string): TelegramControlResult {
 		return {
 			chatId: command.chatId,
 			replyToMessageId: command.messageId,
 			replyBotId: command.replyBotId,
 			text: text == null ? null : boundedReply(text),
-			...(richText ? { richText } : {}),
+			...(markdown ? { markdown } : {}),
 		};
 	}
 
@@ -536,26 +536,26 @@ function boundedReply(value: string): string {
 	return value.length <= MAX_REPLY_CHARS ? value : `${value.slice(0, MAX_REPLY_CHARS - 1)}…`;
 }
 
-function escapeRichMarkdown(value: string): string {
+function escapeMarkdown(value: string): string {
 	return bounded(value).replace(/[\\`*_[\]{}()#+\-.!|>]/g, "\\$&");
 }
 
-function escapeRichStatusValue(value: string): string {
+function escapeStatusValue(value: string): string {
 	return value.replace(/[\\`*_[\]]/g, "\\$&");
 }
 
-function statusRichSection(view: BotStatusView): string {
+function statusMarkdownSection(view: BotStatusView): string {
 	return [
-		`## ${escapeRichMarkdown(view.name)} · ${escapeRichMarkdown(view.id)}`,
+		`## ${escapeMarkdown(view.name)} · ${escapeMarkdown(view.id)}`,
 		...botStatusFields(view, true).map((field) =>
 			field.key === "context_breakdown"
 				? `- **${field.label}**：\n${field.value}`
-				: `- **${field.label}**：${escapeRichStatusValue(field.value)}`,
+				: `- **${field.label}**：${escapeStatusValue(field.value)}`,
 		),
 	].join("\n");
 }
 
-function boundedRichStatus(section: string): string {
+function boundedMarkdownStatus(section: string): string {
 	return boundedReply(`# Telegram Agent 状态\n\n${section}`);
 }
 

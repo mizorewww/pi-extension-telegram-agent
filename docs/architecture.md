@@ -88,7 +88,7 @@ Telegram create 不可回滚，所以：
 - 命令和回复的 message id 永久记录在 `telegram_control_messages`，**永不进入任何 provider context**。变更类命令串行执行，不 abort 在途回复；bot busy 时返回“请稍后”。
 - `/model`：按钮分页列出 Pi 当前已认证的全部模型；`/new`：用当前模型开新 session。两者共用同一个 session 切换：先建好新 session，再在一个事务里写 epoch、manifest、清空可见集，失败时旧 session 原样保留；旧 session 文件留在磁盘。
 - `/set routing_p|cooldown_ms` 校验后写穿 `telegram.config.ts` 并更新内存中的同一 `BotConfig`。
-- `/status` 由确定性代码生成 Rich Message 与独立纯文本；只有 Telegram 确定性拒绝 Rich Message 时才发纯文本。
+- `/status` 由确定性代码生成 Markdown，与 bot 发言走同一条本地 Markdown → entities 的经典 `sendMessage`（不用 Rich Message，旧客户端看不到）。
 
 ## Pi 界面与 IPC
 

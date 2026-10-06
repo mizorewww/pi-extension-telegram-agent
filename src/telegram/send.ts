@@ -24,11 +24,7 @@ export interface MarkdownTextSendApi extends TextSendApi {
 	): Promise<Record<string, unknown>>;
 }
 
-export interface RichTextSendApi extends TextSendApi {
-	sendRichMessage(chatId: number, markdown: string, replyToMessageId?: number): Promise<Record<string, unknown>>;
-}
-
-export type SentMessageTransport = "plain" | "formatted" | "rich" | "plain_fallback" | "sticker";
+export type SentMessageTransport = "plain" | "formatted" | "plain_fallback" | "sticker";
 
 export class SentMessagePersistenceError extends Error {
 	constructor(
@@ -143,59 +139,11 @@ const ENTITY_REJECTIONS = [
 	"entity length",
 	"entities are not valid",
 ];
-const RICH_REJECTIONS = [
-	...PARSE_REJECTIONS,
-	"unsupported start tag",
-	"rich message is not supported",
-	"rich messages are not supported",
-];
-
 /** A 400 whose description proves Telegram rejected the format before creating any message. */
 function isFormatRejection(error: unknown, phrases: readonly string[]): error is TelegramApiError {
 	if (!(error instanceof TelegramApiError) || error.kind !== "api" || error.code !== 400) return false;
 	const description = error.description.toLowerCase();
 	return phrases.some((phrase) => description.includes(phrase));
-}
-
-/** Rich rejection also covers a Bot API that does not know sendRichMessage (404 proves no create). */
-function isDeterministicRichRejection(error: unknown): error is TelegramApiError {
-	if (error instanceof TelegramApiError && error.kind === "api" && error.code === 404) {
-		const description = error.description.toLowerCase();
-		return (
-			description === "not found" || description.includes("method not found") || description.includes("sendrichmessage")
-		);
-	}
-	return isFormatRejection(error, RICH_REJECTIONS);
-}
-
-/** Deterministic control rich text with one safe plain projection fallback. */
-export async function sendRichTextAndPersist(
-	db: Database,
-	api: RichTextSendApi,
-	botId: string,
-	chatId: number,
-	markdown: string,
-	plainFallback: string,
-	replyToMessageId?: number,
-): Promise<{
-	raw: Record<string, unknown>;
-	canonical: CanonicalMessage;
-	transport: "rich" | "plain_fallback";
-}> {
-	let raw: Record<string, unknown>;
-	let transport: "rich" | "plain_fallback" = "rich";
-	try {
-		raw = await api.sendRichMessage(chatId, markdown, replyToMessageId);
-	} catch (error) {
-		if (!isDeterministicRichRejection(error)) throw error;
-		transport = "plain_fallback";
-		raw = await api.sendMessage(chatId, plainFallback, replyToMessageId);
-	}
-	return {
-		raw,
-		canonical: await persistSentMessageWithRetry(db, botId, raw, transport),
-		transport,
-	};
 }
 
 /** Agent Markdown send with one safe entity-free fallback and exactly-once persistence. */
