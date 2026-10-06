@@ -61,23 +61,18 @@ export function summarizeBotUsage(
 	contextWindow: number,
 	currentContextTokens?: number | null,
 ): BotUsageSummary {
-	const cacheWrite = stats.cacheWrite ?? 0;
-	const cacheDenominator = stats.cacheMiss + stats.cacheRead + cacheWrite;
-	const hasCacheSample = stats.cacheRead > 0 || cacheWrite > 0;
+	const average = (total: number, samples: number) => (samples > 0 ? total / samples : null);
+	const cacheDenominator = stats.cacheMiss + stats.cacheRead + stats.cacheWrite;
+	const hasCacheSample = stats.cacheRead > 0 || stats.cacheWrite > 0;
 	return {
-		cacheWrite,
-		cacheEstimated: (stats.estimatedCacheRuns ?? 0) > 0,
-		reasoningTokens: stats.reasoningTokens ?? 0,
+		cacheWrite: stats.cacheWrite,
+		cacheEstimated: stats.estimatedCacheRuns > 0,
+		reasoningTokens: stats.reasoningTokens,
 		cacheHitPercent: hasCacheSample && cacheDenominator > 0 ? (stats.cacheRead / cacheDenominator) * 100 : null,
-		averageLatencyMs:
-			(stats.latencySamples ?? 0) > 0 ? (stats.totalLatencyMs ?? 0) / (stats.latencySamples ?? 1) : null,
-		averageThinkingMs:
-			(stats.thinkingSamples ?? 0) > 0 ? (stats.totalThinkingMs ?? 0) / (stats.thinkingSamples ?? 1) : null,
-		averageSendMs: (stats.sendSamples ?? 0) > 0 ? (stats.totalSendMs ?? 0) / (stats.sendSamples ?? 1) : null,
-		averageTokensPerSecond:
-			(stats.totalLatencyMs ?? 0) > 0
-				? ((stats.speedOutputTokens ?? stats.outputTokens) * 1000) / (stats.totalLatencyMs ?? 1)
-				: null,
+		averageLatencyMs: average(stats.totalLatencyMs, stats.latencySamples),
+		averageThinkingMs: average(stats.totalThinkingMs, stats.thinkingSamples),
+		averageSendMs: average(stats.totalSendMs, stats.sendSamples),
+		averageTokensPerSecond: stats.totalLatencyMs > 0 ? (stats.speedOutputTokens * 1000) / stats.totalLatencyMs : null,
 		context: summarizeUsageContext(stats.last, contextWindow, currentContextTokens),
 	};
 }
