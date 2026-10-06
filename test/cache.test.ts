@@ -42,13 +42,13 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 24,
-	systemZhTemplate: "a4c784e00a37",
-	systemEnTemplate: "b89a39b52e87",
+	schemaVersion: 25,
+	systemZhTemplate: "929f455372f8",
+	systemEnTemplate: "e3368b9e6674",
 	serialize: "68a17d6e5c05",
 	eventSerialize: "a05c0584eb08",
-	tools: "98440e1b8d0c",
-	compactionPrompt: "045a5241fdd7",
+	tools: "d627213eee54",
+	compactionPrompt: "04da95f62da0",
 	multimodalCompaction: "e2da2b8b68fa",
 	replyRecovery: "4fc7e277e338",
 	telegramTurn: "43bb809c775c",
@@ -536,6 +536,24 @@ test("compaction serializes custom Telegram messages through Pi", () => {
 	expect(conversation).toContain("telegram context survives compaction");
 });
 
+test("compaction input never carries the bot's private reasoning", () => {
+	// A summary that records the bot's guesses turns one misreading into a durable "fact".
+	const messages = [
+		{
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "speculation-canary" },
+				{ type: "toolCall", id: "c1", name: "send", arguments: { message: "public-reply" } },
+			],
+			timestamp: 1,
+		},
+	] as never;
+	const text = serializeCompactionMessages(messages);
+	expect(text).toContain("public-reply");
+	expect(text).not.toContain("speculation-canary");
+	expect(JSON.stringify(buildCompactionContent(messages, undefined, () => null))).not.toContain("speculation-canary");
+});
+
 test("sticker catalog prompt block grammar stable (short_id + emoji + description, per-bot)", () => {
 	const db = new Database(":memory:");
 	db.exec(readFileSync("src/db/schema.sql", "utf8"));
@@ -651,7 +669,7 @@ test("recent visible user stickers form a bounded final suffix", () => {
 	// persisted description (context mode leaves the vision column null, so lines degrade
 	// to short_id + emoji); set name and format never render
 	const block = recentContextStickerCandidates(db, "A", chatId, 1, [6, 7, 8, 9, 10, 11, 12]);
-	expect(block).toBe(`可发 sticker（近期上下文）：
+	expect(block).toBe(`〔系统附注〕近期群里出现过、你也能发送的 sticker：
 s10: 😺 emotion-10
 s9: 😺 emotion-9
 s8: 😺 emotion-8

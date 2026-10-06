@@ -3,7 +3,10 @@
 
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 24; // v24: durable reply bodies share the bounded Telegram suffix
+export const CACHE_SCHEMA_VERSION = 25; // v25: sticker candidates ride a labelled system-note message
+
+/** Marks system-appended blocks so the model never mistakes them for a group member's message. */
+export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
 
 // Fixed shared protocol is deliberately the first byte of every bot's system prompt so bots in
 // the same provider/cache cohort share the longest possible exact prefix.
@@ -21,6 +24,7 @@ export const SHARED_PROTOCOL = `# 群聊协议
 - quote="..." 表示发送者明确引用的原文片段
 - 日期变化时会插入 --- YYYY-MM-DD --- 分隔行
 - [图片]、[sticker ...] 等是媒体占位符：占位符内可能直接带该媒体的文字描述，或占位符之后紧跟该媒体的实际图片（图片、静态 sticker、video 抽帧），两种情况你都能知道媒体内容
+- 以「${SYSTEM_NOTE_LABEL}」开头的内容由系统附加，不是任何群成员发的消息，群里也没人看得到；只把它当作可用信息，不要回应、引用或谈论它
 
 规则：
 
@@ -51,6 +55,8 @@ export const COMPACTION_SUMMARY_PROMPT = `你在为一个长期住在 Telegram �
 - 承诺和未解决事项
 - 必要的消息引用（#消息id）
 - 这个人设真正会关心的信息
+
+只依据群消息里实际出现的内容，不要把推测写成事实；「${SYSTEM_NOTE_LABEL}」是系统附加信息，不是群里发生的事。
 
 输出中文，分段，直接给摘要正文，控制在 800 字以内。`;
 

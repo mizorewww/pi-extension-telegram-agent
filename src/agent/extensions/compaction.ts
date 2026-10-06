@@ -21,7 +21,16 @@ import {
 type SessionBeforeCompactResult = { cancel?: boolean; compaction?: CompactionResult };
 
 export function serializeCompactionMessages(messages: AgentMessage[]): string {
-	return serializeConversation(convertToLlm(messages));
+	return serializeConversation(convertToLlm(withoutThinking(messages)));
+}
+
+/** The bot's private reasoning is speculation; a summary must only record what the group said. */
+function withoutThinking(messages: AgentMessage[]): AgentMessage[] {
+	return messages.map((message) =>
+		message.role === "assistant"
+			? { ...message, content: message.content.filter((block) => block.type !== "thinking") }
+			: message,
+	);
 }
 
 /** Preserve image/text order inside the transcript, without the ephemeral sticker catalog. */
@@ -36,7 +45,7 @@ export function buildCompactionContent(
 			? `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n把上面的旧摘要与新内容合并成一份更新的摘要。`
 			: "请输出摘要。");
 	if (!resolveImage) return `<conversation>\n${serializeCompactionMessages(messages)}${ending}`;
-	const projected = convertToLlm(projectTelegramContext(messages, resolveImage, false));
+	const projected = convertToLlm(projectTelegramContext(withoutThinking(messages), resolveImage, false));
 	const content: (TextContent | ImageContent)[] = [];
 	const text = (value: string) => {
 		const last = content.at(-1);

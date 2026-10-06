@@ -620,8 +620,11 @@ export default function (pi) {
 		// context message. Older messages must not carry it, and persisted content stays clean
 		// (runtime persists packed.text; compaction reads persisted bytes directly).
 		expect((projected[0] as { content: string }).content).not.toContain("candidate");
-		expect((projected[1] as { content: string }).content).toBe("newest-provider-text\n\nnewest-candidate");
-		expect(JSON.stringify(projected[2])).toContain("sent_message_ids=#100,#101");
+		expect((projected[1] as { content: string }).content).toBe("newest-provider-text");
+		// Candidates are a separate message so they never read as the last speaker's text.
+		expect(projected[2]).toMatchObject({ role: "custom", customType: "telegram_sticker_candidates" });
+		expect((projected[2] as { content: string }).content).toBe("newest-candidate");
+		expect(JSON.stringify(projected[3])).toContain("sent_message_ids=#100,#101");
 	});
 
 	test("v4 details project interleaved image blocks through the resolver", () => {
@@ -648,7 +651,8 @@ export default function (pi) {
 		} as never;
 		// Without a resolver the projection stays the historical exact string.
 		const plain = projectTelegramContext([entry]);
-		expect((plain[0] as { content: string }).content).toBe("before\n[图片]\nafter\n\ncand");
+		expect((plain[0] as { content: string }).content).toBe("before\n[图片]\nafter");
+		expect((plain[1] as { content: string }).content).toBe("cand");
 		// With a resolver, images materialize as content blocks; unresolvable refs drop out.
 		const projected = projectTelegramContext([entry], (ref) =>
 			ref.name === "abc.png" ? { type: "image", data: "Zm9v", mimeType: ref.mime } : null,
@@ -656,8 +660,9 @@ export default function (pi) {
 		expect((projected[0] as { content: unknown[] }).content).toEqual([
 			{ type: "text", text: "before\n[图片]" },
 			{ type: "image", data: "Zm9v", mimeType: "image/png" },
-			{ type: "text", text: "after\n\ncand" },
+			{ type: "text", text: "after" },
 		]);
+		expect((projected[1] as { content: string }).content).toBe("cand");
 	});
 
 	test("unpublished assistant prose is absent from the next context", () => {

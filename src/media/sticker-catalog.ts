@@ -7,10 +7,11 @@
 // sits in the stable system prompt, so the prefix is determined by config + DB catalog, and the
 // snapshot hash covers description text so a landing description starts a new epoch. Recent
 // visible user stickers are a separate bounded dynamic tail (cache schema v11) that lives only
-// in the context-event projection (extensions/context.ts appends it to the last context message
-// at request time); persisted custom message content never carries it.
+// in the context-event projection (extensions/context.ts adds it as a labelled message after the
+// last context message at request time); persisted custom message content never carries it.
 
 import type { Database } from "bun:sqlite";
+import { SYSTEM_NOTE_LABEL } from "../agent/prompt.ts";
 import { errorCategory, log } from "../observability/log.ts";
 import { createHash } from "node:crypto";
 import type { BotApi } from "../telegram/api.ts";
@@ -278,7 +279,7 @@ export function recentContextStickerCandidates(
 		lines.push(stickerLine(shortId, row.sticker_emoji, stickerDescription(row.vision)));
 		if (lines.length >= boundedLimit) break;
 	}
-	return lines.length > 0 ? `可发 sticker（近期上下文）：\n${lines.join("\n")}` : "";
+	return lines.length > 0 ? `${SYSTEM_NOTE_LABEL}近期群里出现过、你也能发送的 sticker：\n${lines.join("\n")}` : "";
 }
 
 /** Fingerprint the exact state that shapes the prompt block: identity plus description text. */

@@ -14,7 +14,9 @@
 
 ## CACHE_SCHEMA_VERSION
 
-当前：**24**。
+当前：**25**。
+
+v25：最近上下文 sticker 候选不再拼在最后一批消息正文末尾，而是作为紧随其后的独立 `telegram_sticker_candidates` 投影消息，以「〔系统附注〕」开头；群聊协议说明附注由系统附加、群成员不可见。原因：拼接时模型把候选读成最后发言者粘贴的内容（2026-10 生产事故）。同时摘要输入去掉 assistant thinking，摘要 prompt 要求只记录群消息中实际出现的内容。上一批 context 消息在下一轮不再变化，前缀可多复用一段。
 
 v24：Telegram 的嵌入父消息正文作为 `reply_snapshot` 随当前消息及不可变 event 保存，包含 text/caption 或 Rich Message 的 plain projection；旧 event 仍可按主键读取本地父消息。引用不再只显示 40 字，selected quote 不再只显示 60 字，两者与当前正文共同受单 event 和 suffix token 预算约束，超长内容保留首尾及截断标记。只有同一新 batch 内已提供的父消息才省略重复正文，防止 `prompt()` preflight 压缩旧窗口后只剩 ID。父消息不会作为新消息入库或路由；不额外调用模型，不回写已持久化的 provider prefix。serializer 升为 v5，更新 event grammar golden；重启按 fingerprint 创建新 epoch，旧 session 保留。
 

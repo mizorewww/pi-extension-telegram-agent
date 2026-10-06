@@ -128,10 +128,17 @@ export function buildTelegramContextBlocks(
 /** Resolve one image reference to a provider block; null drops it (pruned/missing file). */
 export type TelegramContextImageResolver = (ref: { name: string; mime: string }) => ImageContent | null;
 
+/** Projection-only message carrying the sticker candidate block; never persisted. */
+export const TELEGRAM_STICKER_CANDIDATES_TYPE = "telegram_sticker_candidates";
+
 /**
  * Keep the provider projection derived from extension-owned structured details. The same bytes
  * are also persisted as plain-text content for compaction/debugging, but restored sessions never
  * need to parse rendered Telegram grammar to recover message identities.
+ *
+ * Sticker candidates ride a separate message right after the LAST context message: a tail glued
+ * to the chat text reads as if the last speaker had pasted it, and a separate message keeps the
+ * context message itself byte-stable once a newer turn moves the candidates on.
  */
 export function projectTelegramContext(
 	messages: AgentMessage[],
@@ -141,7 +148,7 @@ export function projectTelegramContext(
 	const lastTelegramContext = messages.findLastIndex(
 		(message) => message.role === "custom" && message.customType === TELEGRAM_CONTEXT_TYPE,
 	);
-	return messages.map((message, index) => {
+	return messages.flatMap((message, index): AgentMessage[] => {
 		if (message.role === "toolResult" && message.toolName === "send") {
 			const details = message.details as { sent?: unknown; outcome?: unknown } | undefined;
 			const sent = Array.isArray(details?.sent)
@@ -149,38 +156,47 @@ export function projectTelegramContext(
 				: [];
 			if (sent.length > 0) {
 				const ack = details?.outcome ? SEND_NO_RETRY_ACK : SEND_SUCCESS_ACK;
-				return {
-					...message,
-					content: [{ type: "text", text: `${ack} sent_message_ids=${sent.map((id) => `#${id}`).join(",")}` }],
-				};
+				return [
+					{
+						...message,
+						content: [{ type: "text", text: `${ack} sent_message_ids=${sent.map((id) => `#${id}`).join(",")}` }],
+					},
+				];
 			}
 		}
-		if (message.role !== "custom" || message.customType !== TELEGRAM_CONTEXT_TYPE) return message;
-		if (!isTelegramContextDetails(message.details)) return message;
+		if (message.role !== "custom" || message.customType !== TELEGRAM_CONTEXT_TYPE) return [message];
+		if (!isTelegramContextDetails(message.details)) return [message];
+		const projected = { ...message, content: projectContent(message.details, resolveImage) };
 		const candidates =
 			includeStickerCandidates && index === lastTelegramContext ? message.details.stickerCandidates.trim() : "";
-		const images = message.details.blocks.filter((block) => block.type === "image");
-		if (images.length === 0 || !resolveImage) {
-			// Text-only projection keeps the historical exact-string bytes.
-			const text = candidates ? `${message.details.providerText}\n\n${candidates}` : message.details.providerText;
-			return { ...message, content: text };
-		}
-		const content: ({ type: "text"; text: string } | ImageContent)[] = [];
-		for (const block of message.details.blocks) {
-			if (block.type === "text") {
-				content.push({ type: "text", text: block.text });
-				continue;
-			}
+		if (!candidates) return [projected];
+		return [
+			projected,
+			{
+				role: "custom",
+				customType: TELEGRAM_STICKER_CANDIDATES_TYPE,
+				content: candidates,
+				display: false,
+				timestamp: message.timestamp,
+			},
+		];
+	});
+}
+
+function projectContent(
+	details: TelegramContextDetails,
+	resolveImage?: TelegramContextImageResolver,
+): string | ({ type: "text"; text: string } | ImageContent)[] {
+	if (!resolveImage || !details.blocks.some((block) => block.type === "image")) return details.providerText;
+	const content: ({ type: "text"; text: string } | ImageContent)[] = [];
+	for (const block of details.blocks) {
+		if (block.type === "text") content.push({ type: "text", text: block.text });
+		else {
 			const resolved = resolveImage({ name: block.name, mime: block.mime });
 			if (resolved) content.push(resolved);
 		}
-		if (candidates) {
-			const last = content.at(-1);
-			if (last?.type === "text") last.text += `\n\n${candidates}`;
-			else content.push({ type: "text", text: candidates });
-		}
-		return { ...message, content };
-	});
+	}
+	return content;
 }
 
 export function makeTelegramContextExtension(
