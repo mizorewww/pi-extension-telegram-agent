@@ -12,6 +12,7 @@
 
 ## 正确性边界
 
+- **bot 发言不用 Telegram Rich Message。** 部分群友的客户端没更新，看不到 Rich Message；agent 发言保持本地 Markdown → entities（`src/telegram/markdown.ts`）的经典 `sendMessage`。
 - **Telegram create 是不可回滚的提交点。** 只有确定性 4xx 且尚无任何提交时才把错误还给模型；其余一律结果未知、不重发。这是重复消息与漏发之间有意的取舍。
 - **概率路由 busy/cooldown 时跳过，不改投。** 改投会让概率分布依赖运行时状态，并放大调用量。
 - **最近 assistant 失败时取消阈值压缩。** provider 故障期间叠加摘要请求只会把一次故障放大成多次付费失败；overflow 恢复仍走 Pi 原生路径。
