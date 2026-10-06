@@ -4,7 +4,6 @@ import { spawn } from "node:child_process";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
 	AssistantMessageComponent,
-	convertToPng,
 	ToolExecutionComponent,
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -32,7 +31,6 @@ import { summarizeBotUsage } from "../../src/observability/usage.ts";
 import { sanitize } from "../../src/sanitize.ts";
 import {
 	itemKey,
-	mediaFileRevision,
 	readMediaImage,
 	TimelineClient,
 	type MediaImage,
@@ -45,10 +43,6 @@ const FEED_WIDGET_KEY = "telegram-feed";
 const MAX_ACTIVE_STREAMS = 32;
 const MAX_ENDED_STREAMS = 64;
 const PROCESS_OUTPUT_MAX_BYTES = 64 * 1024;
-const MEDIA_CACHE_MAX_ENTRIES = 32;
-const MEDIA_CACHE_MAX_BASE64_BYTES = 32 * 1024 * 1024;
-const MEDIA_CACHE_MAX_ITEM_BASE64_BYTES = 8 * 1024 * 1024;
-const MEDIA_CONVERSION_MAX_PENDING = 32;
 
 const IDENTITY_COLORS = [
 	"accent",
@@ -92,141 +86,6 @@ type StatusHost = {
 	model: StatusModel | undefined;
 	thinkingLevel?: ExtensionContext["thinkingLevel"];
 };
-
-type MediaReadyListener = (filename: string) => void;
-type MediaCacheState = { kind: "ready"; image: MediaImage; base64Bytes: number } | { kind: "failed"; base64Bytes: 0 };
-
-interface PendingMediaConversion {
-	listeners: Set<MediaReadyListener>;
-	promise: Promise<void>;
-}
-
-/** Pi-owned image rendering with Kitty-only async PNG preparation and bounded local state. */
-class NativeMediaCache {
-	private readonly states = new Map<string, MediaCacheState>();
-	private readonly pending = new Map<string, PendingMediaConversion>();
-	private totalBytesValue = 0;
-
-	resolve(message: MsgItem, listener?: MediaReadyListener): MediaImage | null {
-		const source = readMediaImage(message);
-		if (!source) return null;
-		if (source.mime === "image/png") return source;
-		let protocol: Tui.ImageProtocol;
-		try {
-			protocol = Tui.getCapabilities().images;
-		} catch {
-			return null;
-		}
-		if (protocol !== "kitty") return source;
-
-		const cached = this.touch(source.revision);
-		if (cached) return cached.kind === "ready" ? cached.image : null;
-		const inFlight = this.pending.get(source.revision);
-		if (inFlight) {
-			if (listener) inFlight.listeners.add(listener);
-			return null;
-		}
-		if (this.pending.size >= MEDIA_CONVERSION_MAX_PENDING) {
-			this.remember(source.revision, { kind: "failed", base64Bytes: 0 });
-			return null;
-		}
-
-		const listeners = new Set<MediaReadyListener>();
-		if (listener) listeners.add(listener);
-		const entry: PendingMediaConversion = { listeners, promise: Promise.resolve() };
-		this.pending.set(source.revision, entry);
-		entry.promise = this.prepare(source, entry);
-		return null;
-	}
-
-	unsubscribe(listener: MediaReadyListener): void {
-		for (const conversion of this.pending.values()) conversion.listeners.delete(listener);
-	}
-
-	private async prepare(source: MediaImage, entry: PendingMediaConversion): Promise<void> {
-		let shouldNotify = false;
-		try {
-			const converted = await convertToPng(source.base64, source.mime);
-			if (mediaFileRevision(source.filename) !== source.revision) {
-				shouldNotify = true;
-				return;
-			}
-			if (!this.isValidPng(converted)) {
-				this.remember(source.revision, { kind: "failed", base64Bytes: 0 });
-				return;
-			}
-			const image = { ...source, base64: converted.data, mime: "image/png" };
-			this.remember(source.revision, { kind: "ready", image, base64Bytes: converted.data.length });
-			shouldNotify = true;
-		} catch {
-			if (mediaFileRevision(source.filename) === source.revision) {
-				this.remember(source.revision, { kind: "failed", base64Bytes: 0 });
-			} else shouldNotify = true;
-		} finally {
-			if (this.pending.get(source.revision) === entry) this.pending.delete(source.revision);
-			if (shouldNotify) {
-				for (const listener of entry.listeners) {
-					try {
-						listener(source.filename);
-					} catch {
-						// Host lifecycle callbacks are isolated from the shared conversion promise.
-					}
-				}
-			}
-			entry.listeners.clear();
-		}
-	}
-
-	private isValidPng(
-		value: { data: string; mimeType: string } | null,
-	): value is { data: string; mimeType: "image/png" } {
-		if (
-			!value ||
-			value.mimeType !== "image/png" ||
-			!value.data ||
-			value.data.length > MEDIA_CACHE_MAX_ITEM_BASE64_BYTES
-		) {
-			return false;
-		}
-		const bytes = Buffer.from(value.data, "base64");
-		const hasSignature =
-			bytes.length >= 8 &&
-			bytes[0] === 0x89 &&
-			bytes[1] === 0x50 &&
-			bytes[2] === 0x4e &&
-			bytes[3] === 0x47 &&
-			bytes[4] === 0x0d &&
-			bytes[5] === 0x0a &&
-			bytes[6] === 0x1a &&
-			bytes[7] === 0x0a;
-		if (!hasSignature) return false;
-		const dimensions = Tui.getPngDimensions(value.data);
-		return dimensions != null && dimensions.widthPx > 0 && dimensions.heightPx > 0;
-	}
-
-	private touch(key: string): MediaCacheState | undefined {
-		const state = this.states.get(key);
-		if (!state) return undefined;
-		this.states.delete(key);
-		this.states.set(key, state);
-		return state;
-	}
-
-	private remember(key: string, state: MediaCacheState): void {
-		const previous = this.states.get(key);
-		if (previous) this.totalBytesValue -= previous.base64Bytes;
-		this.states.delete(key);
-		this.states.set(key, state);
-		this.totalBytesValue += state.base64Bytes;
-		while (this.states.size > MEDIA_CACHE_MAX_ENTRIES || this.totalBytesValue > MEDIA_CACHE_MAX_BASE64_BYTES) {
-			const oldest = this.states.keys().next().value as string | undefined;
-			if (!oldest) break;
-			const evicted = this.states.get(oldest);
-			this.states.delete(oldest);
-			this.totalBytesValue -= evicted?.base64Bytes ?? 0;
-		}
-	}
-}
 
 type TgCommandDispatch =
 	| "config"
@@ -961,22 +820,16 @@ class TelegramFeed extends Tui.Container {
 	private statsValue: Record<string, BotStats> = {};
 	private statusesValue: Record<string, RuntimeControlSnapshot> = {};
 	private closed = false;
-	private readonly mediaListener: MediaReadyListener = (filename) => {
-		if (!this.closed) this.patchItems((item) => item.mediaPath === filename);
-	};
-	private readonly mediaResolver: MediaImageResolver;
 
 	constructor(
 		readonly filter: string | null,
 		private readonly theme: Theme,
 		private readonly factory: TimelineFactory,
 		private readonly changed: (event: TimelineEvent, feed: TelegramFeed) => void,
-		private readonly mediaCache: NativeMediaCache,
 		private readonly requestRender: () => void,
 		private readonly toolHost?: ToolPresentationHost,
 	) {
 		super();
-		this.mediaResolver = (item) => this.mediaCache.resolve(item, this.mediaListener);
 		this.addChild(this.content);
 		this.addChild(this.streamContent);
 		this.clientValue = factory(filter, { onEvent: (event) => this.onEvent(event) });
@@ -1017,7 +870,6 @@ class TelegramFeed extends Tui.Container {
 		if (this.closed) return;
 		this.closed = true;
 		this.clientValue.dispose();
-		this.mediaCache.unsubscribe(this.mediaListener);
 		this.clearStreams();
 	}
 
@@ -1066,7 +918,7 @@ class TelegramFeed extends Tui.Container {
 			if (day !== previousDay)
 				this.content.addChild(new Tui.Text(this.theme.fg("dim", `──────── ${day} ────────`), 1, 0));
 			const slot = new Tui.Container();
-			slot.addChild(itemComponent(item, this.theme, this.mediaResolver, this.toolHost));
+			slot.addChild(itemComponent(item, this.theme, readMediaImage, this.toolHost));
 			this.cardSlots.set(itemKey(item), slot);
 			this.content.addChild(slot);
 			this.content.addChild(new Tui.Spacer(1));
@@ -1091,7 +943,7 @@ class TelegramFeed extends Tui.Container {
 			const slot = this.cardSlots.get(itemKey(updated));
 			if (!slot) continue;
 			slot.clear();
-			slot.addChild(itemComponent(updated, this.theme, this.mediaResolver, this.toolHost));
+			slot.addChild(itemComponent(updated, this.theme, readMediaImage, this.toolHost));
 			refreshed = true;
 		}
 		if (refreshed) this.requestRender();
@@ -1207,7 +1059,6 @@ function showTelegramStatus(
 export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cwd()): void {
 	const factory: TimelineFactory = (filter, hooks, oldestCursor) =>
 		new TimelineClient(join(rootDir, "data", "daemon.sock"), filter, hooks, oldestCursor);
-	const mediaCache = new NativeMediaCache();
 	const feeds = new Map<string, TelegramFeed>();
 	let pending: { data: FeedEntry; changed: (event: TimelineEvent, feed: TelegramFeed) => void } | null = null;
 	let active: TelegramFeed | null = null;
@@ -1407,7 +1258,6 @@ export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cw
 			theme,
 			factory,
 			pending.changed,
-			mediaCache,
 			() => requestHostRender?.(),
 			toolHost,
 		);
