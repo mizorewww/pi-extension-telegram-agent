@@ -99,68 +99,19 @@ type TgCommandDispatch =
 	| "stop"
 	| "status-daemon";
 
-interface TgBotChoice {
-	id: string;
-	name: string;
-}
-
-/** Optional trailing argument; unknown tokens are passed through to the parent dispatch for its own error. */
-interface TgCommandChildren {
-	hint: string;
-	resolve: (bots: readonly TgBotChoice[]) => readonly TgCommandNode[];
-}
-
-interface TgCommandNode {
-	token: string;
-	label?: string;
-	description: string;
-	dispatch?: TgCommandDispatch;
-	children?: TgCommandChildren;
-}
-
-interface TgCompletionItem {
-	value: string;
-	label: string;
-	description?: string;
-}
-
-function botChildren(dispatch: TgCommandDispatch, includeOff = false): TgCommandChildren {
-	return {
-		hint: includeOff ? "bot|off" : "bot",
-		resolve: (bots) => [
-			...bots.map((bot) => ({
-				token: bot.id,
-				label: bot.name === bot.id ? bot.id : `${bot.id} (${bot.name})`,
-				description: `Telegram bot ${bot.name}`,
-				dispatch,
-			})),
-			...(includeOff ? [{ token: "off", description: "Restore Pi behavior", dispatch }] : []),
-		],
-	};
-}
-
-const TG_COMMAND_TREE: readonly TgCommandNode[] = [
-	{ token: "config", description: "Configure Telegram with Pi dialogs", dispatch: "config" },
-	{
-		token: "attach",
-		description: "Open all bots or one bot for chat",
-		dispatch: "attach",
-		children: botChildren("attach"),
-	},
-	{
-		token: "compose",
-		description: "Use the feed scope, one bot, or Pi",
-		dispatch: "compose",
-		children: botChildren("compose", true),
-	},
-	{ token: "more", description: "Load one older history page", dispatch: "more" },
-	{ token: "detach", description: "Disconnect the live feed", dispatch: "detach" },
-	{ token: "status", description: "Show detailed usage", dispatch: "status", children: botChildren("status") },
-	{ token: "start", description: "Start the Telegram daemon", dispatch: "start" },
-	{ token: "restart", description: "Gracefully restart every configured bot", dispatch: "restart" },
-	{ token: "stop", description: "Stop the Telegram daemon", dispatch: "stop" },
-	{ token: "status-daemon", description: "Show daemon process status", dispatch: "status-daemon" },
-];
+/** Every /tg subcommand; `bot` names its single optional trailing argument. */
+const TG_COMMANDS: Record<TgCommandDispatch, { description: string; bot?: "bot" | "bot|off" }> = {
+	config: { description: "Configure Telegram with Pi dialogs" },
+	attach: { description: "Open all bots or one bot for chat", bot: "bot" },
+	compose: { description: "Use the feed scope, one bot, or Pi", bot: "bot|off" },
+	more: { description: "Load one older history page" },
+	detach: { description: "Disconnect the live feed" },
+	status: { description: "Show detailed usage", bot: "bot" },
+	start: { description: "Start the Telegram daemon" },
+	restart: { description: "Gracefully restart every configured bot" },
+	stop: { description: "Stop the Telegram daemon" },
+	"status-daemon": { description: "Show daemon process status" },
+};
 
 function runChildProcess(
 	command: string,
@@ -207,69 +158,52 @@ async function runDaemonCommand(rootDir: string, command: DaemonCommand): Promis
 	};
 }
 
-function normalizedTokens(value: string): string[] {
-	const trimmed = value.trim();
-	return trimmed ? trimmed.split(/\s+/) : [];
-}
-
 function formatTgHelp(): string {
-	const syntax = TG_COMMAND_TREE.map((node) => (node.children ? `${node.token} [${node.children.hint}]` : node.token));
+	const syntax = Object.entries(TG_COMMANDS).map(([token, command]) =>
+		command.bot ? `${token} [${command.bot}]` : token,
+	);
 	return `usage: /tg ${syntax.join(" | ")}`;
 }
 
-function completeTgArguments(argumentPrefix: string, bots: readonly TgBotChoice[]): TgCompletionItem[] | null {
-	const tokens = normalizedTokens(argumentPrefix);
-	const startsNextToken = /\s$/.test(argumentPrefix);
-	const path = startsNextToken ? tokens : tokens.slice(0, -1);
-	const partial = startsNextToken ? "" : (tokens.at(-1) ?? "");
-	let candidates = TG_COMMAND_TREE;
-	const valuePath: string[] = [];
-
-	for (const token of path) {
-		const node = candidates.find((candidate) => candidate.token === token);
-		if (!node?.children) return null;
-		valuePath.push(node.token);
-		candidates = node.children.resolve(bots);
-	}
-
-	const needle = partial.toLocaleLowerCase("en");
-	const matches = candidates.filter((candidate) => candidate.token.toLocaleLowerCase("en").startsWith(needle));
+function completeTgArguments(
+	argumentPrefix: string,
+	bots: readonly Pick<BotConfig, "id" | "name">[],
+): { value: string; label: string; description?: string }[] | null {
+	const tokens = argumentPrefix.trimStart().split(/\s+/);
+	const command = tokens.length === 2 ? TG_COMMANDS[tokens[0] as TgCommandDispatch] : undefined;
+	const candidates =
+		tokens.length === 1
+			? Object.entries(TG_COMMANDS).map(([token, { description }]) => ({ token, label: token, description }))
+			: command?.bot
+				? [
+						...bots.map((bot) => ({
+							token: bot.id,
+							label: bot.name === bot.id ? bot.id : `${bot.id} (${bot.name})`,
+							description: `Telegram bot ${bot.name}`,
+						})),
+						...(command.bot === "bot|off" ? [{ token: "off", label: "off", description: "Restore Pi behavior" }] : []),
+					]
+				: [];
+	const partial = tokens.at(-1)!.toLocaleLowerCase("en");
+	const matches = candidates.filter((candidate) => candidate.token.toLocaleLowerCase("en").startsWith(partial));
 	if (matches.length === 0) return null;
-	return matches.map((candidate) => ({
-		value: [...valuePath, candidate.token].join(" "),
-		label: candidate.label ?? candidate.token,
-		description: candidate.description,
-	}));
+	const prefix = tokens.length === 2 ? `${tokens[0]} ` : "";
+	return matches.map(({ token, label, description }) => ({ value: `${prefix}${token}`, label, description }));
 }
 
 type ParsedTgCommand =
 	| { ok: true; dispatch: TgCommandDispatch; arguments: string[] }
 	| { ok: false; reason: "empty" | "unknown" | "extra" };
 
-function parseTgArguments(input: string, bots: readonly TgBotChoice[]): ParsedTgCommand {
-	const tokens = normalizedTokens(input);
+/** An unknown bot argument is passed through so the handler can name the configured bots. */
+function parseTgArguments(input: string): ParsedTgCommand {
+	const tokens = input.trim() ? input.trim().split(/\s+/) : [];
 	if (tokens.length === 0) return { ok: false, reason: "empty" };
-	const rootNode = TG_COMMAND_TREE.find((candidate) => candidate.token === tokens[0]);
-	if (!rootNode) return { ok: false, reason: "unknown" };
-	let node: TgCommandNode = rootNode;
-
-	for (let index = 1; index < tokens.length; index++) {
-		const children = node.children;
-		if (!children) return { ok: false, reason: "extra" };
-		const child = children.resolve(bots).find((candidate) => candidate.token === tokens[index]);
-		if (child) {
-			node = child;
-			continue;
-		}
-		if (index === tokens.length - 1 && node.dispatch) {
-			return { ok: true, dispatch: node.dispatch, arguments: tokens.slice(1) };
-		}
-		return { ok: false, reason: "extra" };
-	}
-
-	return node.dispatch
-		? { ok: true, dispatch: node.dispatch, arguments: tokens.slice(1) }
-		: { ok: false, reason: "extra" };
+	const dispatch = tokens[0] as TgCommandDispatch;
+	const command = Object.hasOwn(TG_COMMANDS, dispatch) ? TG_COMMANDS[dispatch] : undefined;
+	if (!command) return { ok: false, reason: "unknown" };
+	if (tokens.length > (command.bot ? 2 : 1)) return { ok: false, reason: "extra" };
+	return { ok: true, dispatch, arguments: tokens.slice(1) };
 }
 
 interface TelegramComposeIndicator {
@@ -1253,14 +1187,7 @@ export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cw
 		const existing = feeds.get(data.instanceId);
 		if (existing) return existing;
 		if (pending?.data.instanceId !== data.instanceId) return detachedEntry(data, theme);
-		const feed = new TelegramFeed(
-			data.filter,
-			theme,
-			factory,
-			pending.changed,
-			() => requestHostRender?.(),
-			toolHost,
-		);
+		const feed = new TelegramFeed(data.filter, theme, factory, pending.changed, () => requestHostRender?.(), toolHost);
 		pending = null;
 		feeds.set(data.instanceId, feed);
 		active = feed;
@@ -1384,7 +1311,7 @@ export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cw
 		getArgumentCompletions: (argumentPrefix) => completeTgArguments(argumentPrefix, configuredBots()),
 		handler: async (args, ctx) => {
 			lastUi = ctx.ui;
-			const parsed = parseTgArguments(args, configuredBots());
+			const parsed = parseTgArguments(args);
 			if (!parsed.ok) {
 				ctx.ui.notify(formatTgHelp(), parsed.reason === "empty" ? "info" : "error");
 				return;
