@@ -21,6 +21,7 @@ import {
 	type BotStatusView,
 } from "../observability/status.ts";
 import { extractUpdateMessage } from "./normalize.ts";
+import { BotFire, FIRE_BOT_TRIGGER_BUDGET } from "../agent/router.ts";
 
 const CONTROL_COMMAND_AUDIT_EVENT = "telegram_control";
 
@@ -46,11 +47,15 @@ export type TelegramControlAction =
 	| { kind: "new" }
 	| { kind: "model"; data?: string }
 	| { kind: "set"; data?: string }
+	| { kind: "fire"; mode: FireMode }
 	| { kind: "usage" };
 
-export type TelegramControlCommandToken = "help" | "status" | "compact" | "new" | "set" | "model";
+/** Bare `/fire` toggles. */
+export type FireMode = "on" | "off" | "status" | "toggle";
 
-const COMMAND_TOKENS: ReadonlySet<string> = new Set(["help", "status", "compact", "new", "set", "model"]);
+export type TelegramControlCommandToken = "help" | "status" | "compact" | "new" | "set" | "model" | "fire";
+
+const COMMAND_TOKENS: ReadonlySet<string> = new Set(["help", "status", "compact", "new", "set", "model", "fire"]);
 
 export interface ParsedTelegramControlCommand {
 	chatId: number;
@@ -203,6 +208,13 @@ export function parseTelegramControlCommand(
 
 function parseControlArguments(command: TelegramControlCommandToken, input: string): TelegramControlAction {
 	const tokens = input ? input.split(/\s+/) : [];
+	if (command === "fire") {
+		if (tokens.length === 0) return { kind: "fire", mode: "toggle" };
+		const mode = tokens[0]!.toLowerCase();
+		return tokens.length === 1 && (mode === "on" || mode === "off" || mode === "status")
+			? { kind: "fire", mode }
+			: { kind: "usage" };
+	}
 	return tokens.length === 0 ? { kind: command } : { kind: "usage" };
 }
 
@@ -218,6 +230,7 @@ export class TelegramControlCommandService {
 		private readonly admins: readonly TelegramAdmin[],
 		private readonly now: () => number = () => Date.now(),
 		private readonly models?: Pick<ModelRuntime, "getAvailableSnapshot">,
+		private readonly fire: BotFire = new BotFire(),
 	) {}
 
 	async handle(command: ParsedTelegramControlCommand): Promise<TelegramControlResult> {
@@ -315,6 +328,8 @@ export class TelegramControlCommandService {
 				return await this.newSession(command.replyBotId);
 			case "model":
 				return await this.model(command.replyBotId, command.action.data);
+			case "fire":
+				return this.fireControl(command.replyBotId, command.chatId, command.action.mode);
 			case "usage":
 				return { text: USAGE_TEXT, outcome: "usage" };
 		}
@@ -394,6 +409,31 @@ export class TelegramControlCommandService {
 		return { ...renderSettingsMenu(bot), callbackNotice: label, outcome: "ok" };
 	}
 
+	/** Scoped to the addressed bot in this chat; state lives in memory and resets on restart. */
+	private fireControl(botId: string, chatId: number, mode: FireMode): ControlExecutionResult {
+		const bot = this.bots.find((candidate) => candidate.id === botId);
+		if (!bot) return { text: `未知 bot：${bounded(botId)}`, outcome: "unknown_bot" };
+		const remaining = this.fire.status(botId, chatId);
+		if (mode === "status") {
+			return {
+				text:
+					remaining == null
+						? `${bounded(botId)}: /fire 关闭，其他 bot 的消息不会触发本 bot。`
+						: `${bounded(botId)}: /fire 开启，人类发言前还可被 bot 连续触发 ${remaining}/${FIRE_BOT_TRIGGER_BUDGET} 次。`,
+				outcome: remaining == null ? "off" : "on",
+			};
+		}
+		if (mode === "on" || (mode === "toggle" && remaining == null)) {
+			this.fire.enable(botId, chatId);
+			return {
+				text: `${bounded(botId)}: /fire 已开启，其他 bot 的消息按正常路由触发本 bot；人类发言前最多连续 ${FIRE_BOT_TRIGGER_BUDGET} 次，重启后自动关闭。`,
+				outcome: "on",
+			};
+		}
+		this.fire.disable(botId, chatId);
+		return { text: `${bounded(botId)}: /fire 已关闭，其他 bot 的消息不再触发本 bot。`, outcome: "off" };
+	}
+
 	private async compact(botId: string): Promise<{ text: string; outcome: string }> {
 		const runtime = this.runtimes.get(botId);
 		const result: ManualCompactResult = runtime
@@ -435,7 +475,7 @@ export class TelegramControlCommandService {
 	}
 
 	private audit(command: ParsedTelegramControlCommand, authorized: boolean, outcome: string, startedAt: number): void {
-		const target = ["status", "compact", "new", "set", "model"].includes(command.action.kind)
+		const target = ["status", "compact", "new", "set", "model", "fire"].includes(command.action.kind)
 			? command.replyBotId
 			: null;
 		const finishedAt = this.now();
@@ -493,7 +533,13 @@ function isHuman(sender: ControlSender): boolean {
 }
 
 function isMutation(action: TelegramControlAction): boolean {
-	return action.kind === "compact" || action.kind === "new" || action.kind === "set" || action.kind === "model";
+	return (
+		action.kind === "compact" ||
+		action.kind === "new" ||
+		action.kind === "set" ||
+		action.kind === "model" ||
+		(action.kind === "fire" && action.mode !== "status")
+	);
 }
 
 function compactFailureText(code: Exclude<ManualCompactResult, { ok: true }>["code"]): string {
@@ -551,16 +597,19 @@ const USAGE_TEXT = [
 	"/compact（管理员）",
 	"/new（管理员）",
 	"/set（管理员）",
+	"/fire status",
+	"/fire [on|off]（管理员）",
 ].join("\n");
 
 const HELP_TEXT = [
 	"Telegram Agent 控制",
-	"查看：/help、/status",
-	"管理员：/model、/compact、/new、/set",
+	"查看：/help、/status、/fire status",
+	"管理员：/model、/compact、/new、/set、/fire [on|off]",
 	"/model 用按钮选择 Pi 可用模型，保存后立即开启新会话。",
 	"命令默认作用于接收消息的 bot；带 @bot_username 后缀时定向到对应 bot。",
 	"手动 compact 会使用既有摘要模型并产生相应费用。",
 	"/new 丢弃当前上下文开启新会话（旧会话文件保留在本机），之前的群消息不再可见。",
 	"/set 用按钮调整插话概率与冷却，写回 telegram.config.ts，重启后仍然生效。",
+	`/fire 让其他 bot 的消息按正常路由触发本 bot（默认关闭、不带参数时切换），人类发言前最多连续 ${FIRE_BOT_TRIGGER_BUDGET} 次；同一部署的 bot 发言在本地路由，部署外的 bot 只在 Telegram 实际投递时生效；重启后关闭。`,
 	USAGE_TEXT,
 ].join("\n");

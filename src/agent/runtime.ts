@@ -1100,8 +1100,10 @@ export class BotRuntime {
 	trigger(source: TriggerSource = "explicit", routingTrigger?: RoutingTrigger): TriggerResult {
 		// SHARED_PROTOCOL: explicit @mention, reply-to-bot, and configured-name keyword are all
 		// direct addresses that must reach the provider even when this trigger only coalesces.
+		// A `/fire` bot-triggered address is only an opportunity: no durable obligation to answer a bot.
 		const isDirectReply =
 			routingTrigger != null &&
+			!routingTrigger.fromBot &&
 			(routingTrigger.reason === "explicit" || routingTrigger.reason === "reply" || routingTrigger.reason === "name");
 		let directReplyPending = false;
 		let directReplyMessageId: number | null = null;

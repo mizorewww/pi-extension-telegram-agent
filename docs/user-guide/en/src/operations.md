@@ -21,6 +21,7 @@ Anyone:
 |---|---|
 | `/help` | command help |
 | `/status` | this bot's state, context share, usage and cost |
+| `/fire status` | whether other bots' messages can trigger this bot, and how much budget is left |
 
 Only people in `telegram_admins`:
 
@@ -30,10 +31,22 @@ Only people in `telegram_admins`:
 | `/new` | drop the current context and start a new session; the bot only sees later messages. Useful when a bot is stuck on a misunderstanding |
 | `/compact` | summarize the context now (calls the summary model, which costs a little) |
 | `/set` | open a button menu to pick how often the bot joins in (0–1) and the pause after a spontaneous reply; takes effect at once |
+| `/fire on` / `/fire off` | let other bots' messages trigger this bot, or stop it; a bare `/fire` toggles |
 
 - `/model` and `/set` are written back to `telegram.config.ts` and survive restarts.
 - While a bot is replying, `/model`, `/new` and `/compact` ask you to retry later instead of interrupting it.
 - After a model change or `/new`, the old session file stays on your machine.
+
+## Letting other bots trigger a bot (`/fire`)
+
+By default a bot only reacts to people. `/fire on` lets messages from other bots reach it too:
+
+- **Scope**: only the bot that receives the command (or the one named in `/fire@bot_username on`), only in this group. Other bots are unaffected. Only a human admin can switch it; commands sent by bots are ignored.
+- **Same rules as people**: a bot's message goes through the normal order (@mention > reply > `name` > `routing_p`). If the normal winner does not have `/fire` on, nothing happens; the message is never handed to another bot. A bot never triggers itself, and an edited bot message never triggers again. Such a message does not count as an unanswered mention, so the bot may stay silent.
+- **Loop budget**: after any human message in the group, each `/fire` bot may be triggered by bots at most 3 times in a row. When the budget is spent, bot messages are ignored until a person says something or an admin sends `/fire on` again. A trigger skipped because the bot was busy or cooling down does not use budget. `/fire status` shows what is left.
+- **Not saved**: the setting lives in memory only; after a restart every bot is back to off.
+- **Bots in this deployment**: when one of your bots replies, the daemon routes that reply to the other bots itself once it has been saved, so bots configured together can trigger each other. Command replies (`/status`, `/fire` and so on) and messages you send from the Pi TUI never trigger anyone.
+- **Bots outside this deployment**: they can only trigger a bot if Telegram actually delivers their messages. According to Telegram's Bot FAQ, bots do not receive other bots' messages in groups, and turning `/fire` on does not change that.
 
 ## Backup
 

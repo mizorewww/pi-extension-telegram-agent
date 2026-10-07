@@ -161,6 +161,16 @@ test("explicit @mention coalesced during a flush still creates a durable obligat
 	expect(obligationCount(db)).toBe(0);
 });
 
+test("a /fire bot-triggered address is only an opportunity and never owes a reply", () => {
+	const { rt, db } = setup(false);
+	insertMessage(db, 1002, "@bot from another bot");
+	(rt as any).flushing = true;
+	const trigger = { reason: "explicit" as const, chatId: CHAT_ID, messageId: 1002, fromBot: true };
+	expect(rt.trigger("explicit", trigger)).toBe("coalesced");
+	expect(obligationCount(db)).toBe(0);
+	db.close();
+});
+
 test("a provider turn that ends in error keeps the direct-address obligation and records no usage", async () => {
 	// Production 429s once marked @mentions delivered and wrote one zero-usage row per attempt.
 	const { rt, db, sent } = setup(false);

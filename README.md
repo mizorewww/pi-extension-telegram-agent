@@ -43,7 +43,7 @@ bun run stop       # 停止
 bun run debug      # 只读诊断报告
 ```
 
-群内命令：所有人可用 `/help`、`/status`；`telegram_admins` 中的管理员还可用 `/model`（按钮换模型）、`/new`（开启新会话）、`/compact`（压缩上下文）、`/set`（调整插话概率与冷却）。
+群内命令：所有人可用 `/help`、`/status`、`/fire status`；`telegram_admins` 中的管理员还可用 `/model`（按钮换模型）、`/new`（开启新会话）、`/compact`（压缩上下文）、`/set`（调整插话概率与冷却）、`/fire on|off`（允许其他 bot 的消息触发本 bot，有连续次数上限）。
 
 ## 文档
 

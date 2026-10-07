@@ -7,6 +7,7 @@ import { join } from "node:path";
 import type { Api, Model, AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { BotRuntime } from "../src/agent/runtime.ts";
+import { BotFire, FIRE_BOT_TRIGGER_BUDGET } from "../src/agent/router.ts";
 import { createInstalledPiModelRuntime } from "../src/agent/model-runtime.ts";
 import { loadConfig } from "../src/config.ts";
 import { openDb } from "../src/db/db.ts";
@@ -123,6 +124,69 @@ test("mutating control commands require a human admin and never reach the provid
 		expect(resets).toBe(1);
 		// Every command message is excluded from provider context, whatever its outcome.
 		expect(consumedControlMessageIds(db, CHAT)).toEqual(new Set([1, 2, 3]));
+	} finally {
+		db.close();
+	}
+});
+
+test("/fire is off by default and only a human admin can switch it, for the addressed bot only", async () => {
+	const { root, config } = fixture();
+	const db = openDb(":memory:");
+	const fire = new BotFire();
+	const runtime = { consumeControlMessage: () => {} } as never;
+	const service = new TelegramControlCommandService(
+		db,
+		config.bots,
+		root,
+		new Map([["A", runtime]]),
+		[42],
+		undefined,
+		undefined,
+		fire,
+	);
+	let messageId = 0;
+	const fireCommand = (text: string, from: Record<string, unknown> = { id: 42 }) =>
+		service.handle(
+			parseTelegramControlCommand(
+				{
+					message: {
+						message_id: ++messageId,
+						chat: { id: CHAT },
+						from,
+						text,
+						entities: [{ type: "bot_command", offset: 0, length: text.split(" ")[0]!.length }],
+					},
+				},
+				"A",
+				[
+					{ id: "A", username: "alpha_bot" },
+					{ id: "B", username: "beta_bot" },
+				],
+			)!,
+		);
+	try {
+		expect((await fireCommand("/fire status", { id: 99 })).text).toContain("/fire 关闭");
+		expect((await fireCommand("/fire on", { id: 99 })).text).toContain("权限不足");
+		expect((await fireCommand("/fire on", { id: 42, is_bot: true })).text).toBeNull();
+		expect(fire.status("A", CHAT)).toBeNull();
+
+		// A suffix scopes the switch to that bot; the receiving bot stays off.
+		expect((await fireCommand("/fire@beta_bot on")).text).toContain("B: /fire 已开启");
+		expect(fire.allows("B", CHAT)).toBe(true);
+		expect(fire.allows("B", CHAT + 1)).toBe(false);
+		expect(fire.allows("A", CHAT)).toBe(false);
+		// Bare /fire toggles; an explicit re-enable refills a spent budget.
+		await fireCommand("/fire");
+		expect(fire.allows("A", CHAT)).toBe(true);
+		for (let i = 0; i < FIRE_BOT_TRIGGER_BUDGET; i++) fire.consume("A", CHAT);
+		expect(fire.allows("A", CHAT)).toBe(false);
+		await fireCommand("/fire on");
+		expect(fire.status("A", CHAT)).toBe(FIRE_BOT_TRIGGER_BUDGET);
+		await fireCommand("/fire");
+		expect(fire.status("A", CHAT)).toBeNull();
+		await fireCommand("/fire@beta_bot off");
+		expect(fire.status("B", CHAT)).toBeNull();
+		expect((await fireCommand("/fire maybe")).text).toContain("用法");
 	} finally {
 		db.close();
 	}

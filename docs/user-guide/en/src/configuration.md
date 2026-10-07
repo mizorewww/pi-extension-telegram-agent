@@ -45,14 +45,14 @@ Omitted fields use defaults. An invalid configuration fails at startup with ever
 3. append an entry to `bots` (`id` must be unique and contain only letters, digits, `_` and `-`);
 4. restart and check it with `/tg attach <id>` in Pi.
 
-Each bot has its own token, personality, session and statistics. They share the group's history and see each other's messages, but never trigger each other.
+Each bot has its own token, personality, session and statistics. They share the group's history and see each other's messages, but do not trigger each other unless an admin turns on `/fire` (see below).
 
 ## When a bot replies
 
 - **Always**: when someone @mentions it, replies to its message, or writes its `name`.
 - **Sometimes**: an ordinary message goes to one bot with probability `routing_p` (all bots together may not exceed 1). If the chosen bot is busy or cooling down (`cooldown_ms`, default 2000), the message is skipped rather than handed to another bot; a chosen bot may still decide to stay quiet.
 - `routing_p: 0` only turns off spontaneous replies; mentions still work.
-- Messages from bots never trigger other bots.
+- Messages from bots do not trigger other bots, unless an admin turns on [`/fire`](operations.md) for a bot.
 
 ## Models
 

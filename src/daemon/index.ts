@@ -5,7 +5,7 @@ import { loadConfig } from "../config.ts";
 import { openDb, getDaemonState, setDaemonState } from "../db/db.ts";
 import { BotApi } from "../telegram/api.ts";
 import { BotRuntime } from "../agent/runtime.ts";
-import { dispatchRoutingDecision, routeMessageDecision } from "../agent/router.ts";
+import { BotFire, MessageRouter } from "../agent/router.ts";
 import { IpcServer } from "./ipc-server.ts";
 import { acquirePidLock, releasePidLock } from "./pid.ts";
 import type { MessageRow } from "../agent/serialize.ts";
@@ -25,8 +25,6 @@ import { assertPiVisionExecutorReady, createPiVisionExecutor } from "../media/vi
 import { VisionScheduler } from "../media/vision-scheduler.ts";
 import { MediaCacheQueue } from "../media/media-cache.ts";
 import { composeDeployment, composePollers } from "./composition.ts";
-import type { IngestResult } from "../telegram/ingest.ts";
-import { claimRoutingDecision, finishRoutingClaim } from "../db/routing-claims.ts";
 import { applyRetention, pruneUnconfiguredBotState } from "../db/retention.ts";
 import { log } from "../observability/log.ts";
 import { inspectVideoTranscoder } from "../media/video-frames.ts";
@@ -171,9 +169,15 @@ if (storedSchema !== String(CACHE_SCHEMA_VERSION)) {
 	log.info("daemon", "cache_schema_reconciled", { previous: storedSchema ?? "none", current: CACHE_SCHEMA_VERSION });
 	setDaemonState(db, "cache_schema_version", String(CACHE_SCHEMA_VERSION));
 }
-function recordRouteMetric(metric: string, botId: string, messageId: number): void {
-	log.info("routing", "decision", { bot_id: botId, message_id: messageId, outcome: metric });
-}
+// `/fire` state shared by the control command (writer) and routing (reader); off on every start.
+const botFire = new BotFire();
+const router = new MessageRouter(
+	db,
+	identities,
+	() => ({ secret: config.routerSecret ?? "", probs: config.bots.map((b) => b.routingP) }),
+	runtimes,
+	botFire,
+);
 
 // IPC server for TUI attach/detach
 let ipc!: IpcServer;
@@ -223,7 +227,10 @@ for (const [botId, rt] of runtimes) {
 	rt.sentMessageSink = (rawMsg) => {
 		const m = rawMsg as { chat: { id: number }; message_id: number };
 		const row = broadcastMessageRow(m.chat.id, m.message_id);
-		if (row) mediaCache.scheduleMessage(botId, row);
+		if (!row) return; // persistence failed: nothing durable to route
+		mediaCache.scheduleMessage(botId, row);
+		// Only agent sends reach this sink; control replies and TUI manual sends never route.
+		router.routeLocalSend(row);
 	};
 	rt.usageSink = () => ipc.broadcastUsage(botId);
 	rt.visionSink = (fileUniqueId, text) => ipc.broadcastVision({ fileUniqueId, text });
@@ -254,6 +261,7 @@ const telegramControl = new TelegramControlCommandService(
 	config.telegramAdmins,
 	undefined,
 	sharedModelRuntime,
+	botFire,
 );
 const telegramControlCoordinator = new TelegramControlCoordinator(
 	db,
@@ -270,55 +278,6 @@ void publishTelegramControlMenus(botApis);
 for (const [botId, rt] of runtimes) {
 	const outcome = rt.recoverReplyObligations();
 	if (outcome) log.info("routing", "reply_recovered", { bot_id: botId, outcome });
-}
-
-// route an ingested group message to a bot per routing rules
-function route(result: IngestResult, row: MessageRow): void {
-	const decision = routeMessageDecision(db, row, identities, {
-		secret: config.routerSecret ?? "",
-		probs: config.bots.map((b) => b.routingP),
-	});
-	// The only enrichment performed by ingestion is reply-sender identity. Re-route only when
-	// that new fact actually changes the deterministic outcome into a direct reply.
-	if (result.kind === "enriched" && decision.reason !== "reply") return;
-	if (decision.target === "nobody") return;
-	// TriggerTarget is `string | "nobody"`, which collapses to string; the early return above
-	// documents the nobody guard and claimRoutingDecision already accepts the decision as-is.
-	const routeVersion = result.routeVersion ?? 1;
-	if (!claimRoutingDecision(db, decision, routeVersion)) {
-		log.info("routing", "duplicate_claim_suppressed", {
-			bot_id: decision.target,
-			message_id: row.message_id,
-			route_version: routeVersion,
-		});
-		return;
-	}
-	const dispatched = dispatchRoutingDecision(decision, runtimes);
-	finishRoutingClaim(
-		db,
-		decision,
-		routeVersion,
-		dispatched.outcome === "nobody" ? "missing_runtime" : dispatched.outcome,
-	);
-	if (decision.reason === "probability") {
-		const metric =
-			dispatched.outcome === "started"
-				? "route_probability_triggered"
-				: dispatched.outcome === "skipped_busy"
-					? "route_probability_skipped_busy"
-					: dispatched.outcome === "skipped_cooldown"
-						? "route_probability_skipped_cooldown"
-						: `route_probability_${dispatched.outcome}`;
-		recordRouteMetric(metric, decision.target, row.message_id);
-	} else {
-		log.info("routing", "decision", {
-			bot_id: decision.target,
-			message_id: row.message_id,
-			reason: decision.reason,
-			outcome: dispatched.outcome,
-			route_version: routeVersion,
-		});
-	}
 }
 
 // Routing and control both run inside the poller's durable handoff: the pending dispatch is
@@ -340,7 +299,7 @@ const pollers = composePollers(
 		if (!row) return;
 		const command = parseTelegramControlCommand(update, botId, identities);
 		if (command) await telegramControlCoordinator.handle(command);
-		else route(result, row);
+		else router.route(result, row);
 		ipc.broadcast(ipc.msgToItem(row));
 		// Poller offset + canonical row are durable before this non-blocking side effect.
 		mediaCache.scheduleMessage(botId, row);

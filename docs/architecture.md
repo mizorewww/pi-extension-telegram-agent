@@ -19,13 +19,22 @@ Telegram ── poller × N ──┐
 
 1. **Ingest**（`src/telegram/poller.ts`、`ingest.ts`）：每个 bot 一个 `getUpdates` 循环。raw update、canonical `messages` 行、不可变 `message_events` delta、`pending_telegram_dispatch` 与 offset 在**一个事务**里提交。只接受配置的群（`groupChatId = -100<peer>`）。多个 bot 收到同一条消息只保留一份 canonical；更旧的 edit 不回写。
 2. **交接**：poller 先把 pending handoff 交给 routing/control 回调，回调成功才删除；失败或重启后先重放 handoff 再拉新 update。
-3. **Route**（`src/agent/router.ts`）：优先级 @mention > reply > 配置名称 > 概率；每一级扫完全部 bot 才进入下一级。概率 = `HMAC(router_secret, chatId:messageId)` 落入按配置顺序累加的 `routing_p` 桶（Σ≤1）。bot 发的消息不触发。概率目标 busy 或在 cooldown 时直接跳过，**不改投**别的 bot。`routing_claims` 保证同一条消息对同一 bot 只启动一次。
+3. **Route**（`src/agent/router.ts`）：优先级 @mention > reply > 配置名称 > 概率；每一级扫完全部 bot 才进入下一级。概率 = `HMAC(router_secret, chatId:messageId)` 落入按配置顺序累加的 `routing_p` 桶（Σ≤1）。bot 发的消息默认不触发，例外只有 `/fire`（见下节）。概率目标 busy 或在 cooldown 时直接跳过，**不改投**别的 bot。`routing_claims` 保证同一条消息对同一 bot 只启动一次。
 4. **Turn**（`src/agent/runtime.ts`）：每 bot 串行状态机 `idle → flushing → idle`，在途触发只合并为一次 pending。一轮 flush：
    - 按 cursor 有界读取近期 event（≤256）和直接点名的回复义务（≤64），义务优先打包；
    - 按 `media.mode` 准备媒体；
    - 打包成一条 `telegram_context_v2` custom message，经 Pi `session.prompt()` 发出；
    - turn 结束后从 session 实际内容重建可见集合，原子写回 SQLite，再检查图片字节压力是否需要额外压缩。
 5. **Send**（`src/agent/send.ts`）：模型唯一的公开发言通道是 `send` tool（文字 / sticker / reaction）。详见下文“发送边界”。
+
+## Bot 触发（`/fire`）
+
+- 状态是 `BotFire`（`src/agent/router.ts`）：按 (chat, bot) 记录的内存开关 + 剩余额度。默认关闭、不持久化，daemon 重启全部关闭。唯一写入者是人类管理员的 `/fire` 命令。
+- `routeMessageDecision` 仍是 bot 消息的唯一闸门：bot 消息先按与人类完全相同的规则选出目标；目标未开 `/fire`、额度为 0、或目标就是发送者本身时结果为 `nobody`，**不改投**别的 bot。带 `edit_date` 的 bot 消息不触发。
+- 额度 `FIRE_BOT_TRIGGER_BUDGET = 3`：只有 runtime 接受（`started` / `coalesced`）的 bot 触发才扣减，busy / cooldown 跳过不扣；任何人类消息经路由时把本群所有已开启 bot 补满，`/fire on` 也补满。
+- bot 触发的点名只是机会，不写 `reply_obligations`。
+- bot 消息只从两个入口进入同一个 `MessageRouter`（`src/agent/router.ts`）：poller 实际收到的 update；本部署 bot 的 agent `send` 成功写库后由 `sentMessageSink` 本地路由（`routeLocalSend`，route version 1）。写库失败的发送不路由；控制回复与 TUI 手动发送不经过该 sink，且登记在 `telegram_control_messages` 的 bot 消息一律不触发。同一条消息的 poller 回声或重放由 `routing_claims` 去重，不会二次 dispatch。
+- Telegram 一般不把其他 bot 的群消息投递给 bot，`/fire` 不改变任何投递；部署外的 bot 只有在 Telegram 真的投递时才能触发。
 
 ## 回复义务
 
@@ -87,7 +96,7 @@ Telegram create 不可回滚，所以：
 
 ## Telegram 控制命令
 
-- 只识别 offset 0 的 `bot_command` entity：`/help`、`/status` 公开；`/model`、`/compact`、`/new`、`/set` 需要 `telegram_admins` 中的人类账号（只接受数字 user id）。带 `@bot_username` 时定向到该 bot，否则作用于收到命令的 bot。
+- 只识别 offset 0 的 `bot_command` entity：`/help`、`/status`、`/fire status` 公开；`/model`、`/compact`、`/new`、`/set`、`/fire [on|off]`（不带参数为切换）需要 `telegram_admins` 中的人类账号（只接受数字 user id）。带 `@bot_username` 时定向到该 bot，否则作用于收到命令的 bot。
 - 命令和回复的 message id 永久记录在 `telegram_control_messages`，**永不进入任何 provider context**。变更类命令串行执行，不 abort 在途回复；bot busy 时返回“请稍后”。
 - `/model`：按钮分页列出 Pi 当前已认证的全部模型；`/new`：用当前模型开新 session。两者共用同一个 session 切换：先建好新 session，再在一个事务里写 epoch、manifest、清空可见集，失败时旧 session 原样保留；旧 session 文件留在磁盘。
 - `/set` 弹出按钮菜单（插话概率、冷却的固定预设，当前值打勾）；回调只接受预设值，校验后写穿 `telegram.config.ts`、更新内存中的同一 `BotConfig`，并原地刷新菜单。
