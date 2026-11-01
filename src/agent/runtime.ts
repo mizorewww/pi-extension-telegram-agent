@@ -166,7 +166,6 @@ const MAX_EVENT_SCAN = 256;
 const MAX_OBLIGATION_SCAN = 64;
 const TELEGRAM_CONTEXT_COMMIT_TYPE = "telegram_context_commit_v2";
 const EPOCH_KEY = "context_epoch";
-const VISION_BATCH_CONCURRENCY = 2;
 
 /** A codemode tool result whose script-facing value is the same object the model sees as JSON. */
 function structured<T extends object>(value: T) {
@@ -288,16 +287,6 @@ function pendingMediaIds(
 		if (!prepared(media.file_unique_id)) pending.push(media.file_unique_id);
 	}
 	return pending;
-}
-
-/** Run `work` over `items` with at most `concurrency` in flight. */
-async function forEachConcurrent<T>(items: readonly T[], concurrency: number, work: (item: T) => Promise<void>) {
-	let next = 0;
-	await Promise.all(
-		Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-			while (next < items.length) await work(items[next++]!);
-		}),
-	);
 }
 
 export class BotRuntime {
@@ -1940,12 +1929,6 @@ export class BotRuntime {
 		}
 	}
 
-	/**
-	 * Prepare context images for the batch: download + convert/sample only, never a provider
-	 * call. Bounded per turn, with direct-reply events ordered before ordinary catch-up.
-	 * Preparation failures are transient (retried on a later turn); packing falls back to the
-	 * text placeholder when no prepared refs exist.
-	 */
 	/** Lazy vision: bounded per turn, with direct-reply events ordered before ordinary catch-up. */
 	private async ensureBatchVision(batch: readonly MessageEvent[], obligationIds: ReadonlySet<number>): Promise<void> {
 		if (this.config.media.mode !== "hybrid" || this.config.media.maxPerTurn <= 0) return;
@@ -1957,7 +1940,7 @@ export class BotRuntime {
 			(id) => Boolean((described.get(id) as { vision: string | null } | null)?.vision),
 			true,
 		);
-		await forEachConcurrent(pending, VISION_BATCH_CONCURRENCY, (fileUniqueId) => this.ensureOneVision(fileUniqueId));
+		await Promise.all(pending.map((fileUniqueId) => this.ensureOneVision(fileUniqueId)));
 	}
 
 	private async ensureOneVision(fileUniqueId: string): Promise<void> {
