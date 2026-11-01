@@ -13,7 +13,7 @@ import {
 	PiModelConfigurationError,
 	type PiProviderFailureCategory,
 } from "../agent/model-runtime.ts";
-import { bytesBucket, dedupeInFlight, isVideoMedia, isVisionMedia, type MediaBytesBucket } from "./local-cache.ts";
+import { dedupeInFlight, isVideoMedia, isVisionMedia } from "./local-cache.ts";
 import { appendMediaUpdateEvents } from "../db/message-events.ts";
 import type { VisionScheduler } from "./vision-scheduler.ts";
 import {
@@ -37,7 +37,6 @@ export const VISION_TIMEOUT_MS = 90_000;
 export const VISION_MAX_OUTPUT_TOKENS = 256;
 
 export type VisionKind = "photo" | "sticker" | "video";
-export type VisionBytesBucket = MediaBytesBucket | "gte_512_kib";
 export type VisionOutcome =
 	| "ok"
 	| "empty_response"
@@ -47,8 +46,6 @@ export type VisionOutcome =
 
 export interface VisionTelemetry {
 	kind: VisionKind;
-	sourceBytesBucket: VisionBytesBucket;
-	convertedBytesBucket: VisionBytesBucket;
 	latencyMs: number;
 	inputTokens: number;
 	outputTokens: number;
@@ -72,7 +69,6 @@ export interface VisionImageInput {
 
 export interface VisionDescribeInput {
 	kind: VisionKind;
-	sourceBytes: number;
 	images: VisionImageInput[];
 	videoSticker?: boolean;
 }
@@ -99,15 +95,9 @@ export interface EnsureVisionOptions extends PrepareMediaImagesOptions {
 
 type VisionModelRuntime = Pick<ModelRuntime, "getModel" | "completeSimple">;
 
-function boundedNumber(value: unknown): number {
-	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
-}
-
 function emptyTelemetry(kind: VisionKind, outcome: VisionOutcome, latencyMs: number): VisionTelemetry {
 	return {
 		kind,
-		sourceBytesBucket: "unavailable",
-		convertedBytesBucket: "unavailable",
 		latencyMs: Math.max(0, Math.round(latencyMs)),
 		inputTokens: 0,
 		outputTokens: 0,
@@ -119,8 +109,6 @@ function emptyTelemetry(kind: VisionKind, outcome: VisionOutcome, latencyMs: num
 
 function usageTelemetry(
 	kind: VisionKind,
-	sourceBytes: number,
-	convertedBytes: number,
 	latencyMs: number,
 	outcome: VisionOutcome,
 	message: AssistantMessage | undefined,
@@ -128,13 +116,11 @@ function usageTelemetry(
 ): VisionTelemetry {
 	return {
 		kind,
-		sourceBytesBucket: bytesBucket(sourceBytes, "gte_512_kib"),
-		convertedBytesBucket: bytesBucket(convertedBytes, "gte_512_kib"),
 		latencyMs: Math.max(0, Math.round(latencyMs)),
-		inputTokens: boundedNumber(message?.usage.input),
-		outputTokens: boundedNumber(message?.usage.output),
-		reasoningTokens: boundedNumber(message?.usage.reasoning),
-		cost: boundedNumber(message?.usage.cost.total),
+		inputTokens: message?.usage.input ?? 0,
+		outputTokens: message?.usage.output ?? 0,
+		reasoningTokens: message?.usage.reasoning ?? 0,
+		cost: message?.usage.cost.total ?? 0,
 		outcome,
 		frames,
 		providerCalled: true,
@@ -157,9 +143,7 @@ export function createPiVisionExecutor(runtime: VisionModelRuntime, modelRef: st
 		readinessFailure,
 		async describe(input): Promise<VisionDescriptionResult> {
 			const startedAt = performance.now();
-			const sourceBytes = input.sourceBytes;
 			// Images arrive already converted/resized by prepareMediaImages; only encode them here.
-			const convertedBytes = input.images.reduce((total, image) => total + image.bytes.byteLength, 0);
 			const images = input.images.map((image) => ({
 				data: Buffer.from(image.bytes).toString("base64"),
 				mimeType: image.mimeType,
@@ -198,8 +182,6 @@ export function createPiVisionExecutor(runtime: VisionModelRuntime, modelRef: st
 			const telemetry = (outcome: VisionOutcome, message?: AssistantMessage): VisionTelemetry =>
 				usageTelemetry(
 					input.kind,
-					sourceBytes,
-					convertedBytes,
 					performance.now() - startedAt,
 					outcome,
 					message,
@@ -328,7 +310,6 @@ async function ensureVisionPrepared(
 	const describe = () =>
 		executor.describe({
 			kind,
-			sourceBytes: prepared.sourceBytes,
 			images: prepared.images,
 			...(kind === "video" && mediaKind === "sticker" ? { videoSticker: true } : {}),
 		});
