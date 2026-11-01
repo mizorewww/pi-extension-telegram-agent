@@ -1588,7 +1588,6 @@ export class BotRuntime {
 			deliveredObligationIds,
 		});
 		this.visibleMessageIds = activeState.visible;
-		await this.maybeAutoCompact();
 		if (replyPending) {
 			if (!this.lastTurnFailed)
 				log.info("agent_runtime", "model_silence", {
@@ -1645,7 +1644,10 @@ export class BotRuntime {
 		removeReplyObligations(this.db, this.bot.id, [{ chatId, messageId }]);
 	}
 
-	/** Check before appending the batch, including after a failed or restored turn. */
+	/**
+	 * Image bytes are the one compaction signal Pi cannot see. Checked before every batch, so it
+	 * also covers a failed or restored turn; the compaction then runs before the next request.
+	 */
 	private async checkContextImageBudget(): Promise<void> {
 		if (!this.session || this.config.media.mode !== "hybrid") return;
 		const imageBytes = () =>
@@ -1667,42 +1669,6 @@ export class BotRuntime {
 		if (imageBytes() > this.bot.contextImageBudgetBytes) {
 			log.warn("agent_runtime", "context_input_rejected", { bot_id: this.bot.id, category: "image_budget_exceeded" });
 			throw new Error("context image budget exceeded after compaction");
-		}
-	}
-
-	/** Enforce image transport pressure after the durable batch commit; lifecycle owns file deletion. */
-	private async maybeAutoCompact(): Promise<void> {
-		if (this.stopping || !this.session) return;
-		// The provider turn has settled, but flush still owns its state until this returns.
-		// A turn that just failed at the provider makes the summary request just as likely to
-		// fail (and to burn its retry budget), so wait for the next successful turn.
-		if (this.controlCompacting || this.session.isStreaming || this.lastTurnFailed) {
-			log.warn("agent_runtime", "auto_compact_skipped", {
-				bot_id: this.bot.id,
-				control_compacting: this.controlCompacting,
-				is_streaming: this.session.isStreaming,
-				last_turn_failed: this.lastTurnFailed,
-			});
-			return;
-		}
-		try {
-			// Pi already ran its token-threshold compaction inside the turn; the only signal it
-			// cannot see is image transport bytes.
-			const entries = this.session.sessionManager.buildContextEntries();
-			const imageBytes = contextImageBytes(entries, join(this.config.dataDir, "media"));
-			if (imageBytes <= this.bot.contextImageBudgetBytes) return;
-			log.info("agent_runtime", "auto_compact_triggered", {
-				bot_id: this.bot.id,
-				image_bytes: imageBytes,
-				image_budget: this.bot.contextImageBudgetBytes,
-			});
-			await this.compactSession();
-		} catch (error) {
-			// Estimation or compaction failure must never break the settled flush.
-			log.warn("agent_runtime", "auto_compact_failed", {
-				bot_id: this.bot.id,
-				category: errorCategory(error),
-			});
 		}
 	}
 

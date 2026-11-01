@@ -24,7 +24,7 @@ Telegram ── poller × N ──┐
    - 按 cursor 有界读取近期 event（≤256）和直接点名的回复义务（≤64），义务优先打包；
    - 按 `media.mode` 准备媒体；
    - 打包成一条 `telegram_context_v2` custom message，经 Pi `session.prompt()` 发出；
-   - turn 结束后从 session 实际内容重建可见集合，原子写回 SQLite，再检查图片字节压力是否需要额外压缩。
+   - turn 结束后从 session 实际内容重建可见集合，原子写回 SQLite；图片字节压力只在下一批追加前检查。
 5. **Send**（`src/agent/send.ts`）：模型唯一的公开发言通道是 `send` tool（文字 / sticker / reaction）。详见下文“发送边界”。
 
 ## Bot 触发（`/fire`）
