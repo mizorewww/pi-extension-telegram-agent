@@ -56,7 +56,7 @@ function assistant(content: unknown[], stopReason: "stop" | "toolUse") {
 /** Run one codemode script through a real Pi session; returns the script result and send calls. */
 async function runScript(
 	code: string,
-): Promise<{ text: string; images: number; sendCalls: number; declared: string[] }> {
+): Promise<{ text: string; images: number; sendCalls: number; declared: string[]; modelCalls: number }> {
 	const root = mkdtempSync(join(tmpdir(), "tg-codemode-"));
 	let sendCalls = 0;
 	const send = TOOL_DEFS[0];
@@ -128,6 +128,7 @@ async function runScript(
 			images: result.content.filter((block) => block.type === "image").length,
 			sendCalls,
 			declared,
+			modelCalls: calls,
 		};
 	} finally {
 		session.dispose();
@@ -143,12 +144,12 @@ test("codemode scripts have no host capabilities but reach codemode tools", asyn
 	expect(result.declared.sort()).toEqual(["codemode", "send"]);
 }, 30_000);
 
-test("codemode scripts cannot call send", async () => {
-	const result = await runScript(
-		'try { await tools.send({ message: "x" }); return "sent"; } catch (e) { return "blocked"; }',
-	);
-	expect(result.sendCalls).toBe(0);
-	expect(result.text).not.toContain("sent");
+test("a send inside a script posts without ending the turn", async () => {
+	const result = await runScript('await tools.send({ message: "我去查一下" }); return "still working";');
+	expect(result.sendCalls).toBe(1);
+	expect(result.text).toContain("still working");
+	// The model was called again after the script: the nested send's terminate did not end the turn.
+	expect(result.modelCalls).toBe(2);
 }, 30_000);
 
 test("codemode output is bounded and never persists images", async () => {

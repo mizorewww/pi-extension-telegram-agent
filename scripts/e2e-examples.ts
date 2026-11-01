@@ -1,7 +1,7 @@
 // E2E check of the prompt's tool examples (src/agent/tool-examples.md): every 【脚本】 example runs
 // in Pi's codemode sandbox against the real script tools — tg_messages on a read-only database,
-// real TinyFish search, a scratch work box "ex", real Telegram getFile. tg_post is only recorded,
-// nothing is sent to the group. Paid search calls and network; run only with authorization.
+// real TinyFish search, a scratch work box "ex", real Telegram getFile. send and task are only
+// recorded (nothing reaches the group); a job's code really runs, in a nested sandbox without them. Paid search calls and network; run only with authorization.
 // Usage: bun run scripts/e2e-examples.ts --photo <msg id> --pdf <msg id> --thread <msg id> --sender @user [--only 03]
 import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
@@ -28,6 +28,7 @@ const db = new Database(config.dbPath, { readonly: true });
 const box = new WorkBox("ex", config.sandbox);
 const api = new BotApi(config.bots[0]!.token);
 const posts: string[] = [];
+const nested: string[] = [];
 
 // Placeholder ids in the examples, mapped onto real messages of this deployment.
 const substitutions: [string, string][] = [
@@ -66,20 +67,37 @@ const tools = [
 			return { path, size: bytes.byteLength, kind: media.kind };
 		},
 	},
+];
+
+// Recorded stand-ins for the tools that act on the group or start background work.
+const turnTools = [
+	...tools,
 	{
-		name: "tg_post",
+		name: "send",
 		execute: async (input: any) => {
-			posts.push(input.message);
-			return { sent: [posts.length] };
+			posts.push(String(input.message ?? input.files?.map((f: any) => f.path).join(",") ?? input.reaction));
+			return "ok";
+		},
+	},
+	{ name: "task", execute: async (input: any) => `started t9 (${input.action})` },
+	{
+		name: "job",
+		execute: async (input: any) => {
+			const sandbox = new CodemodeSandbox({ tools, timeoutMs: 240_000 });
+			const result = await sandbox.execute(input.code);
+			await sandbox.close();
+			nested.push(result.ok ? String(result.value ?? "") : `ERROR ${result.error.message}`);
+			return "j9";
 		},
 	},
 ];
 
 let failed = 0;
 for (const script of scripts.filter((s) => !arg("only") || s.name === arg("only"))) {
-	const sandbox = new CodemodeSandbox({ tools, timeoutMs: 240_000 });
+	const sandbox = new CodemodeSandbox({ tools: turnTools, timeoutMs: 240_000 });
 	const started = Date.now();
 	posts.length = 0;
+	nested.length = 0;
 	const result = await sandbox.execute(script.code);
 	await sandbox.close();
 	const output = [
@@ -89,13 +107,14 @@ for (const script of scripts.filter((s) => !arg("only") || s.name === arg("only"
 			: []),
 	].join("\n");
 	// An example that prints nothing would leave the bot with nothing to say: count it as a failure.
-	const ok = result.ok && output.trim().length > 0;
+	const ok = result.ok && output.trim().length > 0 && !nested.some((value) => value.startsWith("ERROR"));
 	if (!ok) failed++;
 	console.log(
 		`\n=== ${script.name} ${ok ? "OK" : "FAIL"} ${((Date.now() - started) / 1000).toFixed(1)}s ${script.title}`,
 	);
 	console.log(result.ok ? output.slice(0, 600) : `${result.error.kind}: ${result.error.message}`);
-	if (posts.length) console.log(`tg_post: ${posts.join(" | ")}`);
+	if (posts.length) console.log(`send: ${posts.join(" | ")}`);
+	if (nested.length) console.log(`job output: ${nested.join(" | ")}`);
 }
 await box.reset();
 console.log(`\n${scripts.length - failed}/${scripts.length} examples passed`);

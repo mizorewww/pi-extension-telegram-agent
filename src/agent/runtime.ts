@@ -53,6 +53,7 @@ import {
 	TOOL_DEFS,
 	TOOL_EXPOSURE,
 	JOB_TOOL_DEF,
+	MAX_SENDS_PER_TURN,
 	sendToolWithFiles,
 	taskToolDefinition,
 	type JobParams,
@@ -206,10 +207,6 @@ const delay = (ms: number) =>
 		setTimeout(resolve, ms).unref?.();
 	});
 
-/** Interim tg_post messages a turn may send before its final send. */
-const INTERIM_POSTS_PER_TURN = 2;
-const INTERIM_POST_MAX_CHARS = 500;
-
 /** view_image calls that may attach images within one turn. */
 const VIEW_IMAGE_MAX_PER_TURN = 4;
 
@@ -225,7 +222,6 @@ const ACTIVITY_RAW_EVENT_KINDS = new Set([
 	"tool_sh_exec",
 	"file_sent",
 	"tool_tg_download",
-	"tool_tg_post",
 	"box_reset",
 	"task_started",
 	"job_started",
@@ -364,7 +360,7 @@ export class BotRuntime {
 	private telemetryHmacKey = "";
 	private staticPrefixTokenEstimate = 0;
 	private viewedImagesThisTurn = 0;
-	private interimPostsThisTurn = 0;
+	private sendsThisTurn = 0;
 	/** The provider turn in flight: new direct addresses are steered into it (steerDirectAddress). */
 	private activeTurn: { steeredThrough: number; steering: Promise<void> } | null = null;
 	private readonly box: WorkBox | null;
@@ -480,8 +476,9 @@ export class BotRuntime {
 			description: sendDef.description,
 			parameters: sendDef.parameters,
 			exposure: TOOL_EXPOSURE.send,
-			execute: async (_toolCallId: string, params: SendParams) => {
-				return await this.executeSend(params);
+			// A script's send (nested id "<parent>/<n>") keeps typing on: the script is still working.
+			execute: async (toolCallId: string, params: SendParams) => {
+				return await this.executeSend(params, !toolCallId.includes("/"));
 			},
 		};
 		const searchTool = {
@@ -533,13 +530,7 @@ export class BotRuntime {
 				}
 			},
 		};
-		const [, downloadDef, execDef, resetDef, postDef] = CODEMODE_TOOL_DEFS;
-		const postTool = {
-			...postDef,
-			exposure: "codemode" as const,
-			execute: async (_toolCallId: string, params: { message: string; reply_to?: number }) =>
-				structured(await this.executeInterimPost(params)),
-		};
+		const [, downloadDef, execDef, resetDef] = CODEMODE_TOOL_DEFS;
 		const boxTools = this.box
 			? [
 					{
@@ -572,11 +563,9 @@ export class BotRuntime {
 					},
 				]
 			: [];
-		const scriptTools = this.bot.tools.codemode
-			? [messagesTool, ...boxTools, ...(this.bot.tools.send ? [postTool] : [])]
-			: [];
-		// A background job reaches the same script tools as codemode, except tg_post: it runs
-		// outside the turn and answers through its result note.
+		const scriptTools = this.bot.tools.codemode ? [messagesTool, ...boxTools] : [];
+		// A background job reaches the script tools but never send, task or job: it runs outside
+		// the turn and answers through its result note.
 		const jobScriptTools = [...(this.bot.tools.search ? [searchTool] : []), messagesTool, ...boxTools];
 		this.jobs =
 			this.bot.tools.codemode && this.bot.tools.send
@@ -1305,8 +1294,13 @@ export class BotRuntime {
 		};
 	}
 
-	private async executeSend(params: SendParams) {
-		const result = await executeAgentSend(params, this.sendContext(true));
+	private async executeSend(params: SendParams, endsTurn = true) {
+		// Scripts may send several times in one turn (an acknowledgement, then the result); the
+		// cap keeps a looping script from flooding the group.
+		if (this.sendsThisTurn >= MAX_SENDS_PER_TURN)
+			throw new Error(`send failed: at most ${MAX_SENDS_PER_TURN} sends per turn; end the turn instead`);
+		this.sendsThisTurn++;
+		const result = await executeAgentSend(params, this.sendContext(endsTurn));
 		// Both successful sends and degraded terminal outcomes forbid an automatic resend.
 		// A reaction-only turn created no message, so a direct address is still owed a reply.
 		if ("outcome" in result.details) {
@@ -1464,7 +1458,7 @@ export class BotRuntime {
 
 		this.pendingInputMetrics = emptyInputMetrics();
 		this.viewedImagesThisTurn = 0;
-		this.interimPostsThisTurn = 0;
+		this.sendsThisTurn = 0;
 		if (this.config.media.mode === "context") {
 			await this.ensureBatchContextMedia([...mandatory, ...normal], obligationIds);
 		} else {
@@ -2148,25 +2142,6 @@ export class BotRuntime {
 		await turn.steering.catch(() => {});
 		this.activeTurn = null;
 		this.session?.clearQueue();
-	}
-
-	/**
-	 * tg_post: one short interim message from a script ("我去查一下") through the same irreversible
-	 * send boundary. It neither ends the turn nor settles a reply obligation; the final send does.
-	 */
-	private async executeInterimPost(params: { message: string; reply_to?: number }): Promise<{ sent: number[] }> {
-		if (this.interimPostsThisTurn >= INTERIM_POSTS_PER_TURN)
-			throw new Error(`tg_post failed: at most ${INTERIM_POSTS_PER_TURN} interim posts per turn; answer with send`);
-		const message = params.message?.trim() ?? "";
-		if (!message || message.length > INTERIM_POST_MAX_CHARS)
-			throw new Error(`tg_post failed: message must be 1-${INTERIM_POST_MAX_CHARS} characters`);
-		this.interimPostsThisTurn++;
-		const result = await executeAgentSend(
-			{ message, ...(params.reply_to != null ? { reply_to: params.reply_to } : {}) },
-			this.sendContext(false),
-		);
-		this.recordEvent("tool_tg_post", { sent: result.details.sent.length });
-		return { sent: [...result.details.sent] };
 	}
 
 	/** The task tool: start, steer, cancel or list this bot's background tasks. */

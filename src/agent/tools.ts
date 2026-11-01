@@ -55,16 +55,20 @@ export interface SendDegradedDetails {
 }
 
 /**
- * How the model reaches each tool. `send` is model-only: a codemode script must never post, and
- * its terminate:true only ends a turn when the model itself calls it.
+ * How the model reaches each tool. Everything a script can usefully call is "direct" (declared
+ * and callable from codemode); a send inside a script does not end the turn, since Pi only honors
+ * terminate on top-level calls. view_image stays model-only: script output drops images.
  */
 export const TOOL_EXPOSURE = {
-	send: "model-only",
+	send: "direct",
 	search: "direct",
 	view_image: "model-only",
-	task: "model-only",
-	job: "model-only",
+	task: "direct",
+	job: "direct",
 } as const;
+
+/** Public sends one turn may make, from any mix of direct calls and scripts. */
+export const MAX_SENDS_PER_TURN = 3;
 
 /** Fixed tool order — never reorder (cache-visible). */
 export const TOOL_DEFS = [
@@ -72,7 +76,7 @@ export const TOOL_DEFS = [
 		name: "send",
 		label: "Send",
 		description:
-			"Telegram 群唯一的公开输出通道。人类 @你、回复你或用配置名称点名时必须公开回应，只点 reaction 不算回应；其他场景可按人设沉默，不必回复时可以只用 reaction 表态。先完成搜索或计算，再把 Markdown 文字、贴纸、引用和 reaction 合并成唯一一次最终 send 调用，不能拆开发送。message、sticker 或 reaction 至少填一个；成功会立即结束本轮，不要再输出或调用工具。普通 Assistant 文本只在本地可见。",
+			"Telegram 群唯一的公开输出通道，普通 Assistant 文本只在本地可见。人类 @你、回复你或用配置名称点名时必须公开回应，只点 reaction 不算回应；其他场景可按人设沉默，不必回复时可以只用 reaction 表态。message、sticker 或 reaction 至少填一个。直接调用成功会立即结束本轮；在 codemode 脚本里调用不会结束本轮，所以要先回一句再查资料、跑命令时，把 send 和这些工作写进同一个脚本。每轮最多 3 次 send。",
 		parameters: Type.Object({
 			message: Type.Optional(
 				Type.String({
@@ -266,20 +270,6 @@ export const CODEMODE_TOOL_DEFS = [
 		parameters: Type.Object({}, { additionalProperties: false }),
 		outputSchema: Type.Object({ reset: Type.Boolean() }),
 	},
-	{
-		name: "tg_post",
-		label: "Interim post",
-		description:
-			"Post one short interim message to the group right now while the script keeps working, e.g. 我去查一下～ before a slow search, shell job or batch of calls. At most 2 per turn. It does not end the turn and is not the answer: after the script returns you still give the real answer with send. Skip it when the work takes only a few seconds.",
-		parameters: Type.Object(
-			{
-				message: Type.String({ minLength: 1, maxLength: 500, description: "Short Markdown message" }),
-				reply_to: Type.Optional(Type.Integer({ description: "A #id visible in your context" })),
-			},
-			{ additionalProperties: false },
-		),
-		outputSchema: Type.Object({ sent: Type.Array(Type.Integer(), { description: "Sent message ids" }) }),
-	},
 ] as const;
 
 /** Background script: a codemode script run outside the turn; the result returns as a note. */
@@ -287,7 +277,7 @@ export const JOB_TOOL_DEF = {
 	name: "job",
 	label: "Job",
 	description:
-		"在后台运行一段 codemode 脚本（同样的 JavaScript、同样的 tools.*，没有 tools.tg_post），立刻返回 job id，不占用聊天。适合几分钟的批量活：处理一批图片或文件、几十次检索或搜索、长时间跑命令。脚本的 return / text() 输出（最多约 16000 字符）会以 [job jN 完成 ↪ #id] 出现在群消息里，到时你必须把结果回复给发起人；失败会以 [job jN 失败] 出现。启动后同一轮用 send 告诉发起人你在做。几秒能完成的事直接用 codemode。",
+		"在后台运行一段 codemode 脚本（同样的 JavaScript 和 tools.*，但没有 send、task、job：结果由你在它回来后发出），立刻返回 job id，不占用聊天。适合几分钟的批量活：处理一批图片或文件、几十次检索或搜索、长时间跑命令。脚本的 return / text() 输出（最多约 16000 字符）会以 [job jN 完成 ↪ #id] 出现在群消息里，到时你必须把结果回复给发起人；失败会以 [job jN 失败] 出现。启动后同一轮用 send 告诉发起人你在做。几秒能完成的事直接用 codemode。",
 	parameters: Type.Object(
 		{
 			title: Type.String({ minLength: 1, maxLength: 80, description: "简短标题，结果里会带上" }),
@@ -311,7 +301,7 @@ export function sendToolWithFiles() {
 	const send = TOOL_DEFS[0];
 	return {
 		...send,
-		description: `${send.description}有工作区时也可以用 files 发送 /work 里的图片或文件，可以单独发，也可以和文字合并成同一次 send。`,
+		description: `${send.description}有工作区时也可以用 files 发送 /work 里的图片或文件，可以单独发，也可以和文字一起发。`,
 		parameters: Type.Object({
 			...send.parameters.properties,
 			files: Type.Optional(

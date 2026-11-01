@@ -38,15 +38,15 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 38,
-	systemZhTemplate: "16e5ad6913d8",
-	systemEnTemplate: "d5af3253466d",
+	schemaVersion: 39,
+	systemZhTemplate: "be36913bc854",
+	systemEnTemplate: "f45168d54874",
 	eventSerialize: "a05c0584eb08",
-	tools: "3bd9368f55d6",
-	codemodeTools: "bcc86b6c67ab",
-	sendWithFiles: "d888994aa0b7",
+	tools: "2c4e93f73df4",
+	codemodeTools: "af17d020edb2",
+	sendWithFiles: "e5c58ad8bbf5",
 	taskTool: "f5343a7cbdb5",
-	jobTool: "6921e0773e60",
+	jobTool: "1a7ae82e2a8c",
 	compactionPrompt: "04da95f62da0",
 	multimodalCompaction: "e2da2b8b68fa",
 	replyRecovery: "4fc7e277e338",

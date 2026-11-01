@@ -1,5 +1,6 @@
 // Pi-native codemode (QuickJS wasm) for the bot. Scripts reach only the tools registered as
-// callable; `send` is model-only so a script can never post or bypass the single-send boundary.
+// callable, send included: a script may acknowledge, work and answer in one go, bounded by the
+// per-turn send cap.
 // Results are bounded here because a script may raise its own `max_output_tokens`, and script
 // images are dropped: session entries hold image references only (docs/architecture.md).
 
