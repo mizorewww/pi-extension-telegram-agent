@@ -32,6 +32,9 @@ export interface TaskRow {
 	status: TaskStatus;
 	created_at: number;
 	updated_at: number;
+	input_tokens: number;
+	output_tokens: number;
+	cost: number;
 }
 
 export interface TaskManagerDeps {
@@ -105,14 +108,10 @@ export class TaskManager {
 	describe(botId: string, limit = 10): string {
 		const rows = this.list(botId, limit);
 		if (rows.length === 0) return "no tasks yet";
-		const usage = this.deps.db.query(
-			"SELECT COALESCE(SUM(input_tokens + cache_read + cache_write), 0) input, COALESCE(SUM(output_tokens), 0) output, COALESCE(SUM(cost), 0) cost FROM task_usage WHERE task_id = ?",
-		);
 		return rows
 			.map((row) => {
-				const used = usage.get(row.task_id) as { input: number; output: number; cost: number };
-				const tokens = `${Math.round(used.input / 1000)}k in / ${Math.round(used.output / 1000)}k out`;
-				const cost = used.cost > 0 ? ` $${used.cost.toFixed(2)}` : "";
+				const tokens = `${Math.round(row.input_tokens / 1000)}k in / ${Math.round(row.output_tokens / 1000)}k out`;
+				const cost = row.cost > 0 ? ` $${row.cost.toFixed(2)}` : "";
 				return `${row.task_id} [${row.status}] ${row.workflow}: ${row.title} (↪ #${row.origin_message_id}; ${tokens}${cost})`;
 			})
 			.join("\n");
@@ -207,7 +206,7 @@ export class TaskManager {
 			botId,
 			this.deps.run,
 			{
-				onUsage: (usage) => this.recordUsage(taskId, botId, usage),
+				onUsage: (usage) => this.recordUsage(taskId, usage),
 				onReport: (kind, text, files) => this.onReport(taskId, kind, text, files),
 				onSettled: (lastText) => this.onSettled(taskId, lastText),
 				onExit: (code) => this.onExit(taskId, code),
@@ -229,24 +228,12 @@ export class TaskManager {
 		return task;
 	}
 
-	private recordUsage(taskId: string, botId: string, usage: TaskUsage): void {
+	private recordUsage(taskId: string, usage: TaskUsage): void {
 		this.deps.db
 			.query(
-				`INSERT INTO task_usage (task_id, bot_id, ts, provider, model, input_tokens, output_tokens, cache_read, cache_write, cost)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				"UPDATE tasks SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?, cost = cost + ? WHERE task_id = ?",
 			)
-			.run(
-				taskId,
-				botId,
-				Date.now(),
-				usage.provider,
-				usage.model,
-				usage.input,
-				usage.output,
-				usage.cacheRead,
-				usage.cacheWrite,
-				usage.cost,
-			);
+			.run(usage.input, usage.output, usage.cost, taskId);
 	}
 
 	private ownLive(botId: string, taskId: string): Live {

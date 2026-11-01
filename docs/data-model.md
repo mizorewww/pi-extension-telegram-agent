@@ -27,8 +27,7 @@ SQLite（WAL），默认 `data/agent.db`，schema 在 `src/db/schema.sql`，启�
 | `bot_cursors` | `(bot_id, chat_id)` | 已消费到的 `ingest_seq`，只增不减 |
 | `bot_visible_messages` | `(bot_id, chat_id, message_id)` + `context_epoch` | 当前 context 真正包含完整内容的消息；压缩或换 session 时整组替换 |
 | `bot_session_manifest` | `bot_id` | 当前 session id、文件路径、完整 fingerprint |
-| `tasks` | `task_id`（`t<rowid>`） | 后台任务：所属 bot、发起消息、工作流、标题、状态（running / need_input / done / failed / cancelled / interrupted） |
-| `task_usage` | `id`（自增） | 任务主会话每条 assistant 消息的 provider 用量（输入 / 输出 / 缓存 / 费用）；任务内 subagent 是独立进程，不计入；按遥测保留期清理 |
+| `tasks` | `task_id`（`t<rowid>`） | 后台任务：所属 bot、发起消息、工作流、标题、状态（running / need_input / done / failed / cancelled / interrupted），以及任务主会话累计的 provider 用量（`input_tokens` 含缓存读写、`output_tokens`、`cost`；任务内 subagent 是独立进程，不计入） |
 | `messages_fts` | `rowid`（= `messages.rowid`） | FTS5 trigram 外部内容索引（text、caption），由 trigger 同步。`tg_messages` 的 3 字以上子串查询与 relevance 排序用它 |
 | `reply_obligations` | `(bot_id, chat_id, message_id)` | 直接点名后待回复的消息身份（不存正文） |
 | `routing_claims` | `(chat_id, message_id, bot_id, route_version)` | 防止同一消息对同一 bot 重复启动 |
