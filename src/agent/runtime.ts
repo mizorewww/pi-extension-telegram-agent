@@ -580,7 +580,7 @@ export class BotRuntime {
 			fingerprint: this.contextFingerprint.slice(0, 12),
 			system_hash: this.systemHash,
 			tools_hash: this.toolsHash,
-			tools: activeTools.map((tool) => tool.name).join(","),
+			tools: session.getActiveToolNames().join(","),
 			cache_schema: CACHE_SCHEMA_VERSION,
 		});
 	}
