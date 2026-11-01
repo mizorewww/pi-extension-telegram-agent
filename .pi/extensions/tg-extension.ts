@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { spawn } from "node:child_process";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
 	AssistantMessageComponent,
@@ -12,7 +11,6 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import * as Tui from "@earendil-works/pi-tui";
 import { loadConfig, type BotConfig } from "../../src/config.ts";
-import { DAEMON_READY_MESSAGE, redactDaemonLog } from "../../src/daemon/control.ts";
 import type {
 	AgentActivity,
 	AgentActivityAssistantSection,
@@ -22,7 +20,6 @@ import type {
 	EvtItem,
 	MsgItem,
 	RuntimeControlSnapshot,
-	TimelineCursor,
 	TimelineItem,
 } from "../../src/ipc.ts";
 import { buildBotStatusView, formatUsdCost, renderBotStatusPlain } from "../../src/observability/status.ts";
@@ -41,7 +38,6 @@ const ENTRY_TYPE = "telegram-chat";
 const FEED_WIDGET_KEY = "telegram-feed";
 const MAX_ACTIVE_STREAMS = 32;
 const MAX_ENDED_STREAMS = 64;
-const PROCESS_OUTPUT_MAX_BYTES = 64 * 1024;
 
 const IDENTITY_COLORS = [
 	"accent",
@@ -54,23 +50,7 @@ const IDENTITY_COLORS = [
 	"mdLink",
 ] as const satisfies readonly ThemeColor[];
 
-type TimelineFactory = (
-	filter: string | null,
-	hooks: TimelineHooks,
-	oldestCursor?: TimelineCursor | null,
-) => TimelineClient;
-interface ProcessRunResult {
-	status: number | null;
-	stdout: string;
-	stderr: string;
-}
-type DaemonCommand = "start" | "restart" | "stop" | "status";
-interface DaemonCommandResult {
-	ok: boolean;
-	/** Exit code 0 and the daemon's ready line: the only signal that a feed may reconnect. */
-	ready: boolean;
-	output: string;
-}
+type TimelineFactory = (filter: string | null, hooks: TimelineHooks) => TimelineClient;
 type FeedEntry = { instanceId: string; filter: string | null };
 type ComposeIdentity = Pick<BotConfig, "id" | "name">;
 type ComposeMode = { kind: "scope" } | { kind: "bot"; identity: ComposeIdentity };
@@ -86,16 +66,7 @@ type StatusHost = {
 	thinkingLevel?: ExtensionContext["thinkingLevel"];
 };
 
-type TgCommandDispatch =
-	| "attach"
-	| "compose"
-	| "more"
-	| "detach"
-	| "status"
-	| "start"
-	| "restart"
-	| "stop"
-	| "status-daemon";
+type TgCommandDispatch = "attach" | "compose" | "more" | "detach" | "status";
 
 /** Every /tg subcommand; `bot` names its single optional trailing argument. */
 const TG_COMMANDS: Record<TgCommandDispatch, { description: string; bot?: "bot" | "bot|off" }> = {
@@ -104,56 +75,7 @@ const TG_COMMANDS: Record<TgCommandDispatch, { description: string; bot?: "bot" 
 	more: { description: "Load one older history page" },
 	detach: { description: "Disconnect the live feed" },
 	status: { description: "Show detailed usage", bot: "bot" },
-	start: { description: "Start the Telegram daemon" },
-	restart: { description: "Gracefully restart every configured bot" },
-	stop: { description: "Stop the Telegram daemon" },
-	"status-daemon": { description: "Show daemon process status" },
 };
-
-function runChildProcess(
-	command: string,
-	args: readonly string[],
-	options: { cwd: string },
-): Promise<ProcessRunResult> {
-	return new Promise((resolve) => {
-		const child = spawn(command, [...args], { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
-		let stdout: Buffer<ArrayBufferLike> = Buffer.alloc(0);
-		let stderr: Buffer<ArrayBufferLike> = Buffer.alloc(0);
-		const append = (current: Buffer<ArrayBufferLike>, chunk: Buffer<ArrayBufferLike>): Buffer<ArrayBufferLike> => {
-			const combined = Buffer.concat([current, chunk]);
-			return combined.length <= PROCESS_OUTPUT_MAX_BYTES
-				? combined
-				: combined.subarray(combined.length - PROCESS_OUTPUT_MAX_BYTES);
-		};
-		child.stdout.on("data", (chunk: Buffer) => {
-			stdout = append(stdout, chunk);
-		});
-		child.stderr.on("data", (chunk: Buffer) => {
-			stderr = append(stderr, chunk);
-		});
-		child.once("error", (error) =>
-			resolve({ status: null, stdout: stdout.toString(), stderr: `${stderr.toString()}${error.message}` }),
-		);
-		child.once("close", (status) => resolve({ status, stdout: stdout.toString(), stderr: stderr.toString() }));
-	});
-}
-
-/** Run one daemon control command through the same CLI operators use; output is already secret-redacted. */
-async function runDaemonCommand(rootDir: string, command: DaemonCommand): Promise<DaemonCommandResult> {
-	let result: ProcessRunResult;
-	try {
-		result = await runChildProcess("bun", ["run", "src/main.ts", command], { cwd: rootDir });
-	} catch (error) {
-		result = { status: null, stdout: "", stderr: `failed to run daemon command: ${String(error)}` };
-	}
-	const output = redactDaemonLog([result.stdout, result.stderr].filter(Boolean).join("\n"));
-	const ok = result.status === 0;
-	return {
-		ok,
-		ready: ok && output.split("\n").some((line) => line.startsWith(DAEMON_READY_MESSAGE)),
-		output,
-	};
-}
 
 function formatTgHelp(): string {
 	const syntax = Object.entries(TG_COMMANDS).map(([token, command]) =>
@@ -747,7 +669,7 @@ function streamComponent(
 }
 
 class TelegramFeed extends Tui.Container {
-	private clientValue: TimelineClient;
+	readonly client: TimelineClient;
 	private readonly content = new Tui.Container();
 	private readonly streamContent = new Tui.Container();
 	private readonly items: TimelineItem[] = [];
@@ -762,7 +684,7 @@ class TelegramFeed extends Tui.Container {
 	constructor(
 		readonly filter: string | null,
 		private readonly theme: Theme,
-		private readonly factory: TimelineFactory,
+		factory: TimelineFactory,
 		private readonly changed: (event: TimelineEvent, feed: TelegramFeed) => void,
 		private readonly requestRender: () => void,
 		private readonly toolHost?: ToolPresentationHost,
@@ -770,12 +692,9 @@ class TelegramFeed extends Tui.Container {
 		super();
 		this.addChild(this.content);
 		this.addChild(this.streamContent);
-		this.clientValue = factory(filter, { onEvent: (event) => this.onEvent(event) });
+		this.client = factory(filter, { onEvent: (event) => this.onEvent(event) });
 	}
 
-	get client(): TimelineClient {
-		return this.clientValue;
-	}
 	get stats(): Record<string, BotStats> {
 		return this.statsValue;
 	}
@@ -783,31 +702,17 @@ class TelegramFeed extends Tui.Container {
 		return this.statusesValue;
 	}
 	start(): void {
-		void this.clientValue.connect();
+		void this.client.connect();
 	}
 	more(): boolean {
-		return this.clientValue.requestOlder();
-	}
-
-	/** Reopen the same scope after a daemon restart; the old client's oldest page carries over so /tg more continues. */
-	async reconnect(): Promise<boolean> {
-		this.detach();
-		this.closed = false;
-		this.clientValue = this.factory(
-			this.filter,
-			{ onEvent: (event) => this.onEvent(event) },
-			this.clientValue.oldestCursor,
-		);
-		this.rebuildItems();
-		this.requestRender();
-		return this.clientValue.connect();
+		return this.client.requestOlder();
 	}
 
 	/** Drop the live socket and ephemeral state; already-rendered history stays. Idempotent. */
 	detach(): void {
 		if (this.closed) return;
 		this.closed = true;
-		this.clientValue.dispose();
+		this.client.dispose();
 		this.clearStreams();
 	}
 
@@ -995,8 +900,8 @@ function showTelegramStatus(
 }
 
 export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cwd()): void {
-	const factory: TimelineFactory = (filter, hooks, oldestCursor) =>
-		new TimelineClient(join(rootDir, "data", "daemon.sock"), filter, hooks, oldestCursor);
+	const factory: TimelineFactory = (filter, hooks) =>
+		new TimelineClient(join(rootDir, "data", "daemon.sock"), filter, hooks);
 	const feeds = new Map<string, TelegramFeed>();
 	let pending: { data: FeedEntry; changed: (event: TimelineEvent, feed: TelegramFeed) => void } | null = null;
 	let active: TelegramFeed | null = null;
@@ -1093,14 +998,11 @@ export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cw
 		ui?.setWidget(FEED_WIDGET_KEY, undefined);
 		ui?.setFooter(undefined);
 	};
-	/**
-	 * The one way a live feed stops: compose off, socket closed, widget/footer restored. `keepFeed` keeps the
-	 * detached feed as `active` so `/tg restart` can reconnect it; otherwise the next `/tg more` reports no feed.
-	 */
-	const teardownFeed = (ui: ExtensionContext["ui"] | null, options: { keepFeed?: boolean } = {}) => {
+	/** The one way a live feed stops: compose off, socket closed, widget/footer restored. */
+	const teardownFeed = (ui: ExtensionContext["ui"] | null) => {
 		closeCompose();
 		active?.detach();
-		if (!options.keepFeed) active = null;
+		active = null;
 		clearFeedUi(ui);
 	};
 	const mountFeedUi = (filter: string | null, ctx: ExtensionContext) => {
@@ -1158,30 +1060,6 @@ export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cw
 			ctx.ui.notify("Pi did not mount the Telegram transcript entry", "error");
 		} else {
 			openScopeCompose();
-		}
-	};
-
-	/** `/tg restart` from the TUI: suspend the live feed, restart every bot, reconnect the same scope when ready. */
-	const restartDaemonWithFeed = async (ctx: ExtensionContext): Promise<void> => {
-		const feed = active;
-		teardownFeed(ctx.ui, { keepFeed: true });
-		ctx.ui.setStatus("telegram-daemon", "TELEGRAM · RESTARTING");
-		ctx.ui.notify("Restarting every configured Telegram bot...", "info");
-		try {
-			const result = await runDaemonCommand(rootDir, "restart");
-			let output = result.output || "daemon restart";
-			let level: "info" | "error" = result.ok ? "info" : "error";
-			if (result.ready && feed && active === feed) {
-				mountFeedUi(feed.filter, ctx);
-				if (!(await feed.reconnect())) {
-					teardownFeed(ctx.ui);
-					output += "\ndaemon is ready, but the previous feed could not reconnect; run /tg attach again";
-					level = "error";
-				}
-			}
-			ctx.ui.notify(output, level);
-		} finally {
-			ctx.ui.setStatus("telegram-daemon", undefined);
 		}
 	};
 
@@ -1322,8 +1200,7 @@ export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cw
 			}
 			const sub = parsed.dispatch;
 			const botArg = parsed.arguments[0];
-			const daemonSub = sub === "start" || sub === "restart" || sub === "stop" || sub === "status-daemon";
-			if (ctx.mode !== "tui" && !daemonSub) {
+			if (ctx.mode !== "tui") {
 				ctx.ui.notify("Telegram UI requires interactive mode", "error");
 				return;
 			}
@@ -1371,12 +1248,6 @@ export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cw
 				const filter = resolveFilter(botArg, ctx.ui);
 				if (filter === undefined) return;
 				await showTelegramStatus(ctx, filter, factory, configuredBots());
-			} else if (sub === "restart" && ctx.mode === "tui") {
-				await restartDaemonWithFeed(ctx);
-			} else {
-				const command: DaemonCommand = sub === "status-daemon" ? "status" : sub;
-				const result = await runDaemonCommand(rootDir, command);
-				ctx.ui.notify(result.output || `daemon ${command}`, result.ok ? "info" : "error");
 			}
 		},
 	});

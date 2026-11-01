@@ -1,5 +1,5 @@
 // Daemon entry: long-running core. Owns SQLite, pollers, (later) agents, IPC server.
-// Started by `src/main.ts start` (detached) or directly with `bun run src/daemon/index.ts`.
+// Run as `bun run src/daemon/index.ts`, supervised by the systemd user unit (docs/runbooks/daemon.md).
 
 import { loadConfig } from "../config.ts";
 import { openDb, getDaemonState, setDaemonState } from "../db/db.ts";
@@ -34,9 +34,8 @@ import { TaskManager } from "../tasks/manager.ts";
 
 const rootDir = process.cwd();
 const config = loadConfig(rootDir);
-// Exclusive pid lock at the EARLIEST moment, before any slow init (getMe / model runtime /
-// session creation): a second `start` while we're still initializing must not race us
-// (REQ-OPS-0001 R4). Released on shutdown; stale pid files are taken over.
+// Exclusive pid lock before any slow init (getMe / model runtime / sessions), so a second copy
+// can never race this one onto the same tokens. Released on shutdown; stale pid files are taken over.
 acquirePidLock(config.dataDir);
 const videoTranscoder = inspectVideoTranscoder();
 // Frame sampling feeds vision descriptions and view_image.

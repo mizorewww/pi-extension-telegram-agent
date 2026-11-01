@@ -121,7 +121,7 @@ export class TimelineClient {
 	private readonly pendingSends = new Map<string, PendingSend>();
 	private readonly visionUpdates = new BoundedTtlMap<string>(MAX_MEDIA_UPDATES, MEDIA_UPDATE_TTL_MS);
 	private readonly mediaReadyUpdates = new BoundedTtlMap<string>(MAX_MEDIA_UPDATES, MEDIA_UPDATE_TTL_MS);
-	private oldestCursorValue: TimelineCursor | null;
+	private oldestCursorValue: TimelineCursor | null = null;
 	private socket: Socket | null = null;
 	private connected = false;
 	private more = true;
@@ -132,11 +132,7 @@ export class TimelineClient {
 		private readonly sockPath: string,
 		readonly filter: string | null,
 		private readonly hooks: TimelineHooks,
-		/** Oldest page already shown by the previous client of the same scope (reconnect); null for a fresh feed. */
-		oldestCursor: TimelineCursor | null = null,
-	) {
-		this.oldestCursorValue = oldestCursor;
-	}
+	) {}
 
 	get isConnected(): boolean {
 		return this.connected;
@@ -144,16 +140,13 @@ export class TimelineClient {
 	get hasMore(): boolean {
 		return this.more;
 	}
-	get oldestCursor(): TimelineCursor | null {
-		return this.oldestCursorValue;
-	}
 
 	async connect(): Promise<boolean> {
 		if (this.disposed) return false;
 		if (!existsSync(this.sockPath)) {
 			this.hooks.onEvent({
 				type: "disconnected",
-				reason: "daemon not running (no data/daemon.sock). Start with: bun run src/main.ts start",
+				reason: "daemon not running (no data/daemon.sock). Start it with: systemctl --user start telegram-agent",
 			});
 			return false;
 		}
