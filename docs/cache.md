@@ -63,7 +63,7 @@ tools:    send, search[, codemode]（按 bot 开关过滤，顺序不变；codem
 - 无 username 的发送者用稳定别名 `u<N>`（rowid 分配）。
 - 引用父消息优先用随消息保存的 `reply_snapshot`；父消息在同一新批次里时只写裸 `↪ #id`。
 - `[task …]` / `[系统]` 来自 `note` 事件（serializer v6），只出现在它所属 bot 的上下文里；除进展外都带 `↪ #origin`。
-- `media_update` 只出现在 off / describe 模式；context 模式的图片在消息首次打包时就位，或永远不出现。
+- `media_update` 只出现在 off / hybrid 模式；context 模式的图片在消息首次打包时就位，或永远不出现。
 
 ## Compaction
 

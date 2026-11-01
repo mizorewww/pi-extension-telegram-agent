@@ -20,8 +20,11 @@ import {
 export const MIN_COMPACTION_RESERVE = 16_384;
 
 type CacheRetention = "none" | "short" | "long";
-/** "off": placeholders only; "describe": a vision model describes media as text; "context": images go to the main model. */
-export type MediaMode = "off" | "describe" | "context" | "hybrid";
+/**
+ * "off": placeholders only; "context": every image goes to the main model; "hybrid": a vision
+ * model describes media as text and the main model views one on demand.
+ */
+export type MediaMode = "off" | "context" | "hybrid";
 
 /** Modes that attach image blocks for the chat model, which must then accept image input. */
 export function mediaNeedsImageInput(mode: MediaMode): boolean {
@@ -30,7 +33,7 @@ export function mediaNeedsImageInput(mode: MediaMode): boolean {
 
 /** Modes whose context is text plus vision descriptions from media.vision_model. */
 export function mediaUsesVision(mode: MediaMode): boolean {
-	return mode === "describe" || mode === "hybrid";
+	return mode === "hybrid";
 }
 
 /** Settings a bot inherits from the deployment level unless it overrides them. */
@@ -77,11 +80,11 @@ export interface TelegramConfigInput extends SharedConfigInput {
 	context_window?: number;
 	media?: {
 		mode?: MediaMode;
-		/** "describe" only: the vision model as provider/model:effort. */
+		/** "hybrid" only: the vision model as provider/model:effort. */
 		vision_model?: string;
-		/** Media per turn: described ("describe", default 2) or attached as images ("context", default 4). */
+		/** Media per turn: described ("hybrid", default 2) or attached as images ("context", default 4). */
 		max_per_turn?: number;
-		/** Parallel media jobs: vision calls ("describe") or downloads/frame extraction ("context"). */
+		/** Parallel media jobs: vision calls ("hybrid") or downloads/frame extraction ("context"). */
 		concurrency?: number;
 	};
 	telemetry_retention_days?: number;
@@ -210,7 +213,7 @@ const ROOT_RULES: Record<string, Rule> = {
 };
 const BOT_RULES: Record<string, Rule> = { ...SHARED_RULES, routing_p: range(0, 1) };
 const MEDIA_RULES: Record<string, Rule> = {
-	mode: oneOf("off", "describe", "context", "hybrid"),
+	mode: oneOf("off", "context", "hybrid"),
 	vision_model: modelRef,
 	max_per_turn: range(0, 16, true),
 	concurrency: range(1, 16, true),
@@ -258,7 +261,7 @@ const BOT_KEYS = new Set([
 const REPLACED_KEYS: Record<string, string> = {
 	sampling_cooldown_ms: "renamed to cooldown_ms",
 	auxiliary_visual_model: "moved to media.vision_model",
-	vision: 'merged into media: use media.mode "describe" with media.max_per_turn / media.concurrency',
+	vision: 'merged into media: use media.mode "hybrid" with media.max_per_turn / media.concurrency',
 	db_path: "removed; the database is always data/agent.db",
 	router_secret_env: "removed; the .env key is always router_secret",
 	tinyfish_key_env: "removed; the .env key is always tiny_fish_api_key",
@@ -350,7 +353,9 @@ function validate(rootDir: string, raw: Raw, env: Record<string, string>, identi
 	if (raw.media !== undefined) {
 		if (isObject(raw.media)) {
 			checkKeys(errors, "media.", raw.media, new Set(Object.keys(MEDIA_RULES)));
-			checkFields(errors, "media.", raw.media, MEDIA_RULES);
+			if (raw.media.mode === "describe")
+				errors.push('[config] media.mode: "describe" was removed; use "hybrid" (needs an image-capable main model) or "off"');
+			else checkFields(errors, "media.", raw.media, MEDIA_RULES);
 		} else errors.push("[config] media: expected object");
 	}
 	if (raw.tasks !== undefined) {

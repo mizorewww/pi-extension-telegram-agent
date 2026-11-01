@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { loadConfig } from "../src/config.ts";
+import { loadConfig, mediaUsesVision } from "../src/config.ts";
 import { readPid, pidAlive } from "../src/daemon/pid.ts";
 import { buildDebugReport, parseDebugDuration, type DebugModelReasoning } from "../src/observability/debug-report.ts";
 import { readStructuredLogTail } from "../src/observability/log.ts";
@@ -88,7 +88,7 @@ export async function main(args = process.argv.slice(2), rootDir = process.cwd()
 						},
 					];
 				}),
-				...(config.media.mode === "describe"
+				...(mediaUsesVision(config.media.mode)
 					? (() => {
 							const vision = parsePiModelReference(config.media.visionModel)!;
 							return [

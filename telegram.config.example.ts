@@ -50,17 +50,16 @@ export default defineConfig({
 
 	// ===== Media: how images and videos reach a model =====
 	// "off" (default): media are text placeholders such as [photo].
-	// "describe": vision_model describes each new image / video once as text (shared by all bots);
-	//   works with any chat model.
 	// "context": images and 1-3 video frames go to the main model directly; it must accept image
 	//   input (checked at startup). No vision model is called.
-	// "hybrid": like "describe", plus a view_image tool so the bot looks at one message's actual
-	//   image when the description is not enough; the main model must accept image input.
+	// "hybrid" (recommended): vision_model describes each new image / video once as text (shared by
+	//   all bots), and a view_image tool lets the bot look at one message's actual image when the
+	//   description is not enough; the main model must accept image input.
 	// Voice, audio, files and TGS animated stickers stay placeholders. Videos need ffmpeg.
 	media: {
 		mode: "off",
-		vision_model: "openai-codex/gpt-5.6-luna:low", // "describe" / "hybrid"
-		max_per_turn: 2, // media described ("describe", default 2) or attached ("context", default 4) per turn
+		vision_model: "openai-codex/gpt-5.6-luna:low", // "hybrid" only
+		max_per_turn: 2, // media described ("hybrid", default 2) or attached ("context", default 4) per turn
 		concurrency: 2, // parallel vision calls or downloads / frame extractions
 	},
 
