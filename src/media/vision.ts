@@ -181,14 +181,18 @@ export function createPiVisionExecutor(runtime: VisionModelRuntime, modelRef: st
 				usageTelemetry(input.kind, performance.now() - startedAt, outcome, message, input.images.length);
 			let message: AssistantMessage;
 			try {
-				// Single timeout layer: the SDK enforces VISION_TIMEOUT_MS inside completeSimple.
-				message = await runtime.completeSimple(model!, context, {
-					cacheRetention: "none",
-					maxTokens: VISION_MAX_OUTPUT_TOKENS,
-					maxRetries: 0,
-					reasoning: selection.thinkingLevel,
-					timeoutMs: VISION_TIMEOUT_MS,
-				});
+				// Pi's timeoutMs only bounds its own SDK call; this deadline also frees the vision
+				// slot and aborts the HTTP request when a provider stalls mid-body.
+				message = await withVisionDeadline((signal) =>
+					runtime.completeSimple(model!, context, {
+						cacheRetention: "none",
+						maxTokens: VISION_MAX_OUTPUT_TOKENS,
+						maxRetries: 0,
+						reasoning: selection.thinkingLevel,
+						timeoutMs: VISION_TIMEOUT_MS,
+						signal,
+					}),
+				);
 			} catch (error) {
 				return { text: null, telemetry: telemetry(classifyPiProviderFailure(error)) };
 			}
@@ -209,6 +213,19 @@ export function assertPiVisionExecutorReady(executor: VisionExecutor): void {
 	if (executor.readinessFailure) {
 		throw new PiModelConfigurationError(executor.readinessFailure, executor.provider, executor.model);
 	}
+}
+
+/** Fail a vision call at the deadline even if the provider never settles; the abort is best effort. */
+function withVisionDeadline<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+	const controller = new AbortController();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => {
+			controller.abort();
+			reject(new Error("provider_timeout: vision request deadline exceeded"));
+		}, VISION_TIMEOUT_MS);
+	});
+	return Promise.race([work(controller.signal), deadline]).finally(() => clearTimeout(timer));
 }
 
 const inFlight = new Map<string, Promise<string | null>>();
