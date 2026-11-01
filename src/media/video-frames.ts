@@ -4,7 +4,6 @@ import { join } from "node:path";
 
 export const VIDEO_FRAME_MAX = 3;
 const VIDEO_COMMAND_TIMEOUT_MS = 30_000;
-const VIDEO_FRAME_MAX_BYTES = 5 * 1024 * 1024;
 
 export type VideoFrameOutcome =
 	| "video_transcoder_unavailable"
@@ -164,7 +163,7 @@ export async function extractVideoFrames(
 				"-frames:v",
 				"1",
 				"-vf",
-				"scale=1280:1280:force_original_aspect_ratio=decrease",
+				"scale=1024:1024:force_original_aspect_ratio=decrease",
 				"-q:v",
 				"3",
 				"-y",
@@ -173,9 +172,7 @@ export async function extractVideoFrames(
 			if (extraction.exitCode !== 0) return { ok: false, outcome: "video_frame_extraction_failed" };
 			try {
 				const stat = statSync(outputPath);
-				if (!stat.isFile() || stat.size <= 0 || stat.size > VIDEO_FRAME_MAX_BYTES) {
-					return { ok: false, outcome: "video_frame_extraction_failed" };
-				}
+				if (!stat.isFile() || stat.size <= 0) return { ok: false, outcome: "video_frame_extraction_failed" };
 				frames.push({ bytes: new Uint8Array(readFileSync(outputPath)), mimeType: "image/jpeg", position });
 			} catch {
 				return { ok: false, outcome: "video_frame_extraction_failed" };

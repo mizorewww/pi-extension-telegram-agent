@@ -1,7 +1,7 @@
 // Shared image preparation for vision and view_image: Telegram identity -> bounded provider-ready
 // images. Photos and static stickers become one PNG/JPEG (WebP/GIF via Pi convertToPng, then
 // Pi resizeImage with one fixed bound); videos and video stickers are sampled into 1-3 JPEG
-// frames by ffmpeg (already bounded to 1280px). Vision sends the result to completeSimple;
+// frames by ffmpeg and bound the same way. Vision sends the result to completeSimple;
 // view_image installs it as derived cache files whose names follow from the media identity, so
 // pruning and projection need no record of them. No provider call happens here.
 
@@ -100,7 +100,12 @@ export async function prepareMediaImages(
 			sourceExtension: local.sourceExtension,
 		});
 		if (!frames.ok) return frames;
-		return { ok: true, kind: "video", images: frames.frames };
+		const images: PreparedImage[] = [];
+		for (const frame of frames.frames) {
+			const bounded = await boundImage(options.resize ?? resizeImage, frame.bytes, frame.mimeType);
+			images.push(bounded ? { ...bounded, position: frame.position } : frame);
+		}
+		return { ok: true, kind: "video", images };
 	}
 
 	let bytes: Uint8Array = local.bytes;
@@ -112,13 +117,21 @@ export async function prepareMediaImages(
 		mimeType = converted.mimeType;
 	}
 	// A resize failure falls back to the converted/original image rather than dropping it.
-	const resized = await (options.resize ?? resizeImage)(bytes, mimeType, MEDIA_IMAGE_RESIZE).catch(() => null);
-	if (resized) {
-		bytes = new Uint8Array(Buffer.from(resized.data, "base64"));
-		mimeType = resized.mimeType;
-	}
+	const resized = await boundImage(options.resize ?? resizeImage, bytes, mimeType);
+	if (resized) return { ok: true, kind: "static", images: [resized] };
 	if (mimeType !== "image/png" && mimeType !== "image/jpeg") return { ok: false, outcome: "conversion_failed" };
 	return { ok: true, kind: "static", images: [{ bytes, mimeType }] };
+}
+
+/** One image under the provider budget, or null when Pi cannot resize or encode it. */
+async function boundImage(
+	resize: typeof resizeImage,
+	bytes: Uint8Array,
+	mimeType: string,
+): Promise<PreparedImage | null> {
+	const resized = await resize(bytes, mimeType, MEDIA_IMAGE_RESIZE).catch(() => null);
+	if (!resized || (resized.mimeType !== "image/png" && resized.mimeType !== "image/jpeg")) return null;
+	return { bytes: new Uint8Array(Buffer.from(resized.data, "base64")), mimeType: resized.mimeType };
 }
 
 /** A prepared image file in the media cache dir; view_image results store only these refs. */
