@@ -175,9 +175,17 @@ export const CODEMODE_TOOL_DEFS = [
 					]),
 				),
 				text_contains: Type.Optional(
-					Type.String({ minLength: 1, maxLength: 200, description: "Case-insensitive substring of text or caption" }),
+					Type.String({
+						minLength: 1,
+						maxLength: 200,
+						description: "Case-insensitive substring of text or caption; 3+ characters use the full-text index",
+					}),
 				),
-				order: Type.Optional(Type.Union([Type.Literal("desc"), Type.Literal("asc")])),
+				order: Type.Optional(
+					Type.Union([Type.Literal("desc"), Type.Literal("asc"), Type.Literal("relevance")], {
+						description: "relevance ranks by text_contains (3+ characters) and has no paging cursor",
+					}),
+				),
 				limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, default: 100 })),
 			},
 			{ additionalProperties: false },

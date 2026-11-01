@@ -9,6 +9,8 @@ export const MAX_MESSAGE_ROWS = 500;
 export const MAX_MESSAGE_IDS = 200;
 const MAX_TEXT_CHARS = 4_000;
 const MAX_CONTAINS_CHARS = 200;
+/** The trigram index only matches needles of at least three characters. */
+const INDEX_MIN_CHARS = 3;
 
 export interface MessageQuery {
 	ids?: number[];
@@ -20,7 +22,7 @@ export interface MessageQuery {
 	reply_to?: number;
 	has_media?: "photo" | "video" | "sticker" | "document" | "any";
 	text_contains?: string;
-	order?: "desc" | "asc";
+	order?: "desc" | "asc" | "relevance";
 	limit?: number;
 }
 
@@ -135,16 +137,25 @@ export function queryMessages(db: Database, chatId: number, query: MessageQuery)
 		if (kind === "video") args.push(...VIDEO_KINDS);
 		else if (kind !== "any") args.push(kind);
 	}
+	let indexed: string | null = null;
 	if (query.text_contains !== undefined) {
 		const needle = typeof query.text_contains === "string" ? query.text_contains : "";
 		if (!needle || needle.length > MAX_CONTAINS_CHARS)
 			throw new MessageQueryError(`text_contains: expected 1-${MAX_CONTAINS_CHARS} characters`);
-		const pattern = `%${needle.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
-		where.push("(m.text LIKE ? ESCAPE '\\' OR m.caption LIKE ? ESCAPE '\\')");
-		args.push(pattern, pattern);
+		if (Array.from(needle).length >= INDEX_MIN_CHARS) {
+			// A quoted FTS5 phrase is a plain substring under the trigram tokenizer.
+			indexed = `"${needle.replaceAll('"', '""')}"`;
+		} else {
+			const pattern = `%${needle.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+			where.push("(m.text LIKE ? ESCAPE '\\' OR m.caption LIKE ? ESCAPE '\\')");
+			args.push(pattern, pattern);
+		}
 	}
 	const order = query.order ?? "desc";
-	if (order !== "desc" && order !== "asc") throw new MessageQueryError("order: expected desc or asc");
+	if (order !== "desc" && order !== "asc" && order !== "relevance")
+		throw new MessageQueryError("order: expected desc, asc or relevance");
+	if (order === "relevance" && indexed == null)
+		throw new MessageQueryError("order relevance needs text_contains of at least 3 characters");
 	const limit = query.limit ?? 100;
 	if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_MESSAGE_ROWS)
 		throw new MessageQueryError(`limit: expected 1-${MAX_MESSAGE_ROWS}`);
@@ -156,20 +167,22 @@ export function queryMessages(db: Database, chatId: number, query: MessageQuery)
 			        json_extract(m.media, '$.kind') AS media_kind, json_extract(m.media, '$.file_name') AS media_file_name,
 			        json_extract(m.media, '$.file_size') AS media_file_size, md.vision
 			 FROM messages m
+			 ${indexed ? "JOIN messages_fts f ON f.rowid = m.rowid AND messages_fts MATCH ?" : ""}
 			 LEFT JOIN telegram_control_messages c ON c.chat_id = m.chat_id AND c.message_id = m.message_id
 			 LEFT JOIN aliases a ON a.chat_id = m.chat_id AND a.user_id = m.sender_id
 			 LEFT JOIN media md ON m.media IS NOT NULL
 			      AND md.file_unique_id = CAST(json_extract(m.media, '$.file_unique_id') AS TEXT)
 			 WHERE ${where.join(" AND ")}
-			 ORDER BY m.message_id ${order === "desc" ? "DESC" : "ASC"}
+			 ORDER BY ${order === "relevance" ? "f.rank" : `m.message_id ${order === "desc" ? "DESC" : "ASC"}`}
 			 LIMIT ?`,
 		)
-		.all(...args, limit + 1) as Row[];
+		.all(...(indexed ? [indexed] : []), ...args, limit + 1) as Row[];
 	const more = rows.length > limit;
 	const page = rows.slice(0, limit);
 	const last = page.at(-1)?.message_id ?? null;
 	return {
 		rows: page.map(toDto),
+		// Relevance order has no id cursor: raise limit or narrow the filters instead.
 		next_before_id: more && order === "desc" ? last : null,
 		next_after_id: more && order === "asc" ? last : null,
 	};

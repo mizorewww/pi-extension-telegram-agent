@@ -337,3 +337,20 @@ CREATE TABLE IF NOT EXISTS daemon_state (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
 );
+
+-- Substring index over message text for tg_messages (trigram: CJK needs no word breaks; queries of
+-- 3+ characters). External content: the rows live in messages, these triggers keep it in sync,
+-- and openDb rebuilds it once for databases that predate it.
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+	text, caption, content = 'messages', content_rowid = 'rowid', tokenize = 'trigram case_sensitive 0'
+);
+CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+	INSERT INTO messages_fts (rowid, text, caption) VALUES (new.rowid, new.text, new.caption);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+	INSERT INTO messages_fts (messages_fts, rowid, text, caption) VALUES ('delete', old.rowid, old.text, old.caption);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE OF text, caption ON messages BEGIN
+	INSERT INTO messages_fts (messages_fts, rowid, text, caption) VALUES ('delete', old.rowid, old.text, old.caption);
+	INSERT INTO messages_fts (rowid, text, caption) VALUES (new.rowid, new.text, new.caption);
+END;

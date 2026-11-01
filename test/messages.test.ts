@@ -80,3 +80,43 @@ test("attachments render with their sanitized file name, size and length", async
 	expect(text).toContain(`[document "report 'final'.pdf" 1.2 MB]`);
 	expect(text).toContain("[voice 12s]");
 });
+
+test("the full-text index finds CJK substrings, ranks by relevance and backfills old databases", async () => {
+	const { mkdtempSync, rmSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const { openDb } = await import("../src/db/db.ts");
+	const d = db();
+	const insert = d.query(
+		`INSERT INTO messages (chat_id, message_id, date, sender_id, display_name, username, is_bot, text, first_seen_by)
+		 VALUES (?, ?, ?, 7, 'Alice', 'alice', 0, ?, 'A')`,
+	);
+	insert.run(CHAT, 100, 1_754_600_100, "周末去吃海底捞火锅店吧");
+	insert.run(CHAT, 101, 1_754_600_101, "火锅店火锅店，还是火锅店");
+	insert.run(CHAT, 102, 1_754_600_102, "/compact 火锅店");
+	d.query("INSERT INTO telegram_control_messages (chat_id, message_id) VALUES (?, 102)").run(CHAT);
+	expect(queryMessages(d, CHAT, { text_contains: "火锅店" }).rows.map((row) => row.id)).toEqual([101, 100]);
+	expect(queryMessages(d, CHAT, { text_contains: "火锅店", order: "relevance" }).rows[0]!.id).toBe(101);
+	expect(queryMessages(d, CHAT, { text_contains: "火锅" }).rows.map((row) => row.id)).toEqual([101, 100]);
+	d.query("UPDATE messages SET text = '改成别的了' WHERE chat_id = ? AND message_id = 100").run(CHAT);
+	expect(queryMessages(d, CHAT, { text_contains: "火锅店" }).rows.map((row) => row.id)).toEqual([101]);
+
+	const dir = mkdtempSync(join(tmpdir(), "tg-fts-"));
+	try {
+		const path = join(dir, "agent.db");
+		const first = openDb(path);
+		first.exec("DROP TRIGGER messages_fts_insert");
+		first.query("DELETE FROM daemon_state WHERE key = 'messages_fts_version'").run();
+		first
+			.query(
+				`INSERT INTO messages (chat_id, message_id, date, is_bot, text, first_seen_by) VALUES (?, 1, 1, 0, '旧数据库里的消息', 'A')`,
+			)
+			.run(CHAT);
+		first.close();
+		const reopened = openDb(path);
+		expect(queryMessages(reopened, CHAT, { text_contains: "数据库里" }).rows.map((row) => row.id)).toEqual([1]);
+		reopened.close();
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
