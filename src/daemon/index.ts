@@ -41,10 +41,8 @@ acquirePidLock(config.dataDir);
 const videoTranscoder = inspectVideoTranscoder();
 // Frame sampling feeds vision descriptions and view_image.
 const mediaNeedsFrames = config.media.mode !== "off";
-if (mediaNeedsFrames && (!videoTranscoder.ffmpeg || !videoTranscoder.ffprobe)) {
+if (mediaNeedsFrames && !videoTranscoder) {
 	log.warn("media_transcoder", "tools_unavailable", {
-		ffmpeg: videoTranscoder.ffmpeg,
-		ffprobe: videoTranscoder.ffprobe,
 		category: "video_transcoder_unavailable",
 		impact: "video_frame_sampling_disabled",
 		action: "install_ffmpeg_and_restart",

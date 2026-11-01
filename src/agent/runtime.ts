@@ -142,7 +142,6 @@ import {
 import { contextStateFromEntries } from "./context-state.ts";
 import { trimSessionBeforeCompaction } from "./session-trim.ts";
 import { parsePiModelReference, type PiRequestThinkingLevel } from "./model-ref.ts";
-import type { VideoTranscoderAvailability } from "../media/video-frames.ts";
 import { errorCategory, log } from "../observability/log.ts";
 import { fitContextBreakdown } from "../observability/usage.ts";
 import { AgentActivityCollector } from "./activity.ts";
@@ -370,7 +369,7 @@ export class BotRuntime {
 	private thinkingFinished = false;
 	private readonly visionScheduler: VisionScheduler | null;
 	private readonly typingLease: TelegramTypingLease;
-	private readonly videoTranscoder: VideoTranscoderAvailability;
+	private readonly videoTranscoder: boolean;
 	/** Optional sink for TUI/live broadcasting of agent events. */
 	eventSink: ((event: { id: number; ts: number; kind: string; payload: unknown }) => void) | null = null;
 	/** Optional sink for messages this bot sent (poller echo dedupes them, so TUI needs this path). */
@@ -393,7 +392,7 @@ export class BotRuntime {
 		modelRuntime: ModelRuntime,
 		options: {
 			/** Startup probe result; both media modes sample video frames through it. */
-			videoTranscoder: VideoTranscoderAvailability;
+			videoTranscoder: boolean;
 			chatActionSender?: (signal: AbortSignal) => Promise<unknown>;
 			api?: BotApi;
 			botApis?: ReadonlyMap<string, MediaDownloadApi>;

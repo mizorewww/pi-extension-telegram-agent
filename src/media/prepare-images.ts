@@ -26,7 +26,6 @@ import {
 	type VideoFrameInput,
 	type VideoFrameOutcome,
 	type VideoFrameResult,
-	type VideoTranscoderAvailability,
 } from "./video-frames.ts";
 
 /**
@@ -58,8 +57,8 @@ export type PrepareMediaImagesResult =
 
 export interface PrepareMediaImagesOptions {
 	cacheDir: string;
-	/** Startup snapshot: missing ffmpeg/ffprobe skips videos before any Telegram download. */
-	videoTranscoder: VideoTranscoderAvailability;
+	/** Startup snapshot: without FFmpeg, videos are skipped before any Telegram download. */
+	videoTranscoder: boolean;
 	signal?: AbortSignal;
 	/** Lets a routed bot reuse media received through another configured bot. */
 	botApis?: ReadonlyMap<string, MediaDownloadApi>;
@@ -83,8 +82,7 @@ export async function prepareMediaImages(
 	} | null;
 	if (!media || !isVisionMedia(media.kind, media.mime)) return { ok: false, outcome: "media_unavailable" };
 	const video = isVideoMedia(media.kind, media.mime);
-	if (video && !(options.videoTranscoder.ffmpeg && options.videoTranscoder.ffprobe))
-		return { ok: false, outcome: "video_transcoder_unavailable" };
+	if (video && !options.videoTranscoder) return { ok: false, outcome: "video_transcoder_unavailable" };
 
 	const local = await ensureLocalMedia(db, api, botId, fileUniqueId, {
 		cacheDir: options.cacheDir,
