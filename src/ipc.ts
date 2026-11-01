@@ -4,7 +4,6 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 // Protocol:
 //   C->S {type:"hello"}                       S->C {type:"snapshot", items: TimelineItem[]}
 //   C->S {type:"history", before, limit}      S->C {type:"history", items, hasMore}
-//   C->S {type:"send_message", requestId,...} S->C {type:"send_result", requestId, ok,...}
 //   (push)                                    S->C {type:"append", item: TimelineItem}
 //   (push)                                    S->C {type:"vision_update", fileUniqueId, text}
 //   (push)                                    S->C {type:"media_ready", fileUniqueId, mediaPath}
@@ -12,7 +11,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 //
 // Pagination uses a composite cursor (ts, rank, id): rank 0 = agent event (id = agent_events.id),
 // rank 1 = chat message (id = message_id). Merged timeline order is by (ts, rank, id), so
-// same-second messages/events are never dropped or duplicated across pages (REQ-IPC-0001 R3).
+// same-second messages/events are never dropped or duplicated across pages.
 
 export interface MsgItem {
 	kind: "msg";
@@ -26,11 +25,11 @@ export interface MsgItem {
 	text: string | null;
 	mediaKind: string | null;
 	stickerEmoji: string | null;
-	/** local cache path for the media file (same uid as the TUI); absent when not downloaded (REQ-UI-0001 R5). */
+	/** local cache path for the media file (same uid as the TUI); absent when not downloaded. */
 	mediaPath?: string | null;
-	/** vision description text for the media, if recognized (REQ-UI-0001 R3). */
+	/** vision description text for the media, if recognized. */
 	mediaDesc?: string | null;
-	/** stable Telegram media identity used to merge live vision updates (REQ-UI-0006 R1). */
+	/** stable Telegram media identity used to merge live vision updates. */
 	fileUniqueId?: string | null;
 	replyTo: number | null;
 	edited: boolean;
@@ -136,13 +135,13 @@ export interface StatsSnapshot {
 	statuses: Record<string, RuntimeControlSnapshot>;
 }
 
-/** A newly persisted, non-empty vision description (REQ-UI-0006). */
+/** A newly persisted, non-empty vision description. */
 export interface VisionUpdate {
 	fileUniqueId: string;
 	text: string;
 }
 
-/** A newly installed owner-only local media file (REQ-UI-0014). */
+/** A newly installed owner-only local media file. */
 export interface MediaReadyUpdate {
 	fileUniqueId: string;
 	mediaPath: string;
@@ -184,46 +183,9 @@ interface AgentStreamBase {
 export type AgentStreamFrame = AgentStreamBase &
 	({ phase: "start" } | { phase: "update"; activity: AgentActivity } | { phase: "end" });
 
-export type SendMessageErrorCode =
-	| "invalid_request"
-	| "unknown_bot"
-	| "too_long"
-	| "request_conflict"
-	| "busy"
-	| "telegram_error"
-	| "unknown_outcome"
-	| "service_unavailable"
-	| "internal_error";
-
-export interface SendMessageSuccess {
-	requestId: string;
-	botId: string;
-	ok: true;
-	chatId: number;
-	messageId: number;
-}
-
-export interface SendMessageFailure {
-	requestId: string;
-	botId: string;
-	ok: false;
-	code: SendMessageErrorCode;
-	error: string;
-}
-
-export type SendMessageResult = SendMessageSuccess | SendMessageFailure;
-
-export interface SendMessageRequest {
-	type: "send_message";
-	requestId: string;
-	botId: string;
-	text: string;
-}
-
 export type ClientRequest =
-	| { type: "hello"; filter?: string } // filter = bot id; absent = global view (REQ-UI-0002)
-	| { type: "history"; before?: TimelineCursor; limit: number }
-	| SendMessageRequest;
+	| { type: "hello"; filter?: string } // filter = bot id; absent = global view
+	| { type: "history"; before?: TimelineCursor; limit: number };
 
 export type ServerMessage =
 	| { type: "snapshot"; items: TimelineItem[]; stats?: StatsSnapshot }
@@ -232,8 +194,7 @@ export type ServerMessage =
 	| { type: "usage"; botId: string; stats: BotStats; status?: RuntimeControlSnapshot }
 	| ({ type: "vision_update" } & VisionUpdate)
 	| ({ type: "media_ready" } & MediaReadyUpdate)
-	| { type: "agent_stream"; stream: AgentStreamFrame }
-	| ({ type: "send_result" } & SendMessageResult);
+	| { type: "agent_stream"; stream: AgentStreamFrame };
 
 export function encodeFrame(msg: unknown): string {
 	return `${JSON.stringify(msg)}\n`;
@@ -246,12 +207,12 @@ export class FrameOverflowError extends Error {
 	}
 }
 
-const DEFAULT_MAX_BUFFER = 4 * 1024 * 1024; // REQ-IPC-0001 R6
+const DEFAULT_MAX_BUFFER = 4 * 1024 * 1024;
 
 /**
  * Incremental JSONL decoder for a socket data stream. Holds ONE streaming TextDecoder:
  * multi-byte characters split across chunk boundaries decode correctly instead of
- * becoming U+FFFD (REQ-IPC-0001 R1). Buffered (complete) bytes are bounded; the decoder
+ * becoming U+FFFD. Buffered (complete) bytes are bounded; the decoder
  * itself only ever retains an incomplete multi-byte tail (≤3 bytes).
  */
 export class FrameDecoder {

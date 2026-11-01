@@ -35,40 +35,34 @@ In Pi:
 
 Model credentials stay in Pi and are never written to this repository. The default configuration does not look at images, so any chat model works; if you later set `media.mode` to `"hybrid"`, the main model must accept image input.
 
-## 4. Run `/tg config`
+## 4. Write the configuration
 
-The wizard first checks locally that the model is usable (without calling it), then asks for:
-
-1. a Chinese or English persona template;
-2. the group ID;
-3. the bot's local ID, display name, the name of its token in `.env`, and the BotFather token;
-4. a final confirmation.
-
-> Pi's input box does not mask passwords. Make sure you are not recording or sharing your screen when you paste the token.
-
-Pressing Esc at any step leaves no partial configuration. On confirmation it writes three files, all ignored by Git and readable only by you:
-
-| File | Content |
-|---|---|
-| `.env` | the bot token |
-| `telegram.config.ts` | group ID, bot, and the model you just confirmed; everything else uses defaults |
-| `personas/<bot-id>.local.md` | the bot's personality, which you can edit any time |
-
-## 5. Wait for ready
-
-The wizard validates the configuration and restarts the daemon. The group view opens only after the daemon reports ready. Mention your bot in the group, or send `/help` to see the group commands.
-
-If it does not become ready (usually a wrong token, no network, or the bot is not in the group), your configuration is kept. Run:
-
-```text
-/tg status-daemon
-/tg restart
+```bash
+cp telegram.config.example.ts telegram.config.ts
+cp personas/template.en.md personas/friend.local.md
 ```
 
-If that does not help, check `data/daemon.log` or [Troubleshooting](troubleshooting.md). You do not need to enter the token again.
+1. Create `.env` with the bot token (`key: value` with a colon, not `KEY=value`):
 
-## Running it again
+   ```text
+   telegram_bot_token: 123456789:AA...
+   ```
 
-With an existing configuration, `/tg config` lets you validate it, edit `telegram.config.ts` directly in Pi's editor, back it up and replace it, or cancel. Replacing keeps the old files as `.bak-<random>`.
+2. Edit `telegram.config.ts`: fill in `group_peer_id`; delete the `provider` and `model` lines to use your Pi `/model` choice; set the bot's `name` to what the group calls it and `persona_path` to `personas/friend.local.md`. Every field is commented, and misspelled or unknown fields are rejected at startup.
+3. Write the bot's personality in `personas/friend.local.md`.
+
+All three files are ignored by Git and stay on your machine.
+
+## 5. Start
+
+```bash
+bun run start
+```
+
+The daemon runs in the foreground; Ctrl-C stops it. For long-running use, hand it to systemd as described in [Daily operations](operations.md#start-and-stop). Once the output shows `"ready"`, run `/tg attach` in Pi to open the group view, then mention your bot in the group or send `/help` to see the group commands.
+
+If it does not start, the terminal says why; typical causes are a wrong token, no network, the bot not being in the group, or a model missing from Pi's catalog. See [Troubleshooting](troubleshooting.md).
+
+To change the configuration later, edit `telegram.config.ts` and restart the daemon.
 
 Next: [Configuration and more bots](configuration.md).

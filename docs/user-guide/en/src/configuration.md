@@ -1,6 +1,6 @@
 # Configuration and more bots
 
-Every setting lives in `telegram.config.ts` at the project root; [`telegram.config.example.ts`](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/telegram.config.example.ts) lists every field with comments. Run `bun run restart` (or `/tg restart` in Pi) after editing.
+Every setting lives in `telegram.config.ts` at the project root; [`telegram.config.example.ts`](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/telegram.config.example.ts) lists every field with comments. Restart the daemon after editing (`systemctl --user restart telegram-agent`, or run `bun run start` again).
 
 ## Files
 

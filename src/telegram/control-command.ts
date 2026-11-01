@@ -35,7 +35,6 @@ export interface ControlBotIdentity {
 
 export interface ControlSender {
 	id: number | null;
-	username: `@${string}` | null;
 	isBot: boolean;
 	hasSenderChat: boolean;
 }
@@ -151,10 +150,6 @@ export function parseTelegramControlCallback(
 		callbackQueryId: query.id,
 		sender: {
 			id: Number.isSafeInteger(query.from?.id) && query.from.id > 0 ? query.from.id : null,
-			username:
-				typeof query.from?.username === "string" && /^[a-z0-9_]{5,32}$/i.test(query.from.username)
-					? `@${query.from.username.toLowerCase()}`
-					: null,
 			isBot: query.from?.is_bot === true,
 			hasSenderChat: message.sender_chat != null && message.from?.is_bot !== true,
 		},
@@ -207,10 +202,6 @@ export function parseTelegramControlCommand(
 	if (typeof messageId !== "number" || !Number.isSafeInteger(messageId) || messageId <= 0) return null;
 	const from = message.from as Record<string, unknown> | undefined;
 	const senderId = typeof from?.id === "number" && Number.isSafeInteger(from.id) && from.id > 0 ? from.id : null;
-	const username =
-		typeof from?.username === "string" && /^[a-z0-9_]{5,32}$/i.test(from.username)
-			? (`@${from.username.toLowerCase()}` as `@${string}`)
-			: null;
 
 	const remainder = source.slice(entity.length);
 	const action =
@@ -223,7 +214,6 @@ export function parseTelegramControlCommand(
 		replyBotId,
 		sender: {
 			id: senderId,
-			username,
 			isBot: from?.is_bot === true,
 			hasSenderChat: message.sender_chat != null,
 		},
@@ -262,7 +252,6 @@ export class TelegramControlCommandService {
 		private readonly rootDir: string,
 		private readonly runtimes: ReadonlyMap<string, TelegramControlRuntime>,
 		private readonly admins: readonly TelegramAdmin[],
-		private readonly now: () => number = () => Date.now(),
 		private readonly models?: Pick<ModelRuntime, "getAvailableSnapshot">,
 		private readonly fire: BotFire = new BotFire(),
 	) {}
@@ -272,7 +261,7 @@ export class TelegramControlCommandService {
 		const claimed = this.claim(command);
 		this.consumeEveryRuntime(command.messageId);
 		if (!claimed) return this.result(command, null);
-		const startedAt = this.now();
+		const startedAt = Date.now();
 		if (command.edited) {
 			this.audit(command, false, "ignored_edit", startedAt);
 			return this.result(command, null);
@@ -302,7 +291,7 @@ export class TelegramControlCommandService {
 	}
 
 	private async handleCallback(command: ParsedTelegramControlCommand): Promise<TelegramControlResult> {
-		const startedAt = this.now();
+		const startedAt = Date.now();
 		const authorized = isHuman(command.sender) && this.isAdmin(command.sender);
 		const owned = this.db
 			.query(`SELECT 1 FROM telegram_control_messages c JOIN messages m USING (chat_id, message_id)
@@ -376,19 +365,16 @@ export class TelegramControlCommandService {
 	}
 
 	private async model(botId: string, data?: string): Promise<ControlExecutionResult> {
-		const bot = this.bots.find((candidate) => candidate.id === botId);
-		if (!bot || !this.models) return { text: "模型目录暂不可用。", outcome: "unavailable" };
+		const bot = this.bot(botId);
+		if (!this.models) return { text: "模型目录暂不可用。", outcome: "unavailable" };
 		const models = this.models.getAvailableSnapshot();
 		const selection = data ? /^model:s:([a-f0-9]{24})$/.exec(data) : null;
 		if (selection) {
 			const model = models.find((candidate) => modelMenuKey(candidate.provider, candidate.id) === selection[1]);
 			if (!model) return { text: "", callbackNotice: "模型已不可用，请重新发送 /model。", outcome: "unknown_model" };
-			const runtime = this.runtimes.get(botId);
-			const result = runtime
-				? await runtime.changeModelForControl(model.provider, model.id, (value) =>
-						updateBotModelConfig(this.rootDir, botId, value),
-					)
-				: { ok: false as const, code: "unavailable" as const };
+			const result = await this.runtime(botId).changeModelForControl(model.provider, model.id, (value) =>
+				updateBotModelConfig(this.rootDir, botId, value),
+			);
 			if (!result.ok) {
 				const message =
 					result.code === "image_input_unsupported"
@@ -413,9 +399,8 @@ export class TelegramControlCommandService {
 	}
 
 	private formatStatus(botId: string): ControlExecutionResult {
-		const bot = this.bots.find((candidate) => candidate.id === botId);
-		if (!bot) return { text: `未知 bot：${bounded(botId)}`, outcome: "unknown_bot" };
-		const snapshot = this.runtimes.get(bot.id)?.controlSnapshot();
+		const bot = this.bot(botId);
+		const snapshot = this.runtime(botId).controlSnapshot();
 		const view = buildBotStatusView(bot, loadBotStats(this.db, bot.id), snapshot);
 		return {
 			text: renderBotStatusPlain(view),
@@ -426,8 +411,7 @@ export class TelegramControlCommandService {
 
 	/** Button menu; a choice writes through to the config file, the only source of truth. */
 	private settings(botId: string, data?: string): ControlExecutionResult {
-		const bot = this.bots.find((candidate) => candidate.id === botId);
-		if (!bot) return { text: `未知 bot：${bounded(botId)}`, outcome: "unknown_bot" };
+		const bot = this.bot(botId);
 		if (!data) return { ...renderSettingsMenu(bot), outcome: "ok" };
 		const choice = parseSettingsChoice(data);
 		if (!choice) return { text: "", outcome: "noop" };
@@ -451,8 +435,6 @@ export class TelegramControlCommandService {
 
 	/** Scoped to the addressed bot in this chat; state lives in memory and resets on restart. */
 	private fireControl(botId: string, chatId: number, mode: FireMode): ControlExecutionResult {
-		const bot = this.bots.find((candidate) => candidate.id === botId);
-		if (!bot) return { text: `未知 bot：${bounded(botId)}`, outcome: "unknown_bot" };
 		const remaining = this.fire.status(botId, chatId);
 		if (mode === "status") {
 			return {
@@ -475,14 +457,13 @@ export class TelegramControlCommandService {
 	}
 
 	private taskStatus(botId: string): { text: string; outcome: string } {
-		const text = this.runtimes.get(botId)?.taskStatusForControl() ?? null;
+		const text = this.runtime(botId).taskStatusForControl();
 		if (text == null) return { text: `${bounded(botId)}: 这个 bot 没有开启后台任务。`, outcome: "unavailable" };
 		return { text: boundedReply(`${bounded(botId)} 的任务：\n${text}`), outcome: "ok" };
 	}
 
 	private cancelTask(botId: string, taskId: string): { text: string; outcome: string } {
-		const result =
-			this.runtimes.get(botId)?.cancelTaskForControl(taskId) ?? ({ ok: false, code: "unavailable" } as const);
+		const result = this.runtime(botId).cancelTaskForControl(taskId);
 		if (result.ok) return { text: `${bounded(botId)}: 已取消 ${taskId}。`, outcome: "ok" };
 		return {
 			text: `${bounded(botId)}: ${result.code === "unavailable" ? "这个 bot 没有开启后台任务。" : `没有正在运行的 ${taskId}。`}`,
@@ -491,8 +472,7 @@ export class TelegramControlCommandService {
 	}
 
 	private async resetBox(botId: string): Promise<{ text: string; outcome: string }> {
-		const runtime = this.runtimes.get(botId);
-		const result = runtime ? await runtime.resetBoxForControl() : ({ ok: false, code: "unavailable" } as const);
+		const result = await this.runtime(botId).resetBoxForControl();
 		if (result.ok) return { text: `${bounded(botId)}: 工作区已清空。`, outcome: "ok" };
 		return {
 			text: `${bounded(botId)}: ${result.code === "unavailable" ? "这个 bot 没有工作区。" : "清空失败，请查看日志。"}`,
@@ -501,23 +481,26 @@ export class TelegramControlCommandService {
 	}
 
 	private async compact(botId: string): Promise<{ text: string; outcome: string }> {
-		const runtime = this.runtimes.get(botId);
-		const result: ManualCompactResult = runtime
-			? await runtime.compactForControl()
-			: { ok: false, code: "unavailable" };
+		const result = await this.runtime(botId).compactForControl();
 		if (result.ok) return { text: `${bounded(botId)}: compact 完成，epoch=${result.epoch}`, outcome: "ok" };
 		return { text: `${bounded(botId)}: ${compactFailureText(result.code)}`, outcome: result.code };
 	}
 
 	private async newSession(botId: string): Promise<{ text: string; outcome: string }> {
-		const runtime = this.runtimes.get(botId);
-		const result: NewSessionResult = runtime
-			? await runtime.newSessionForControl()
-			: { ok: false, code: "unavailable" };
+		const result = await this.runtime(botId).newSessionForControl();
 		if (result.ok) return { text: `${bounded(botId)}: 已开启新会话，epoch=${result.epoch}`, outcome: "ok" };
 		const reason =
 			result.code === "busy" ? "busy，请稍后重试" : result.code === "stopping" ? "正在停止" : `失败（${result.code}）`;
 		return { text: `${bounded(botId)}: 新会话${reason}`, outcome: result.code };
+	}
+
+	/** Commands only ever address configured bots, and every configured bot has a runtime. */
+	private bot(botId: string): BotConfig {
+		return this.bots.find((candidate) => candidate.id === botId)!;
+	}
+
+	private runtime(botId: string): TelegramControlRuntime {
+		return this.runtimes.get(botId)!;
 	}
 
 	private isAdmin(sender: ControlSender): boolean {
@@ -554,7 +537,7 @@ export class TelegramControlCommandService {
 		].includes(command.action.kind)
 			? command.replyBotId
 			: null;
-		const finishedAt = this.now();
+		const finishedAt = Date.now();
 		this.db.query("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES (?, ?, ?, ?)").run(
 			command.replyBotId,
 			finishedAt,
@@ -563,7 +546,6 @@ export class TelegramControlCommandService {
 				command: command.action.kind,
 				target,
 				sender_id: command.sender.id,
-				username: command.sender.username,
 				authorized,
 				outcome,
 				duration_ms: Math.max(0, finishedAt - startedAt),
@@ -694,5 +676,4 @@ const HELP_TEXT = [
 	"/box reset 清空 bot 的工作区（每周一 05:00 也会自动清空）。",
 	"/task 列出 bot 最近的后台任务和用量，/task cancel tN 停止一个任务。",
 	`/fire 让其他 bot 的消息按正常路由触发本 bot（默认关闭、不带参数时切换），人类发言前最多连续 ${FIRE_BOT_TRIGGER_BUDGET} 次；同一部署的 bot 发言在本地路由，部署外的 bot 只在 Telegram 实际投递时生效；重启后关闭。`,
-	USAGE_TEXT,
 ].join("\n");

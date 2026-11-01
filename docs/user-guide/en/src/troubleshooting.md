@@ -17,30 +17,24 @@ pi --version
 
 If `pi` is not found, install Pi and put it on your PATH first; this project does not install it for you.
 
-## `/tg config` is missing from the menu
+## Startup reports configuration errors
 
-Make sure you ran `bun run pi` from the repository root. `/tg config` works without an existing configuration, so its absence usually means the extension was not loaded.
-
-## The wizard rejects the configuration
-
-- Field errors: fix the field named in the message (values such as tokens are not echoed).
-- Model not ready: leave the wizard, fix it with Pi `/login` and `/model`, and try again. Nothing has been written yet.
+All problem fields are listed at once with the reason (values such as tokens are not echoed). Fix `telegram.config.ts` or `.env` and restart; if the model is not ready, fix it with Pi `/login` and `/model`.
 
 ## The configuration is valid but the bot is not online
 
-```text
-/tg status-daemon
-/tg restart
+```bash
+systemctl --user status telegram-agent
 ```
 
-Then read `data/daemon.log`. Typical causes: a wrong token, no network, the bot is not in the group, the model is not in Pi's catalog, or, with `media.mode` set to `"hybrid"`, a model without image input (`image_input_unsupported`).
+Then read the log (`data/daemon.log` under systemd). Typical causes: a wrong token, no network, the bot is not in the group, the model is not in Pi's catalog, or, with `media.mode` set to `"hybrid"`, a model without image input (`image_input_unsupported`).
 
 ## The bot ignores a mention
 
 - Check that group privacy is off in BotFather and the bot is in the right group with permission to post.
 - Run `bun run debug`: `pending_reply_obligation` means the reply is still owed (it is sent on the next trigger or restart); `route_without_run` means the message was routed but no request ran, so look for `flush_failed` / `provider_attempt_failed` in the log.
 - 401: the token was revoked; fix `.env` and restart.
-- 409: another process uses the same token. Make sure only one daemon runs (do not combine systemd with `bun run start`, and do not start the same token on another machine).
+- 409: another process uses the same token. Make sure only one daemon runs (do not run another `bun run start` next to systemd, and do not start the same token on another machine).
 
 ## The bot keeps talking off-topic
 
@@ -73,10 +67,6 @@ Its context may be stuck on a misunderstanding, which summaries then carry forwa
 - Tasks fail right away: usually Pi inside the task container has no model credentials; prepare the credentials volume as described in the [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md#任务凭证卷).
 - No result for a long time: a task past `tasks.timeout_minutes` fails and the requester is told; on the host, `docker ps --filter label=tg-task` (with the `DOCKER_HOST` above) lists running tasks. A daemon restart interrupts running tasks.
 
-## A send outcome is unknown
-
-When a manual send from Pi reports an unknown outcome, the message may already have been posted. Check the group and resend only if it is not there.
-
 ## Asking for help
 
-Include the output of `bun run status`, `pi --version`, the reviewed end of the log, the failing command and bot id, and your terminal. Never share `.env`, personas, chat content, tokens or API keys.
+Include the output of `systemctl --user status telegram-agent`, `pi --version`, the reviewed end of the log, the failing command and bot id, and your terminal. Never share `.env`, personas, chat content, tokens or API keys.

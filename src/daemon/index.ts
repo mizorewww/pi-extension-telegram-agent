@@ -1,18 +1,16 @@
-// Daemon entry: long-running core. Owns SQLite, pollers, (later) agents, IPC server.
-// Started by `src/main.ts start` (detached) or directly with `bun run src/daemon/index.ts`.
+// Daemon entry: long-running core. Owns SQLite, pollers, bot runtimes and the IPC server.
+// Run as `bun run src/daemon/index.ts`, supervised by the systemd user unit (docs/runbooks/daemon.md).
 
 import { loadConfig } from "../config.ts";
-import { openDb, getDaemonState, setDaemonState } from "../db/db.ts";
+import { openDb, getDaemonState, setBotState, setDaemonState } from "../db/db.ts";
 import { BotApi } from "../telegram/api.ts";
 import { BotRuntime } from "../agent/runtime.ts";
-import { BotFire, MessageRouter } from "../agent/router.ts";
+import { type BotIdentity, BotFire, MessageRouter } from "../agent/router.ts";
 import { IpcServer } from "./ipc-server.ts";
 import { acquirePidLock, releasePidLock } from "./pid.ts";
 import type { MessageRow } from "../agent/serialize.ts";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
-import { CACHE_SCHEMA_VERSION } from "../agent/prompt.ts";
-import { ManualSendService } from "./manual-send.ts";
 import {
 	parseTelegramControlCommand,
 	parseTelegramControlCallback,
@@ -24,7 +22,8 @@ import { parsePiModelReference } from "../agent/model-ref.ts";
 import { assertPiVisionExecutorReady, createPiVisionExecutor } from "../media/vision.ts";
 import { VisionScheduler } from "../media/vision-scheduler.ts";
 import { MediaCacheQueue } from "../media/media-cache.ts";
-import { composeDeployment, composePollers } from "./composition.ts";
+import type { IngestResult } from "../telegram/ingest.ts";
+import { Poller } from "../telegram/poller.ts";
 import { applyRetention, pruneUnconfiguredBotState } from "../db/retention.ts";
 import { log } from "../observability/log.ts";
 import { inspectVideoTranscoder } from "../media/video-frames.ts";
@@ -34,9 +33,8 @@ import { TaskManager } from "../tasks/manager.ts";
 
 const rootDir = process.cwd();
 const config = loadConfig(rootDir);
-// Exclusive pid lock at the EARLIEST moment, before any slow init (getMe / model runtime /
-// session creation): a second `start` while we're still initializing must not race us
-// (REQ-OPS-0001 R4). Released on shutdown; stale pid files are taken over.
+// Exclusive pid lock before any slow init (getMe / model runtime / sessions), so a second copy
+// can never race this one onto the same tokens. Released on shutdown; stale pid files are taken over.
 acquirePidLock(config.dataDir);
 const videoTranscoder = inspectVideoTranscoder();
 // Frame sampling feeds vision descriptions and view_image.
@@ -72,8 +70,8 @@ const { sharedModelRuntime, sharedVisionExecutor } = await (async () => {
 			...(visualModel ? [{ ...visualModel, purpose: "vision" }] : []),
 		]);
 		if (config.media.mode === "hybrid") {
-			// Context and hybrid media attach image blocks; a chat model without image input would
-			// silently degrade every viewed photo/sticker/video to a bare placeholder, so fail fast.
+			// view_image attaches image blocks; a chat model without image input would silently
+			// degrade every viewed photo/sticker/video to a bare placeholder, so fail fast.
 			for (const bot of chatModels) {
 				const model = runtime.getModel(bot.provider, bot.model);
 				if (model && !model.input.includes("image")) {
@@ -159,38 +157,33 @@ const taskManager =
 				onNote: (botId, note) => runtimesForTasks.get(botId)?.recordNote(note),
 			})
 		: null;
-const composition = await composeDeployment(db, config, {
-	createApi: (bot) => new BotApi(bot.token),
-	createRuntime: async (bot, api, botApis) => {
-		const runtime = new BotRuntime(db, bot, config, sharedModelRuntime, {
-			api,
-			botApis,
-			...(sharedVisionExecutor ? { visionExecutor: sharedVisionExecutor } : {}),
-			...(visionScheduler ? { visionScheduler } : {}),
-			...(taskManager ? { tasks: taskManager } : {}),
-			videoTranscoder,
-		});
-		await runtime.init();
-		return runtime;
-	},
-	onIdentity: (bot, identity) => {
-		log.info("daemon", "bot_identity_ready", {
-			bot_id: bot.id,
-			telegram_user_id: identity.userId,
-			username: identity.username,
-		});
-	},
-});
-const { botApis, runtimes, identities, botNames, botUserIds } = composition;
-runtimesForTasks = runtimes as ReadonlyMap<string, BotRuntime>;
+const botApis = new Map(config.bots.map((bot) => [bot.id, new BotApi(bot.token)] as const));
+const identities: BotIdentity[] = [];
+for (const bot of config.bots) {
+	const me = await botApis.get(bot.id)!.getMe();
+	setBotState(db, bot.id, "bot_user_id", String(me.id));
+	setBotState(db, bot.id, "bot_username", me.username);
+	identities.push({ id: bot.id, userId: me.id, username: me.username, name: bot.name });
+	log.info("daemon", "bot_identity_ready", { bot_id: bot.id, telegram_user_id: me.id, username: me.username });
+}
+const runtimes = new Map<string, BotRuntime>();
+for (const bot of config.bots) {
+	const runtime = new BotRuntime(db, bot, config, sharedModelRuntime, {
+		api: botApis.get(bot.id)!,
+		botApis,
+		...(sharedVisionExecutor ? { visionExecutor: sharedVisionExecutor } : {}),
+		...(visionScheduler ? { visionScheduler } : {}),
+		...(taskManager ? { tasks: taskManager } : {}),
+		videoTranscoder,
+	});
+	await runtime.init();
+	runtimes.set(bot.id, runtime);
+}
+const botNames = new Map(config.bots.map((bot) => [bot.id, bot.name] as const));
+const botUserIds = new Map(identities.map((identity) => [identity.id, identity.userId] as const));
+runtimesForTasks = runtimes;
 await taskManager?.recover();
 
-// The per-bot content fingerprint rotated incompatible sessions before they were opened.
-const storedSchema = getDaemonState(db, "cache_schema_version");
-if (storedSchema !== String(CACHE_SCHEMA_VERSION)) {
-	log.info("daemon", "cache_schema_reconciled", { previous: storedSchema ?? "none", current: CACHE_SCHEMA_VERSION });
-	setDaemonState(db, "cache_schema_version", String(CACHE_SCHEMA_VERSION));
-}
 // `/fire` state shared by the control command (writer) and routing (reader); off on every start.
 const botFire = new BotFire();
 const router = new MessageRouter(
@@ -211,16 +204,8 @@ const broadcastMessageRow = (chatId: number, messageId: number): MessageRow | nu
 	if (row) ipc.broadcast(ipc.msgToItem(row));
 	return row;
 };
-const manualSend = new ManualSendService(db, config.groupChatId, botApis, ({ chatId, messageId }) => {
-	broadcastMessageRow(chatId, messageId);
-});
-ipc = new IpcServer(
-	db,
-	join(config.dataDir, "daemon.sock"),
-	botNames,
-	botUserIds,
-	(request) => manualSend.send(request),
-	(botId) => runtimes.get(botId)?.controlSnapshot(),
+ipc = new IpcServer(db, join(config.dataDir, "daemon.sock"), botNames, botUserIds, (botId) =>
+	runtimes.get(botId)?.controlSnapshot(),
 );
 const mediaCache = new MediaCacheQueue(db, botApis, {
 	cacheDir: mediaDir,
@@ -251,7 +236,7 @@ for (const [botId, rt] of runtimes) {
 		const row = broadcastMessageRow(m.chat.id, m.message_id);
 		if (!row) return; // persistence failed: nothing durable to route
 		mediaCache.scheduleMessage(botId, row);
-		// Only agent sends reach this sink; control replies and TUI manual sends never route.
+		// Only agent sends reach this sink; control replies never route.
 		router.routeLocalSend(row);
 	};
 	rt.usageSink = () => ipc.broadcastUsage(botId);
@@ -281,7 +266,6 @@ const telegramControl = new TelegramControlCommandService(
 	rootDir,
 	runtimes,
 	config.telegramAdmins,
-	undefined,
 	sharedModelRuntime,
 	botFire,
 );
@@ -313,32 +297,31 @@ for (const [botId, rt] of runtimes) {
 
 // Routing and control both run inside the poller's durable handoff: the pending dispatch is
 // only deleted after this handler returns, so a crash before claim/handle replays the update.
-const pollers = composePollers(
-	db,
-	config,
-	async (result, update, botId) => {
-		log.info("telegram_ingest", "update_committed", {
-			bot_id: botId,
-			kind: result.kind,
-			chat_id: result.chatId,
-			message_id: result.messageId,
-		});
-		if (result.chatId == null || result.messageId == null) return;
-		const row = db
-			.query("SELECT * FROM messages WHERE chat_id = ? AND message_id = ?")
-			.get(result.chatId, result.messageId) as MessageRow | null;
-		if (!row) return;
-		const command = parseTelegramControlCommand(update, botId, identities);
-		if (command) await telegramControlCoordinator.handle(command);
-		else router.route(result, row);
-		ipc.broadcast(ipc.msgToItem(row));
-		// Poller offset + canonical row are durable before this non-blocking side effect.
-		mediaCache.scheduleMessage(botId, row);
-	},
-	async (update, botId) => {
-		const command = parseTelegramControlCallback(update, botId, config.groupChatId);
-		if (command) await telegramControlCoordinator.handle(command);
-	},
+const onMessage = async (result: IngestResult, update: unknown, botId: string) => {
+	log.info("telegram_ingest", "update_committed", {
+		bot_id: botId,
+		kind: result.kind,
+		chat_id: result.chatId,
+		message_id: result.messageId,
+	});
+	if (result.chatId == null || result.messageId == null) return;
+	const row = db
+		.query("SELECT * FROM messages WHERE chat_id = ? AND message_id = ?")
+		.get(result.chatId, result.messageId) as MessageRow | null;
+	if (!row) return;
+	const command = parseTelegramControlCommand(update, botId, identities);
+	if (command) await telegramControlCoordinator.handle(command);
+	else router.route(result, row);
+	ipc.broadcast(ipc.msgToItem(row));
+	// Poller offset + canonical row are durable before this non-blocking side effect.
+	mediaCache.scheduleMessage(botId, row);
+};
+const onCallback = async (update: unknown, botId: string) => {
+	const command = parseTelegramControlCallback(update, botId, config.groupChatId);
+	if (command) await telegramControlCoordinator.handle(command);
+};
+const pollers = config.bots.map(
+	(bot) => new Poller(db, bot.id, botApis.get(bot.id)!, config.groupChatId, onMessage, onCallback),
 );
 
 let stopping = false;

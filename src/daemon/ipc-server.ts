@@ -15,8 +15,6 @@ import type {
 	VisionUpdate,
 	MediaReadyUpdate,
 	AgentStreamFrame,
-	SendMessageRequest,
-	SendMessageResult,
 	RuntimeControlSnapshot,
 } from "../ipc.ts";
 import { encodeFrame, FrameDecoder, FrameOverflowError } from "../ipc.ts";
@@ -26,8 +24,8 @@ import { loadBotStats } from "../db/usage.ts";
 
 const SNAPSHOT_LIMIT = 100;
 const HISTORY_LIMIT = 100;
-const HISTORY_LIMIT_MAX = 500; // REQ-IPC-0001 R4: server-side clamp
-const QUEUE_MAX_BYTES = 1024 * 1024; // R2: outbound queue bound; overflow kicks the listener
+const HISTORY_LIMIT_MAX = 500; // server-side clamp
+const QUEUE_MAX_BYTES = 1024 * 1024; // outbound queue bound; overflow kicks the listener
 
 interface SocketLike {
 	write: (d: string | Uint8Array, byteOffset?: number) => number;
@@ -39,7 +37,6 @@ interface OutQueue {
 	total: number;
 }
 
-export type ManualSendHandler = (request: SendMessageRequest) => Promise<SendMessageResult>;
 export type RuntimeSnapshotProvider = (botId: string) => RuntimeControlSnapshot | undefined;
 
 export class IpcServer {
@@ -51,7 +48,7 @@ export class IpcServer {
 	private listeners = new Set<SocketLike>();
 	private decoders = new Map<object, FrameDecoder>();
 	private outQueues = new Map<object, OutQueue>();
-	/** Per-listener bot filter from hello (REQ-UI-0002); null = global view. */
+	/** Per-listener bot filter from hello; null = global view. */
 	private filters = new Map<object, string | null>();
 	private encoder = new TextEncoder();
 	private server: ReturnType<typeof Bun.listen> | null = null;
@@ -61,7 +58,6 @@ export class IpcServer {
 		sockPath: string,
 		botNames: Map<string, string>,
 		botUserIds: Map<string, number>,
-		private readonly manualSend: ManualSendHandler,
 		private readonly runtimeSnapshot: RuntimeSnapshotProvider,
 	) {
 		this.db = db;
@@ -174,7 +170,7 @@ export class IpcServer {
 				},
 			},
 		});
-		// Local socket is unauthenticated: restrict to the daemon's owner (REQ-IPC-0001 R4).
+		// Local socket is unauthenticated: restrict to the daemon's owner.
 		chmodSync(this.sockPath, 0o600);
 		log.info("ipc", "listening", { socket_ready: true });
 	}
@@ -222,12 +218,12 @@ export class IpcServer {
 		});
 	}
 
-	/** Push one shared media description to every live transcript (REQ-UI-0006). */
+	/** Push one shared media description to every live transcript. */
 	broadcastVision(update: VisionUpdate): void {
 		this.broadcastTo(null, { type: "vision_update", ...update });
 	}
 
-	/** Push one owner-only local media path to every live transcript (REQ-UI-0014). */
+	/** Push one owner-only local media path to every live transcript. */
 	broadcastMediaReady(update: MediaReadyUpdate): void {
 		this.broadcastTo(null, { type: "media_ready", ...update });
 	}
@@ -261,7 +257,7 @@ export class IpcServer {
 			} satisfies ServerMessage);
 			this.writeFrame(socket, frame);
 		} else if (req.type === "history") {
-			// R4: clamp the limit server-side; a crafted 1e9 must not read the whole table.
+			// Clamp the limit server-side; a crafted 1e9 must not read the whole table.
 			const limit = Math.min(Math.max(1, Math.floor(req.limit) || HISTORY_LIMIT), HISTORY_LIMIT_MAX);
 			const cursor: TimelineCursor | null = req.before ?? null;
 			const items = this.loadTimeline(cursor, limit, this.filters.get(socket) ?? null);
@@ -269,36 +265,14 @@ export class IpcServer {
 				socket,
 				encodeFrame({ type: "history", items, hasMore: items.length >= limit } satisfies ServerMessage),
 			);
-		} else if (req.type === "send_message") {
-			void this.handleManualSend(socket, req);
 		}
-	}
-
-	private async handleManualSend(socket: SocketLike, request: SendMessageRequest): Promise<void> {
-		let result: SendMessageResult;
-		try {
-			result = await this.manualSend(request);
-		} catch (error) {
-			log.error("ipc", "manual_send_failed", { category: errorCategory(error) });
-			result = {
-				requestId: typeof request.requestId === "string" ? request.requestId : "",
-				botId: typeof request.botId === "string" ? request.botId : "",
-				ok: false,
-				code: "internal_error",
-				error: "manual Telegram send failed internally",
-			};
-		}
-		// The request may finish after the client disconnects. Persistence/broadcast remains
-		// valid, but there is no ACK destination and the client must treat that as unknown.
-		if (!this.listeners.has(socket)) return;
-		this.writeFrame(socket, encodeFrame({ type: "send_result", ...result } satisfies ServerMessage));
 	}
 
 	/**
 	 * Merged timeline (messages + agent events) strictly before `cursor` (or the newest items
 	 * when cursor is null), ascending. Order key is (ts, rank, id): rank 0 = events, 1 = messages.
 	 * Each table is queried with the cursor bound and its newest `limit` rows taken; the union's
-	 * newest `limit` must lie within them, so the merge is lossless (R3).
+	 * newest `limit` must lie within them, so the merge is lossless.
 	 */
 	private loadTimeline(cursor: TimelineCursor | null, limit: number, filter: string | null = null): TimelineItem[] {
 		const ts = cursor?.ts ?? Number.MAX_SAFE_INTEGER;
@@ -388,7 +362,7 @@ export class IpcServer {
 		};
 	}
 
-	/** Full-history cumulative stats per bot (REQ-UI-0003 R2/R3: daemon-side aggregation). */
+	/** Full-history cumulative stats per bot. */
 	private loadStats(filter: string | null): StatsSnapshot {
 		const bots = filter ? [filter] : [...this.botNames.keys()];
 		const out: StatsSnapshot = { bots: {}, statuses: {} };

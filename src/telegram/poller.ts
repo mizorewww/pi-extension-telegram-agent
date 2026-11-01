@@ -3,7 +3,7 @@
 
 import type { Database } from "bun:sqlite";
 import { errorCategory, log } from "../observability/log.ts";
-import { BotApi, TelegramApiError } from "./api.ts";
+import { type BotApi, TelegramApiError } from "./api.ts";
 import { ingestUpdate, type IngestResult } from "./ingest.ts";
 import { getBotState, setBotState } from "../db/db.ts";
 
@@ -15,7 +15,6 @@ export type MessageHandler = (result: IngestResult, update: unknown, botId: stri
 export type CallbackHandler = (update: unknown, botId: string) => Promise<void>;
 
 export class Poller {
-	private api: BotApi;
 	private botId: string;
 	private db: Database;
 	private groupChatId: number;
@@ -26,15 +25,14 @@ export class Poller {
 	constructor(
 		db: Database,
 		botId: string,
-		token: string,
+		private readonly api: BotApi,
 		groupChatId: number,
 		onMessage: MessageHandler,
-		/** Vision mode only: replay persisted media descriptions as media_update events. */
+		/** Inline-button presses (/set, /model menus). */
 		private readonly onCallback?: CallbackHandler,
 	) {
 		this.db = db;
 		this.botId = botId;
-		this.api = new BotApi(token);
 		this.groupChatId = groupChatId;
 		this.onMessage = onMessage;
 	}

@@ -22,14 +22,16 @@ bun install --frozen-lockfile
 bun run pi
 ```
 
-在打开的 Pi 里：
+在打开的 Pi 里 `/login` 登录模型 provider、`/model` 选默认模型（凭据只保存在 Pi 里）。然后写配置并启动：
 
-1. `/login` 登录模型 provider，`/model` 选默认模型（凭据只保存在 Pi 里）；
-2. `/tg config` 运行配置向导，填群 ID、token、persona。完成后 daemon 自动就绪。
+```bash
+cp telegram.config.example.ts telegram.config.ts   # 填群 ID 和 bot，每个字段都有注释
+cp personas/template.zh.md personas/friend.local.md
+echo 'telegram_bot_token: <BotFather token>' > .env
+bun run start
+```
 
-去群里 @ 你的 bot 试试，或发 `/help` 看群内命令。
-
-> Pi 的输入框没有密码遮罩，粘贴 token 时不要录屏或共享屏幕。
+在 Pi 里 `/tg attach` 看群聊，去群里 @ 你的 bot 试试，或发 `/help` 看群内命令。详见[安装与首次配置](docs/user-guide/zh/src/getting-started.md)。
 
 ## 文档
 
