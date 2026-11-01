@@ -4,7 +4,6 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 // Protocol:
 //   C->S {type:"hello"}                       S->C {type:"snapshot", items: TimelineItem[]}
 //   C->S {type:"history", before, limit}      S->C {type:"history", items, hasMore}
-//   C->S {type:"send_message", requestId,...} S->C {type:"send_result", requestId, ok,...}
 //   (push)                                    S->C {type:"append", item: TimelineItem}
 //   (push)                                    S->C {type:"vision_update", fileUniqueId, text}
 //   (push)                                    S->C {type:"media_ready", fileUniqueId, mediaPath}
@@ -184,46 +183,9 @@ interface AgentStreamBase {
 export type AgentStreamFrame = AgentStreamBase &
 	({ phase: "start" } | { phase: "update"; activity: AgentActivity } | { phase: "end" });
 
-export type SendMessageErrorCode =
-	| "invalid_request"
-	| "unknown_bot"
-	| "too_long"
-	| "request_conflict"
-	| "busy"
-	| "telegram_error"
-	| "unknown_outcome"
-	| "service_unavailable"
-	| "internal_error";
-
-export interface SendMessageSuccess {
-	requestId: string;
-	botId: string;
-	ok: true;
-	chatId: number;
-	messageId: number;
-}
-
-export interface SendMessageFailure {
-	requestId: string;
-	botId: string;
-	ok: false;
-	code: SendMessageErrorCode;
-	error: string;
-}
-
-export type SendMessageResult = SendMessageSuccess | SendMessageFailure;
-
-export interface SendMessageRequest {
-	type: "send_message";
-	requestId: string;
-	botId: string;
-	text: string;
-}
-
 export type ClientRequest =
 	| { type: "hello"; filter?: string } // filter = bot id; absent = global view (REQ-UI-0002)
-	| { type: "history"; before?: TimelineCursor; limit: number }
-	| SendMessageRequest;
+	| { type: "history"; before?: TimelineCursor; limit: number };
 
 export type ServerMessage =
 	| { type: "snapshot"; items: TimelineItem[]; stats?: StatsSnapshot }
@@ -232,8 +194,7 @@ export type ServerMessage =
 	| { type: "usage"; botId: string; stats: BotStats; status?: RuntimeControlSnapshot }
 	| ({ type: "vision_update" } & VisionUpdate)
 	| ({ type: "media_ready" } & MediaReadyUpdate)
-	| { type: "agent_stream"; stream: AgentStreamFrame }
-	| ({ type: "send_result" } & SendMessageResult);
+	| { type: "agent_stream"; stream: AgentStreamFrame };
 
 export function encodeFrame(msg: unknown): string {
 	return `${JSON.stringify(msg)}\n`;

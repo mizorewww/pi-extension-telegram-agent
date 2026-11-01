@@ -12,7 +12,6 @@ import type { MessageRow } from "../agent/serialize.ts";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { CACHE_SCHEMA_VERSION } from "../agent/prompt.ts";
-import { ManualSendService } from "./manual-send.ts";
 import {
 	parseTelegramControlCommand,
 	parseTelegramControlCallback,
@@ -210,16 +209,8 @@ const broadcastMessageRow = (chatId: number, messageId: number): MessageRow | nu
 	if (row) ipc.broadcast(ipc.msgToItem(row));
 	return row;
 };
-const manualSend = new ManualSendService(db, config.groupChatId, botApis, ({ chatId, messageId }) => {
-	broadcastMessageRow(chatId, messageId);
-});
-ipc = new IpcServer(
-	db,
-	join(config.dataDir, "daemon.sock"),
-	botNames,
-	botUserIds,
-	(request) => manualSend.send(request),
-	(botId) => runtimes.get(botId)?.controlSnapshot(),
+ipc = new IpcServer(db, join(config.dataDir, "daemon.sock"), botNames, botUserIds, (botId) =>
+	runtimes.get(botId)?.controlSnapshot(),
 );
 const mediaCache = new MediaCacheQueue(db, botApis, {
 	cacheDir: mediaDir,
@@ -250,7 +241,7 @@ for (const [botId, rt] of runtimes) {
 		const row = broadcastMessageRow(m.chat.id, m.message_id);
 		if (!row) return; // persistence failed: nothing durable to route
 		mediaCache.scheduleMessage(botId, row);
-		// Only agent sends reach this sink; control replies and TUI manual sends never route.
+		// Only agent sends reach this sink; control replies never route.
 		router.routeLocalSend(row);
 	};
 	rt.usageSink = () => ipc.broadcastUsage(botId);

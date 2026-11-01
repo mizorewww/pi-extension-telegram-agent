@@ -6,8 +6,6 @@ import {
 	type BotStats,
 	type AgentStreamFrame,
 	type MsgItem,
-	type SendMessageFailure,
-	type SendMessageResult,
 	type RuntimeControlSnapshot,
 	type ServerMessage,
 	type TimelineCursor,
@@ -15,8 +13,6 @@ import {
 } from "../ipc.ts";
 
 const MEDIA_MAX_BYTES = 1024 * 1024;
-const SEND_ACK_TIMEOUT_MS = 15_000;
-const MAX_PENDING_SENDS = 32;
 const MAX_MEDIA_UPDATES = 256;
 const MEDIA_UPDATE_TTL_MS = 10 * 60 * 1000;
 const IMAGE_MIME: Record<string, string> = {
@@ -57,12 +53,6 @@ export type TimelineEvent =
 
 export interface TimelineHooks {
 	onEvent(event: TimelineEvent): void;
-}
-
-interface PendingSend {
-	botId: string;
-	resolve(result: SendMessageResult): void;
-	timer: ReturnType<typeof setTimeout>;
 }
 
 /** Insertion-ordered map with a capacity bound and per-entry TTL; used for out-of-order media updates. */
@@ -118,7 +108,6 @@ export class TimelineClient {
 	private readonly decoder = new FrameDecoder();
 	private stats: Record<string, BotStats> = {};
 	private statuses: Record<string, RuntimeControlSnapshot> = {};
-	private readonly pendingSends = new Map<string, PendingSend>();
 	private readonly visionUpdates = new BoundedTtlMap<string>(MAX_MEDIA_UPDATES, MEDIA_UPDATE_TTL_MS);
 	private readonly mediaReadyUpdates = new BoundedTtlMap<string>(MAX_MEDIA_UPDATES, MEDIA_UPDATE_TTL_MS);
 	private oldestCursorValue: TimelineCursor | null = null;
@@ -174,20 +163,17 @@ export class TimelineClient {
 				try {
 					for (const frame of this.decoder.push(chunk)) this.handleFrame(frame as ServerMessage);
 				} catch (error) {
-					this.failPendingSends("Telegram daemon IPC failed before acknowledging the send");
 					this.hooks.onEvent({ type: "disconnected", reason: `ipc error: ${String(error)}` });
 					socket.destroy();
 				}
 			});
 			socket.once("error", (error) => {
 				this.connected = false;
-				this.failPendingSends("Telegram daemon connection failed before acknowledging the send");
 				if (!this.disposed) this.hooks.onEvent({ type: "disconnected", reason: `ipc error: ${error.message}` });
 				finish(false);
 			});
 			socket.once("close", () => {
 				this.connected = false;
-				this.failPendingSends("Telegram daemon disconnected before acknowledging the send");
 				if (!this.disposed) this.hooks.onEvent({ type: "disconnected", reason: "daemon disconnected" });
 				finish(false);
 			});
@@ -202,55 +188,10 @@ export class TimelineClient {
 		return true;
 	}
 
-	sendText(botId: string, text: string, requestId: string): Promise<SendMessageResult> {
-		if (this.disposed || !this.connected || !this.socket) {
-			return Promise.resolve(
-				this.sendFailure(requestId, botId, "service_unavailable", "Telegram daemon is not connected"),
-			);
-		}
-		if (this.pendingSends.has(requestId)) {
-			return Promise.resolve(this.sendFailure(requestId, botId, "request_conflict", "request id is already pending"));
-		}
-		if (this.pendingSends.size >= MAX_PENDING_SENDS) {
-			return Promise.resolve(this.sendFailure(requestId, botId, "busy", "too many Telegram sends are pending"));
-		}
-
-		return new Promise<SendMessageResult>((resolve) => {
-			const timer = setTimeout(() => {
-				const pending = this.pendingSends.get(requestId);
-				if (!pending) return;
-				this.pendingSends.delete(requestId);
-				pending.resolve(
-					this.sendFailure(
-						requestId,
-						botId,
-						"unknown_outcome",
-						"Telegram send acknowledgement timed out; check the group before retrying",
-					),
-				);
-			}, SEND_ACK_TIMEOUT_MS);
-			this.pendingSends.set(requestId, { botId, resolve, timer });
-			try {
-				this.socket!.write(encodeFrame({ type: "send_message", requestId, botId, text }));
-			} catch (error) {
-				this.finishPendingSend(
-					requestId,
-					this.sendFailure(
-						requestId,
-						botId,
-						"unknown_outcome",
-						`Telegram send write failed with an unknown outcome: ${String(error)}`,
-					),
-				);
-			}
-		});
-	}
-
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
 		this.connected = false;
-		this.failPendingSends("timeline client disposed before Telegram acknowledged the send");
 		this.socket?.destroy();
 		this.socket = null;
 		this.visionUpdates.clear();
@@ -259,10 +200,7 @@ export class TimelineClient {
 
 	private handleFrame(message: ServerMessage): void {
 		if (this.disposed) return;
-		if (message.type === "send_result") {
-			const { type: _type, ...result } = message;
-			this.finishPendingSend(message.requestId, result);
-		} else if (message.type === "snapshot") {
+		if (message.type === "snapshot") {
 			this.emitFresh("append", message.items);
 			if (message.stats) {
 				this.stats = message.stats.bots;
@@ -297,32 +235,6 @@ export class TimelineClient {
 		} else if (message.type === "agent_stream") {
 			this.hooks.onEvent({ type: "stream", stream: message.stream });
 		}
-	}
-
-	private finishPendingSend(requestId: string, result: SendMessageResult): void {
-		const pending = this.pendingSends.get(requestId);
-		if (!pending) return;
-		clearTimeout(pending.timer);
-		this.pendingSends.delete(requestId);
-		pending.resolve(result);
-	}
-
-	private failPendingSends(reason: string): void {
-		for (const [requestId, pending] of this.pendingSends) {
-			this.finishPendingSend(
-				requestId,
-				this.sendFailure(requestId, pending.botId, "unknown_outcome", `${reason}; check the group before retrying`),
-			);
-		}
-	}
-
-	private sendFailure(
-		requestId: string,
-		botId: string,
-		code: SendMessageFailure["code"],
-		error: string,
-	): SendMessageFailure {
-		return { requestId, botId, ok: false, code, error };
 	}
 
 	private emitFresh(type: "append" | "prepend", items: TimelineItem[]): void {

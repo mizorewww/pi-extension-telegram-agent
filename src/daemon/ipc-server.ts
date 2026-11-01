@@ -15,8 +15,6 @@ import type {
 	VisionUpdate,
 	MediaReadyUpdate,
 	AgentStreamFrame,
-	SendMessageRequest,
-	SendMessageResult,
 	RuntimeControlSnapshot,
 } from "../ipc.ts";
 import { encodeFrame, FrameDecoder, FrameOverflowError } from "../ipc.ts";
@@ -39,7 +37,6 @@ interface OutQueue {
 	total: number;
 }
 
-export type ManualSendHandler = (request: SendMessageRequest) => Promise<SendMessageResult>;
 export type RuntimeSnapshotProvider = (botId: string) => RuntimeControlSnapshot | undefined;
 
 export class IpcServer {
@@ -61,7 +58,6 @@ export class IpcServer {
 		sockPath: string,
 		botNames: Map<string, string>,
 		botUserIds: Map<string, number>,
-		private readonly manualSend: ManualSendHandler,
 		private readonly runtimeSnapshot: RuntimeSnapshotProvider,
 	) {
 		this.db = db;
@@ -269,29 +265,7 @@ export class IpcServer {
 				socket,
 				encodeFrame({ type: "history", items, hasMore: items.length >= limit } satisfies ServerMessage),
 			);
-		} else if (req.type === "send_message") {
-			void this.handleManualSend(socket, req);
 		}
-	}
-
-	private async handleManualSend(socket: SocketLike, request: SendMessageRequest): Promise<void> {
-		let result: SendMessageResult;
-		try {
-			result = await this.manualSend(request);
-		} catch (error) {
-			log.error("ipc", "manual_send_failed", { category: errorCategory(error) });
-			result = {
-				requestId: typeof request.requestId === "string" ? request.requestId : "",
-				botId: typeof request.botId === "string" ? request.botId : "",
-				ok: false,
-				code: "internal_error",
-				error: "manual Telegram send failed internally",
-			};
-		}
-		// The request may finish after the client disconnects. Persistence/broadcast remains
-		// valid, but there is no ACK destination and the client must treat that as unknown.
-		if (!this.listeners.has(socket)) return;
-		this.writeFrame(socket, encodeFrame({ type: "send_result", ...result } satisfies ServerMessage));
 	}
 
 	/**

@@ -52,8 +52,6 @@ const IDENTITY_COLORS = [
 
 type TimelineFactory = (filter: string | null, hooks: TimelineHooks) => TimelineClient;
 type FeedEntry = { instanceId: string; filter: string | null };
-type ComposeIdentity = Pick<BotConfig, "id" | "name">;
-type ComposeMode = { kind: "scope" } | { kind: "bot"; identity: ComposeIdentity };
 type ToolPresentationHost = { ui: Tui.TUI; cwd: string };
 type StatusModel = Pick<NonNullable<ExtensionContext["model"]>, "id" | "provider" | "contextWindow" | "reasoning">;
 type StatusBot = Pick<
@@ -66,12 +64,11 @@ type StatusHost = {
 	thinkingLevel?: ExtensionContext["thinkingLevel"];
 };
 
-type TgCommandDispatch = "attach" | "compose" | "more" | "detach" | "status";
+type TgCommandDispatch = "attach" | "more" | "detach" | "status";
 
 /** Every /tg subcommand; `bot` names its single optional trailing argument. */
-const TG_COMMANDS: Record<TgCommandDispatch, { description: string; bot?: "bot" | "bot|off" }> = {
+const TG_COMMANDS: Record<TgCommandDispatch, { description: string; bot?: "bot" }> = {
 	attach: { description: "Open all bots or one bot for chat", bot: "bot" },
-	compose: { description: "Use the feed scope, one bot, or Pi", bot: "bot|off" },
 	more: { description: "Load one older history page" },
 	detach: { description: "Disconnect the live feed" },
 	status: { description: "Show detailed usage", bot: "bot" },
@@ -94,14 +91,11 @@ function completeTgArguments(
 		tokens.length === 1
 			? Object.entries(TG_COMMANDS).map(([token, { description }]) => ({ token, label: token, description }))
 			: command?.bot
-				? [
-						...bots.map((bot) => ({
-							token: bot.id,
-							label: bot.name === bot.id ? bot.id : `${bot.id} (${bot.name})`,
-							description: `Telegram bot ${bot.name}`,
-						})),
-						...(command.bot === "bot|off" ? [{ token: "off", label: "off", description: "Restore Pi behavior" }] : []),
-					]
+				? bots.map((bot) => ({
+						token: bot.id,
+						label: bot.name === bot.id ? bot.id : `${bot.id} (${bot.name})`,
+						description: `Telegram bot ${bot.name}`,
+					}))
 				: [];
 	const partial = tokens.at(-1)!.toLocaleLowerCase("en");
 	const matches = candidates.filter((candidate) => candidate.token.toLocaleLowerCase("en").startsWith(partial));
@@ -125,25 +119,12 @@ function parseTgArguments(input: string): ParsedTgCommand {
 	return { ok: true, dispatch, arguments: tokens.slice(1) };
 }
 
-interface TelegramComposeIndicator {
-	text: string;
-	color: Extract<ThemeColor, "accent" | "warning" | "error">;
-}
-
-/** One-line attached-feed chrome with compose guidance kept beside its Telegram scope. */
-export function telegramFeedHeaderLine(
-	width: number,
-	theme: Pick<Theme, "fg" | "bold">,
-	scope: string,
-	composeIndicator: TelegramComposeIndicator | null,
-): string {
+/** One-line attached-feed chrome. */
+function telegramFeedHeaderLine(width: number, theme: Pick<Theme, "fg" | "bold">, scope: string): string {
 	if (width <= 0) return "";
-	const indicator = composeIndicator
-		? `${theme.fg("dim", " · ")}${theme.bold(theme.fg(composeIndicator.color, sanitize(composeIndicator.text)))}`
-		: "";
 	const text =
 		`${theme.bold(theme.fg("accent", "Telegram"))}${theme.fg("dim", ` · ${sanitize(scope)} · `)}` +
-		`${theme.fg("success", "attached")}${indicator}${theme.fg("dim", " · /tg more · /tg detach")}`;
+		`${theme.fg("success", "attached")}${theme.fg("dim", " · /tg more · /tg detach")}`;
 	return Tui.truncateToWidth(` ${text}`, width, theme.fg("dim", "..."));
 }
 
@@ -905,13 +886,10 @@ export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cw
 	const feeds = new Map<string, TelegramFeed>();
 	let pending: { data: FeedEntry; changed: (event: TimelineEvent, feed: TelegramFeed) => void } | null = null;
 	let active: TelegramFeed | null = null;
-	let compose: ComposeMode | null = null;
-	let sending = false;
 	let lastUi: ExtensionContext["ui"] | null = null;
 	let bots: BotConfig[] | undefined;
 	let requestHostRender: (() => void) | null = null;
 	let toolHost: ToolPresentationHost | undefined;
-	let composeIndicator: TelegramComposeIndicator | null = null;
 
 	/** Startup-validated config, read from disk once per process. Throws on error. */
 	const loadBots = (): BotConfig[] => {
@@ -943,64 +921,14 @@ export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cw
 	const resolveFilter = (arg: string | undefined, ui: ExtensionContext["ui"]): string | null | undefined =>
 		arg ? findBot(arg, ui)?.id : null;
 
-	const composeLabel = (bot: ComposeIdentity) => (bot.name === bot.id ? bot.id : `${bot.id} (${bot.name})`);
-	const scopeIdentities = (): ComposeIdentity[] => {
-		const identities = configuredBots();
-		return active?.filter ? identities.filter((identity) => identity.id === active?.filter) : identities;
-	};
-	const setComposeIndicator = (value: TelegramComposeIndicator | null) => {
-		if (composeIndicator?.text === value?.text && composeIndicator?.color === value?.color) return;
-		composeIndicator = value;
-		requestHostRender?.();
-	};
-	const showComposeIndicator = (busy?: { kind: "choosing" } | { kind: "sending"; identity: ComposeIdentity }) => {
-		if (!compose) {
-			setComposeIndicator(null);
-			return;
-		}
-		if (busy?.kind === "choosing") {
-			setComposeIndicator({ text: "choosing bot", color: "warning" });
-			return;
-		}
-		if (busy?.kind === "sending") {
-			setComposeIndicator({ text: `sending as ${composeLabel(busy.identity)}`, color: "warning" });
-			return;
-		}
-		if (compose.kind === "bot") {
-			setComposeIndicator({ text: `send as ${composeLabel(compose.identity)}`, color: "accent" });
-			return;
-		}
-		const identities = scopeIdentities();
-		if (identities.length === 1) {
-			setComposeIndicator({ text: `send as ${composeLabel(identities[0]!)}`, color: "accent" });
-		} else if (identities.length > 1) {
-			setComposeIndicator({ text: "choose bot on send", color: "accent" });
-		} else {
-			setComposeIndicator({ text: "send unavailable", color: "error" });
-		}
-	};
-	// Every open* creates a fresh mode object, so `compose !== mode` detects any change after an await.
-	const closeCompose = () => {
-		compose = null;
-		setComposeIndicator(null);
-	};
-	const openScopeCompose = () => {
-		compose = { kind: "scope" };
-		showComposeIndicator();
-	};
-	const openBotCompose = (identity: ComposeIdentity) => {
-		compose = { kind: "bot", identity };
-		showComposeIndicator();
-	};
 	const clearFeedUi = (ui: ExtensionContext["ui"] | null) => {
 		requestHostRender = null;
 		toolHost = undefined;
 		ui?.setWidget(FEED_WIDGET_KEY, undefined);
 		ui?.setFooter(undefined);
 	};
-	/** The one way a live feed stops: compose off, socket closed, widget/footer restored. */
+	/** The one way a live feed stops: socket closed, widget/footer restored. */
 	const teardownFeed = (ui: ExtensionContext["ui"] | null) => {
-		closeCompose();
 		active?.detach();
 		active = null;
 		clearFeedUi(ui);
@@ -1013,7 +941,7 @@ export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cw
 				requestHostRender = () => tui.requestRender();
 				toolHost = { ui: tui, cwd: ctx.cwd };
 				return {
-					render: (width) => [telegramFeedHeaderLine(width, theme, scope, composeIndicator)],
+					render: (width) => [telegramFeedHeaderLine(width, theme, scope)],
 					invalidate() {},
 				};
 			},
@@ -1058,8 +986,6 @@ export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cw
 			pending = null;
 			clearFeedUi(ctx.ui);
 			ctx.ui.notify("Pi did not mount the Telegram transcript entry", "error");
-		} else {
-			openScopeCompose();
 		}
 	};
 
@@ -1082,112 +1008,6 @@ export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cw
 		for (const feed of feeds.values()) feed.detach();
 	});
 
-	pi.on("input", async (event, ctx) => {
-		lastUi = ctx.ui;
-		if (!compose || event.source !== "interactive") return { action: "continue" };
-		const original = event.text;
-		if (event.images && event.images.length > 0) {
-			ctx.ui.setEditorText(original);
-			ctx.ui.notify("Telegram compose does not support attachments; remove them or leave compose mode", "error");
-			return { action: "handled" };
-		}
-		if (!original.trim()) {
-			ctx.ui.setEditorText(original);
-			ctx.ui.notify("Telegram message cannot be empty", "warning");
-			return { action: "handled" };
-		}
-		if (sending) {
-			ctx.ui.setEditorText(original);
-			ctx.ui.notify("A Telegram message is already being sent; this submission was not sent", "warning");
-			return { action: "handled" };
-		}
-		if (!active?.client.isConnected) {
-			closeCompose();
-			ctx.ui.setEditorText(original);
-			ctx.ui.notify("Telegram daemon is disconnected; compose mode was closed and the message was not sent", "error");
-			return { action: "handled" };
-		}
-
-		const mode = compose;
-		const feed = active;
-		const feedChanged = () => compose !== mode || active !== feed || !feed.client.isConnected;
-		sending = true;
-		try {
-			let identity: ComposeIdentity;
-			if (mode.kind === "bot") {
-				identity = mode.identity;
-			} else {
-				const identities = scopeIdentities();
-				if (identities.length === 0) {
-					ctx.ui.setEditorText(original);
-					ctx.ui.notify("No configured bot matches the active Telegram feed", "error");
-					closeCompose();
-					return { action: "handled" };
-				}
-				if (identities.length === 1) {
-					identity = identities[0]!;
-				} else {
-					showComposeIndicator({ kind: "choosing" });
-					let selected: string | undefined;
-					try {
-						selected = await ctx.ui.select("Send Telegram message as", identities.map(composeLabel));
-					} catch {
-						ctx.ui.setEditorText(original);
-						ctx.ui.notify("Telegram bot selection failed; the message was restored and was not sent", "error");
-						return { action: "handled" };
-					}
-					if (feedChanged()) {
-						ctx.ui.setEditorText(original);
-						ctx.ui.notify("Telegram feed changed while choosing a bot; the message was not sent", "warning");
-						return { action: "handled" };
-					}
-					if (selected === undefined) {
-						ctx.ui.setEditorText(original);
-						ctx.ui.notify("Telegram send canceled; the message was restored", "info");
-						return { action: "handled" };
-					}
-					const selectedIndex = identities.map(composeLabel).indexOf(selected);
-					if (selectedIndex < 0) {
-						ctx.ui.setEditorText(original);
-						ctx.ui.notify("Telegram bot selection was invalid; the message was not sent", "error");
-						return { action: "handled" };
-					}
-					identity = identities[selectedIndex]!;
-				}
-			}
-			if (feedChanged()) {
-				ctx.ui.setEditorText(original);
-				ctx.ui.notify("Telegram feed changed before sending; the message was not sent", "warning");
-				return { action: "handled" };
-			}
-			showComposeIndicator({ kind: "sending", identity });
-			const result = await feed.client.sendText(identity.id, original, randomUUID());
-			if (result.ok) {
-				ctx.ui.notify(`Telegram sent as ${composeLabel(identity)} · #${result.messageId}`, "info");
-			} else {
-				ctx.ui.setEditorText(original);
-				if (result.code === "unknown_outcome") {
-					ctx.ui.notify(
-						"Telegram send result is unknown. Check the group before retrying to avoid a duplicate.",
-						"warning",
-					);
-					if (compose === mode) closeCompose();
-				} else {
-					ctx.ui.notify(`Telegram send failed (${result.code}): ${result.error}`, "error");
-					if (result.code === "service_unavailable" && compose === mode) closeCompose();
-				}
-			}
-		} catch (error) {
-			ctx.ui.setEditorText(original);
-			ctx.ui.notify(`Telegram send result is unknown. Check the group before retrying: ${String(error)}`, "warning");
-			if (compose === mode) closeCompose();
-		} finally {
-			sending = false;
-			if (compose === mode) showComposeIndicator();
-		}
-		return { action: "handled" };
-	});
-
 	pi.registerCommand("tg", {
 		description: `Telegram: ${formatTgHelp().slice("usage: /tg ".length)}`,
 		getArgumentCompletions: (argumentPrefix) => completeTgArguments(argumentPrefix, configuredBots()),
@@ -1208,32 +1028,6 @@ export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cw
 				const filter = resolveFilter(botArg, ctx.ui);
 				if (filter === undefined) return;
 				attachFeed(filter, ctx);
-			} else if (sub === "compose") {
-				if (botArg === "off") {
-					closeCompose();
-					ctx.ui.notify("Telegram compose mode is off; editor input goes to Pi", "info");
-					return;
-				}
-				if (!active?.client.isConnected) {
-					ctx.ui.notify("no connected Telegram feed; run /tg attach first and wait for the daemon connection", "error");
-					return;
-				}
-				if (!botArg) {
-					openScopeCompose();
-					ctx.ui.notify(
-						"Telegram compose follows the active feed scope. Run /tg compose off to return to Pi.",
-						"warning",
-					);
-					return;
-				}
-				const bot = findBot(botArg, ctx.ui);
-				if (!bot) return;
-				const identity = { id: bot.id, name: bot.name };
-				openBotCompose(identity);
-				ctx.ui.notify(
-					`Telegram compose enabled: editor sends as ${composeLabel(identity)}. Run /tg compose off to return to Pi.`,
-					"warning",
-				);
 			} else if (sub === "more") {
 				if (!active?.client.isConnected) ctx.ui.notify("no connected Telegram feed; run /tg attach first", "warning");
 				else if (!active.more())
