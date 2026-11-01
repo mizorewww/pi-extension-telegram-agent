@@ -11,5 +11,5 @@
 		"lib": ["ES2023"],
 		"verbatimModuleSyntax": true
 	},
-	"include": ["src/**/*", "test/**/*", "scripts/**/*", "telegram.config.example.ts"]
+	"include": ["src/**/*", "test/**/*", "scripts/**/*", ".pi/**/*", "telegram.config.example.ts"]
 }
