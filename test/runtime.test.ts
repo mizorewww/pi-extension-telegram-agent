@@ -474,3 +474,21 @@ test("tg_post sends interim messages without answering: the obligation and turn 
 	expect(obligationCount(db)).toBe(before);
 	db.close();
 });
+
+test("a slow vision description never holds the reply past the short wait", async () => {
+	const { rt, db, sent } = setup();
+	(rt as any).config.media = { ...(rt as any).config.media, mode: "hybrid" };
+	let visionStarted = false;
+	(rt as any).ensureBatchVision = () => {
+		visionStarted = true;
+		return new Promise(() => {}); // a vision call that never returns
+	};
+	insertMessage(db, 9200, "@小雪 看看这个");
+	const started = Date.now();
+	rt.trigger("explicit", { reason: "explicit", chatId: CHAT_ID, messageId: 9200 });
+	await (rt as any).flushPromise;
+	expect(visionStarted).toBe(true);
+	expect(sent).toHaveLength(1);
+	expect(Date.now() - started).toBeLessThan(5_000);
+	db.close();
+}, 10_000);

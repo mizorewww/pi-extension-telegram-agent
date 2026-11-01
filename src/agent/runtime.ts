@@ -177,6 +177,14 @@ function structured<T extends object>(value: T) {
 	};
 }
 
+/** How long a turn waits for new media descriptions before replying without them. */
+const VISION_WAIT_MS = 2_500;
+
+const delay = (ms: number) =>
+	new Promise<void>((resolve) => {
+		setTimeout(resolve, ms).unref?.();
+	});
+
 /** Interim tg_post messages a turn may send before its final send. */
 const INTERIM_POSTS_PER_TURN = 2;
 const INTERIM_POST_MAX_CHARS = 500;
@@ -1381,7 +1389,10 @@ export class BotRuntime {
 		if (this.config.media.mode === "context") {
 			await this.ensureBatchContextMedia([...mandatory, ...normal], obligationIds);
 		} else {
-			await this.ensureBatchVision([...mandatory, ...normal], obligationIds);
+			// Descriptions get a short head start, then finish in the background and arrive later as
+			// media_update events; the reply never waits on a slow vision call (view_image covers it).
+			const vision = this.ensureBatchVision([...mandatory, ...normal], obligationIds).catch(() => {});
+			await Promise.race([vision, delay(VISION_WAIT_MS)]);
 			// Vision descriptions land as media_update events mid-scan: pick them up so the
 			// same flush already sees the fresh descriptions.
 			const postVisionHighWater = messageEventHighWater(this.db, chatId);
