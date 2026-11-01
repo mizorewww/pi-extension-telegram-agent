@@ -1,6 +1,6 @@
 # 配置与添加 bot
 
-所有设置都在项目根的 `telegram.config.ts`；仓库里的 [`telegram.config.example.ts`](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/telegram.config.example.ts) 列出了全部字段和注释。改完执行 `bun run restart`（或 Pi 里 `/tg restart`）生效。
+所有设置都在项目根的 `telegram.config.ts`；仓库里的 [`telegram.config.example.ts`](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/telegram.config.example.ts) 列出了全部字段和注释。改完重启 daemon 生效（`systemctl --user restart telegram-agent`，或重新 `bun run start`）。
 
 ## 文件
 

@@ -35,40 +35,34 @@ token 等于 bot 的密码：不要发进群、issue 或 Git。
 
 模型认证只保存在 Pi 里，不会写进本仓库。默认配置不看图，任何聊天模型都可以；之后如果把 `media.mode` 改成 `"hybrid"`，主模型必须支持图片输入。
 
-## 4. 运行 `/tg config`
+## 4. 写配置
 
-向导会先在本地确认模型可用（不会调用模型），然后依次询问：
-
-1. 中文或英文 persona 模板；
-2. 群 ID；
-3. bot 的本地 ID、显示名、`.env` 里 token 的名字、BotFather token；
-4. 最终确认。
-
-> Pi 的输入框没有密码遮罩，粘贴 token 时请确保没有在录屏或共享屏幕。
-
-任何一步按 Esc 取消都不会留下半份配置。确认后写入三个文件（都被 Git 忽略，权限 0600）：
-
-| 文件 | 内容 |
-|---|---|
-| `.env` | bot token |
-| `telegram.config.ts` | 群 ID、bot、刚确认的模型；其它设置用默认值 |
-| `personas/<bot-id>.local.md` | 这个 bot 的人格设定，随时可以编辑 |
-
-## 5. 等待就绪
-
-向导校验配置后重启 daemon，只有 daemon 明确报告 ready 才打开群聊视图。去群里 @ 你的 bot 试试，或发 `/help` 查看群内命令。
-
-如果没有就绪（通常是 token 错误、网络不通或 bot 不在群里），配置会保留，按顺序执行：
-
-```text
-/tg status-daemon
-/tg restart
+```bash
+cp telegram.config.example.ts telegram.config.ts
+cp personas/template.zh.md personas/friend.local.md
 ```
 
-仍有问题就看 `data/daemon.log` 或[故障排查](troubleshooting.md)。不需要重新填 token。
+1. 新建 `.env`，写入 bot token（`key: value` 冒号格式，不是 `KEY=value`）：
 
-## 已有配置时再次运行
+   ```text
+   telegram_bot_token: 123456789:AA...
+   ```
 
-`/tg config` 会让你选择：验证现有配置、在 Pi 编辑器里直接改 `telegram.config.ts`、备份后整体替换，或取消。替换时旧文件会以 `.bak-<随机串>` 保留。
+2. 编辑 `telegram.config.ts`：填 `group_peer_id`；删掉 `provider` 和 `model` 两行就沿用 Pi `/model` 的选择；把 bot 的 `name` 改成群里叫它的名字，`persona_path` 改成 `personas/friend.local.md`。每个字段都有注释，拼错或不认识的字段启动时会被拒绝。
+3. 在 `personas/friend.local.md` 里写这个 bot 的人格设定。
+
+这三个文件都被 Git 忽略，只放在你的机器上。
+
+## 5. 启动
+
+```bash
+bun run start
+```
+
+daemon 在前台运行，Ctrl-C 停止；长期运行请交给 systemd，见[日常运维](operations.md#启动和停止)。输出里出现 `"ready"` 后，在 Pi 里 `/tg attach` 打开群聊视图，去群里 @ 你的 bot 试试，或发 `/help` 查看群内命令。
+
+起不来时终端会给出原因，常见的是 token 错误、网络不通、bot 不在群里或所选模型不在 Pi 目录里，见[故障排查](troubleshooting.md)。
+
+之后改配置：直接编辑 `telegram.config.ts`，然后重启 daemon。
 
 下一步：[配置与添加 bot](configuration.md)。

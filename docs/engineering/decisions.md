@@ -18,7 +18,7 @@
 - **Telegram create 是不可回滚的提交点。** 只有确定性 4xx 且尚无任何提交时才把错误还给模型；其余一律结果未知、不重发。这是重复消息与漏发之间有意的取舍。
 - **概率路由 busy/cooldown 时跳过，不改投。** 改投会让概率分布依赖运行时状态，并放大调用量。
 - **最近 assistant 失败时取消阈值压缩。** provider 故障期间叠加摘要请求只会把一次故障放大成多次付费失败；overflow 恢复仍走 Pi 原生路径。
-- **pid 身份用 `/proc/<pid>/cmdline` + `cwd`，不用环境变量标记。** `environ` 是 exec 时的快照，`start --foreground`、systemd 直启都不带标记，会把真 daemon 误判为外来进程并抢锁，导致两个 poller 抢同一 token。
+- **进程只交给 systemd 托管，不自带控制器。** 自写的 start/restart 会在 systemd 之外另起一个 daemon（SIGTERM 是干净退出，systemd 不会接管），两个 poller 抢同一 token；pid 锁只剩“记录的 pid 还活着就拒绝启动”。
 - **不迁移旧数据库。** 只有一个生产 deployment 且已是当前 schema；旧库直接报错，比维护迁移阶梯更简单、更不容易出错。
 
 ## 成本

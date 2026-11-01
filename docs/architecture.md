@@ -33,7 +33,7 @@ Telegram ── poller × N ──┐
 - `routeMessageDecision` 仍是 bot 消息的唯一闸门：bot 消息先按与人类完全相同的规则选出目标；目标未开 `/fire`、额度为 0、或目标就是发送者本身时结果为 `nobody`，**不改投**别的 bot。带 `edit_date` 的 bot 消息不触发。
 - 额度 `FIRE_BOT_TRIGGER_BUDGET = 3`：只有 runtime 接受（`started` / `coalesced`）的 bot 触发才扣减，busy / cooldown 跳过不扣；任何人类消息经路由时把本群所有已开启 bot 补满，`/fire on` 也补满。
 - bot 触发的点名只是机会，不写 `reply_obligations`。
-- bot 消息只从两个入口进入同一个 `MessageRouter`（`src/agent/router.ts`）：poller 实际收到的 update；本部署 bot 的 agent `send` 成功写库后由 `sentMessageSink` 本地路由（`routeLocalSend`，route version 1）。写库失败的发送不路由；控制回复与 TUI 手动发送不经过该 sink，且登记在 `telegram_control_messages` 的 bot 消息一律不触发。同一条消息的 poller 回声或重放由 `routing_claims` 去重，不会二次 dispatch。
+- bot 消息只从两个入口进入同一个 `MessageRouter`（`src/agent/router.ts`）：poller 实际收到的 update；本部署 bot 的 agent `send` 成功写库后由 `sentMessageSink` 本地路由（`routeLocalSend`，route version 1）。写库失败的发送不路由；控制回复不经过该 sink，且登记在 `telegram_control_messages` 的 bot 消息一律不触发。同一条消息的 poller 回声或重放由 `routing_claims` 去重，不会二次 dispatch。
 - Telegram 一般不把其他 bot 的群消息投递给 bot，`/fire` 不改变任何投递；部署外的 bot 只有在 Telegram 真的投递时才能触发。
 
 ## 后台任务
@@ -131,15 +131,13 @@ Telegram create 不可回滚，所以：
 ## Pi 界面与 IPC
 
 - `/tg attach [bot]` 在 Pi transcript 里挂一个 TUI-only custom entry；消息、事件、图片用 Pi 原生组件渲染，滚动、resize、Kitty 图片由 Pi 负责。feed 内容不写 Pi session，也不进入 provider context。
-- `src/plugin/timeline.ts` 是无展示逻辑的 IPC client。协议：`hello`（可带 bot filter）→ snapshot；`history` 分页（复合游标 `(ts, rank, id)`，同秒不丢不重）；推送 `append`、`usage`（daemon 重新聚合好的整份 `BotStats`）、`vision_update`、`media_ready`、`agent_stream`；`send_message` → `send_result`。
+- `src/plugin/timeline.ts` 是无展示逻辑的 IPC client。协议：`hello`（可带 bot filter）→ snapshot；`history` 分页（复合游标 `(ts, rank, id)`，同秒不丢不重）；推送 `append`、`usage`（daemon 重新聚合好的整份 `BotStats`）、`vision_update`、`media_ready`、`agent_stream`。TUI 只观察，不能以 bot 身份发言。
 - 任务进展与系统通知除了写成 `note` 事件进入 bot 上下文，还镜像为 `note` agent event 推给 TUI（`[task t3 done] …` / `[系统] …`），只用于本地展示。
 - socket 权限 0600；接收缓冲 4 MB、出站队列 1 MB，超限断开；history limit 服务端夹到 [1, 500]；渲染前剥离 ANSI/OSC 等控制序列。
 - 未知 bot filter 直接断开，不降级为全局视图。daemon 与 extension 同仓库一起升级，不兼容新 client 连旧 daemon。
-- compose：attach 后 editor 默认发到 Telegram；ACK 丢失或断线时结果算未知，关闭 compose、恢复原文、**不自动重试**。
 
 ## 进程管理与配置
 
 - 配置只有 `telegram.config.ts`（受信本机代码，`defineConfig()` 提供类型）+ `.env`（`key: value`，只放项目自己的 secret：bot token、`tiny_fish_api_key`、可选 `router_secret`）+ Pi auth store（模型凭据）。校验一次收集全部错误，未知或已废弃的字段直接报错并提示替代写法。
-- daemon 启动最早一步用 `openSync(wx)` 独占 pid 文件；存活但无法确认身份的 pid 一律视为占用，绝不让两个 daemon 轮询同一 token。身份校验：Linux 读 `/proc/<pid>/cmdline` 与 `cwd`，macOS 用 `ps` + `lsof`，支持路径含空格。
-- CLI `restart` 会停掉本 deployment 的 pid owner 和孤儿进程，等 PID、pid 文件、socket 全部消失后才启动新进程；新 socket 能真实连接才算 ready。生产推荐 systemd user unit（见 [runbook](runbooks/daemon.md)）。
+- 进程由 systemd user unit 托管（见 [runbook](runbooks/daemon.md)），仓库不自带 start/stop 控制器；`bun run start` 只是前台运行入口。daemon 启动最早一步用 `openSync(wx)` 独占 pid 文件，记录的 pid 仍存活就拒绝启动，绝不让两个 daemon 轮询同一 token。
 - 一个工作目录只对应一个群：`data/`、DB、session、pid、socket 都由工作目录决定。多群必须用隔离的 clone。

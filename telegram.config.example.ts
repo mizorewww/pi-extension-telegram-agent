@@ -1,5 +1,5 @@
 // The single config file for this project (non-secret). Secrets live in .env (`key: value`);
-// this file only names the .env key of each bot token. Apply changes with `bun run restart`;
+// this file only names the .env key of each bot token. Restart the daemon to apply changes;
 // admin group commands (`/set`, `/model`) write back into this file. Unknown or misspelled
 // fields are rejected at startup.
 import { defineConfig } from "./src/config.ts";

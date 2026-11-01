@@ -22,14 +22,16 @@ bun install --frozen-lockfile
 bun run pi
 ```
 
-In Pi:
+In Pi, `/login` to a model provider and `/model` to pick the default model (credentials stay in Pi). Then write the configuration and start:
 
-1. `/login` to a model provider and `/model` to pick the default model (credentials stay in Pi);
-2. `/tg config` to run the setup wizard: group ID, token, persona. The daemon becomes ready when it finishes.
+```bash
+cp telegram.config.example.ts telegram.config.ts   # fill in the group ID and bot; every field is commented
+cp personas/template.en.md personas/friend.local.md
+echo 'telegram_bot_token: <BotFather token>' > .env
+bun run start
+```
 
-Mention your bot in the group to try it, or send `/help` to see the group commands.
-
-> Pi's input box does not mask passwords. Do not record or share your screen while pasting the token.
+Run `/tg attach` in Pi to watch the group, mention your bot there, or send `/help` to see the group commands. Details: [Installation and first setup](docs/user-guide/en/src/getting-started.md).
 
 ## Documentation
 

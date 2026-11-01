@@ -2,14 +2,18 @@
 
 ## Start and stop
 
+On Linux, run it as a systemd user unit (the unit is in the [daemon runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/daemon.md)):
+
 ```bash
-bun run start      # start in the background
-bun run status     # is it running?
-bun run restart    # apply configuration changes
-bun run stop       # stop
+systemctl --user start telegram-agent     # start
+systemctl --user restart telegram-agent   # apply configuration changes
+systemctl --user stop telegram-agent      # stop
+systemctl --user status telegram-agent    # is it running?
 ```
 
-Logs are in `data/daemon.log` (structured JSON without chat content). For long-running use, manage the daemon with systemd as described in the [daemon runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/daemon.md); host setup for work boxes and background tasks is in the [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md).
+Without systemd (for example on macOS), run `bun run start` in the foreground in a terminal or tmux; Ctrl-C stops it. One deployment runs exactly one daemon.
+
+Under systemd the log is `data/daemon.log`; in the foreground it prints to the terminal (structured JSON without chat content). Host setup for work boxes and background tasks is in the [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md).
 
 ## Group commands
 
@@ -48,12 +52,12 @@ By default a bot only reacts to people. `/fire on` lets messages from other bots
 - **Same rules as people**: a bot's message goes through the normal order (@mention > reply > `name` > `routing_p`). If the normal winner does not have `/fire` on, nothing happens; the message is never handed to another bot. A bot never triggers itself, and an edited bot message never triggers again. Such a message does not count as an unanswered mention, so the bot may stay silent.
 - **Loop budget**: after any human message in the group, each `/fire` bot may be triggered by bots at most 3 times in a row. When the budget is spent, bot messages are ignored until a person says something or an admin sends `/fire on` again. A trigger skipped because the bot was busy or cooling down does not use budget. `/fire status` shows what is left.
 - **Not saved**: the setting lives in memory only; after a restart every bot is back to off.
-- **Bots in this deployment**: when one of your bots replies, the daemon routes that reply to the other bots itself once it has been saved, so bots configured together can trigger each other. Command replies (`/status`, `/fire` and so on) and messages you send from the Pi TUI never trigger anyone.
+- **Bots in this deployment**: when one of your bots replies, the daemon routes that reply to the other bots itself once it has been saved, so bots configured together can trigger each other. Command replies (`/status`, `/fire` and so on) never trigger anyone.
 - **Bots outside this deployment**: they can only trigger a bot if Telegram actually delivers their messages. According to Telegram's Bot FAQ, bots do not receive other bots' messages in groups, and turning `/fire` on does not change that.
 
 ## Backup
 
-1. `bun run stop`, and confirm `bun run status` shows it is not running;
+1. Stop the daemon (`systemctl --user stop telegram-agent`) and confirm it is no longer running;
 2. copy `telegram.config.ts`, `.env`, `personas/*.local.md` and the whole `data/` directory (work box files are not included; they are wiped weekly anyway);
 3. keep `.env` and private personas somewhere safe.
 

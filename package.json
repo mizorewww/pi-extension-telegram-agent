@@ -16,6 +16,7 @@
 		"pi": "bun run scripts/pi-launcher.ts",
 		"docs:build": "bun run scripts/docs-site.ts build",
 		"docs:check": "bun run scripts/docs-site.ts check",
+		"start": "bun run src/daemon/index.ts",
 		"debug": "bun run scripts/debug-report.ts",
 		"test": "bun test",
 		"check": "tsc --noEmit",

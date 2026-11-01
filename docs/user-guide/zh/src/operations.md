@@ -2,14 +2,18 @@
 
 ## 启动和停止
 
+Linux 上用 systemd user unit 托管（unit 写法见 [daemon runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/daemon.md)）：
+
 ```bash
-bun run start      # 后台启动
-bun run status     # 查看是否在运行
-bun run restart    # 修改配置后重启
-bun run stop       # 停止
+systemctl --user start telegram-agent     # 启动
+systemctl --user restart telegram-agent   # 修改配置后重启
+systemctl --user stop telegram-agent      # 停止
+systemctl --user status telegram-agent    # 查看是否在运行
 ```
 
-日志在 `data/daemon.log`（结构化 JSON，不含聊天正文）。长期运行建议用 systemd 托管，步骤见 [daemon runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/daemon.md)；工作区和后台任务的主机准备见 [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md)。
+没有 systemd 的机器（例如 macOS）在终端或 tmux 里 `bun run start` 前台运行，Ctrl-C 停止。同一份部署只能跑一个 daemon。
+
+systemd 下日志在 `data/daemon.log`，前台运行时直接打印在终端（结构化 JSON，不含聊天正文）。工作区和后台任务的主机准备见 [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md)。
 
 ## 群内命令
 
@@ -48,12 +52,12 @@ bun run stop       # 停止
 - **规则与人类相同**：bot 的消息按正常顺序路由（@ > 回复 > `name` > `routing_p`）。正常选中的 bot 没开 `/fire` 时什么都不发生，**不会**改投给别的 bot。bot 永远不会被自己的消息触发，bot 编辑消息也不会再次触发。这类触发不算待回复的点名，bot 可以选择不说话。
 - **防循环额度**：群里每出现一条人类消息后，每个开了 `/fire` 的 bot 最多被 bot 连续触发 3 次。额度用完后忽略 bot 消息，直到有人发言或管理员再次发送 `/fire on`。因 bot 正忙或冷却而跳过的触发不消耗额度。`/fire status` 显示剩余次数。
 - **不持久化**：设置只保存在内存里，重启后所有 bot 恢复关闭。
-- **同一部署的 bot**：你的某个 bot 发言并保存成功后，daemon 会在本地把这条消息交给其他 bot 路由，所以一起配置的 bot 可以互相触发。命令回复（`/status`、`/fire` 等）和你在 Pi TUI 里手动发送的消息永远不会触发任何 bot。
+- **同一部署的 bot**：你的某个 bot 发言并保存成功后，daemon 会在本地把这条消息交给其他 bot 路由，所以一起配置的 bot 可以互相触发。命令回复（`/status`、`/fire` 等）永远不会触发任何 bot。
 - **部署之外的 bot**：只有 Telegram 真的把它们的消息投递过来才能触发。按 Telegram Bot FAQ，群里的 bot 收不到其他 bot 的消息，开启 `/fire` 不会改变这一点。
 
 ## 备份
 
-1. `bun run stop`，确认 `bun run status` 显示未运行；
+1. 停掉 daemon（`systemctl --user stop telegram-agent`），确认它已不在运行；
 2. 复制 `telegram.config.ts`、`.env`、`personas/*.local.md` 和整个 `data/`（工作区里的文件不在备份范围内，它们本来就会每周清空）；
 3. `.env` 和私有 persona 放在安全的位置。
 

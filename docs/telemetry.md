@@ -1,6 +1,6 @@
 # 用量与状态口径
 
-Pi `/tg status`、Telegram `/status` 与 attached footer 的字段含义、公式和数据来源。三者必须从同一份数据、同一组函数得到数值，只是渲染不同。
+Pi `/tg status`、Telegram `/status` 与 attached 状态栏的字段含义、公式和数据来源。三者必须从同一份数据、同一组函数得到数值，只是渲染不同。
 
 ## 数据来源
 
@@ -41,10 +41,10 @@ Pi `/tg status`、Telegram `/status` 与 attached footer 的字段含义、公�
 
 ## 实时推送
 
-每写入或更新一行 `llm_runs`（包括 send 耗时回填），daemon 立即用 `loadBotStats` 重新聚合该 bot，通过 IPC `usage` 帧推送整份 `BotStats`（附带当前 runtime snapshot）。客户端只替换，不自行累加，因此 footer 与 `/tg status` 永远一致。
+每写入或更新一行 `llm_runs`（包括 send 耗时回填），daemon 立即用 `loadBotStats` 重新聚合该 bot，通过 IPC `usage` 帧推送整份 `BotStats`（附带当前 runtime snapshot）。客户端只替换，不自行累加，因此状态栏与 `/tg status` 永远一致。
 
-## Footer
+## 状态栏
 
-attached 期间用 Pi 官方 `ctx.ui.setFooter` 显示与 Pi 原生 footer 相同顺序的信息：第一行路径/分支/session 名；第二行左侧累计 `↑ ↓ R W CH $` 与最近主对话的 `context%/window`，右侧 `(provider) model • reasoning`。全局 feed 汇总所有已配置 bot，模型取最新主对话所属的 bot。该 bot 最新一条 run 比最近主对话更新（刚压缩过）时，context 显示 `?`。detach 后恢复 Pi 默认 footer。
+attached 期间用 Pi 的 `ctx.ui.setStatus("telegram", …)` 在 Pi 原生 footer 的状态行里显示一行：累计 `↑ ↓`、`CH`、`$`、最近主对话的 `ctx %/window` 和 `model • reasoning`，每个 `usage` 帧刷新。全局 feed 汇总所有已配置 bot，模型取最新主对话所属的 bot；该 bot 最新一条 run 比最近主对话更新（刚压缩过）时，context 显示 `?`。detach 后清除。
 
 查看遥测不调用 provider，不改变 session 或 provider payload。
