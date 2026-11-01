@@ -133,3 +133,16 @@ test("file sends upload as multipart: one photo, or an album with the reply on i
 		globalThis.fetch = original;
 	}
 });
+
+test("sh_exec merges stderr without breaking a command that ends in a heredoc", async () => {
+	let script = "";
+	const docker: DockerRunner = async (args) => {
+		if (args[0] === "inspect")
+			return { code: 0, stdout: new TextEncoder().encode("true"), stderr: "", timedOut: false };
+		script = args.at(-1)!;
+		return { code: 0, stdout: new Uint8Array(), stderr: "", timedOut: false };
+	};
+	await new WorkBox("A", CONFIG, docker).exec("python3 - <<'EOF'\nprint(1)\nEOF");
+	expect(script.startsWith("exec 2>&1\n")).toBe(true);
+	expect(script.endsWith("\nEOF")).toBe(true);
+});

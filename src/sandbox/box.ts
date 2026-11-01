@@ -189,7 +189,8 @@ export class WorkBox {
 				String(seconds),
 				"sh",
 				"-c",
-				`${command} 2>&1`,
+				// stderr joins stdout from a leading line: a suffix would break commands ending in a heredoc.
+				`exec 2>&1\n${command}`,
 			],
 			(seconds + 10) * 1000,
 			undefined,
