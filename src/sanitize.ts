@@ -1,4 +1,4 @@
-// Terminal-safe text sanitization for TUI rendering (REQ-IPC-0001 R5).
+// Terminal-safe text sanitization for TUI rendering.
 // Group content (messages, usernames, sticker names, event payloads) is attacker-influenced:
 // ANSI/OSC/DCS escape sequences could clear the screen, recolor text or write the clipboard
 // (OSC 52) on the observer's terminal. \n and \t survive; everything else control-ish is removed.

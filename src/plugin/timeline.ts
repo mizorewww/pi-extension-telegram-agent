@@ -13,8 +13,6 @@ import {
 } from "../ipc.ts";
 
 const MEDIA_MAX_BYTES = 1024 * 1024;
-const MAX_MEDIA_UPDATES = 256;
-const MEDIA_UPDATE_TTL_MS = 10 * 60 * 1000;
 const IMAGE_MIME: Record<string, string> = {
 	png: "image/png",
 	jpg: "image/jpeg",
@@ -55,41 +53,7 @@ export interface TimelineHooks {
 	onEvent(event: TimelineEvent): void;
 }
 
-/** Insertion-ordered map with a capacity bound and per-entry TTL; used for out-of-order media updates. */
-class BoundedTtlMap<V> {
-	private readonly entries = new Map<string, { value: V; expiresAt: number }>();
-
-	constructor(
-		private readonly max: number,
-		private readonly ttlMs: number,
-	) {}
-
-	get(key: string): V | undefined {
-		const entry = this.entries.get(key);
-		return entry && entry.expiresAt > Date.now() ? entry.value : undefined;
-	}
-
-	/** Returns false when the key already holds the same live value. */
-	set(key: string, value: V): boolean {
-		const now = Date.now();
-		for (const [existingKey, entry] of this.entries) if (entry.expiresAt <= now) this.entries.delete(existingKey);
-		const existing = this.entries.get(key);
-		if (existing?.value === value) return false;
-		if (!existing && this.entries.size >= this.max) {
-			const oldest = this.entries.keys().next().value as string | undefined;
-			if (oldest) this.entries.delete(oldest);
-		}
-		this.entries.delete(key);
-		this.entries.set(key, { value, expiresAt: now + this.ttlMs });
-		return true;
-	}
-
-	clear(): void {
-		this.entries.clear();
-	}
-}
-
-/** Dedupe key shared by the timeline client and the feed renderer. */
+/** Identity of one timeline item: the client dedupes on it and the feed keys its cards by it. */
 export function itemKey(item: TimelineItem): string {
 	return item.kind === "msg" ? `m:${item.chatId}:${item.messageId}` : `e:${item.evtId}`;
 }
@@ -108,8 +72,6 @@ export class TimelineClient {
 	private readonly decoder = new FrameDecoder();
 	private stats: Record<string, BotStats> = {};
 	private statuses: Record<string, RuntimeControlSnapshot> = {};
-	private readonly visionUpdates = new BoundedTtlMap<string>(MAX_MEDIA_UPDATES, MEDIA_UPDATE_TTL_MS);
-	private readonly mediaReadyUpdates = new BoundedTtlMap<string>(MAX_MEDIA_UPDATES, MEDIA_UPDATE_TTL_MS);
 	private oldestCursorValue: TimelineCursor | null = null;
 	private socket: Socket | null = null;
 	private connected = false;
@@ -194,8 +156,6 @@ export class TimelineClient {
 		this.connected = false;
 		this.socket?.destroy();
 		this.socket = null;
-		this.visionUpdates.clear();
-		this.mediaReadyUpdates.clear();
 	}
 
 	private handleFrame(message: ServerMessage): void {
@@ -219,17 +179,13 @@ export class TimelineClient {
 			this.emitStats();
 		} else if (message.type === "vision_update") {
 			const text = message.text.trim();
-			if (message.fileUniqueId && text && this.visionUpdates.set(message.fileUniqueId, text)) {
+			// Every update follows its message's append; older pages read descriptions fresh from SQLite.
+			if (message.fileUniqueId && text) {
 				this.hooks.onEvent({ type: "vision", fileUniqueId: message.fileUniqueId, text });
 			}
 		} else if (message.type === "media_ready") {
 			const { fileUniqueId, mediaPath } = message;
-			if (
-				fileUniqueId &&
-				mediaPath &&
-				!mediaPath.includes("\0") &&
-				this.mediaReadyUpdates.set(fileUniqueId, mediaPath)
-			) {
+			if (fileUniqueId && mediaPath && !mediaPath.includes("\0")) {
 				this.hooks.onEvent({ type: "media", fileUniqueId, mediaPath });
 			}
 		} else if (message.type === "agent_stream") {
@@ -238,25 +194,16 @@ export class TimelineClient {
 	}
 
 	private emitFresh(type: "append" | "prepend", items: TimelineItem[]): void {
-		const fresh = items
-			.filter((item) => {
-				const key = itemKey(item);
-				if (this.seen.has(key)) return false;
-				this.seen.add(key);
-				const cursor = cursorOf(item);
-				if (!this.oldestCursorValue || compareCursor(cursor, this.oldestCursorValue) < 0) {
-					this.oldestCursorValue = cursor;
-				}
-				return true;
-			})
-			.map((item) => {
-				if (item.kind !== "msg" || !item.fileUniqueId) return item;
-				const vision = this.visionUpdates.get(item.fileUniqueId);
-				const media = this.mediaReadyUpdates.get(item.fileUniqueId);
-				return vision || media
-					? { ...item, ...(vision ? { mediaDesc: vision } : {}), ...(media ? { mediaPath: media } : {}) }
-					: item;
-			});
+		const fresh = items.filter((item) => {
+			const key = itemKey(item);
+			if (this.seen.has(key)) return false;
+			this.seen.add(key);
+			const cursor = cursorOf(item);
+			if (!this.oldestCursorValue || compareCursor(cursor, this.oldestCursorValue) < 0) {
+				this.oldestCursorValue = cursor;
+			}
+			return true;
+		});
 		if (fresh.length > 0) this.hooks.onEvent({ type, items: fresh });
 	}
 

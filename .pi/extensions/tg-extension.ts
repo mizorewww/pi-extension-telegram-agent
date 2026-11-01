@@ -561,7 +561,6 @@ class TelegramFeed extends Tui.Container {
 	private readonly content = new Tui.Container();
 	private readonly streamContent = new Tui.Container();
 	private readonly items: TimelineItem[] = [];
-	private readonly itemKeys = new Set<string>();
 	private readonly cardSlots = new Map<string, Tui.Container>();
 	private readonly streams = new Map<string, Extract<AgentStreamFrame, { phase: "update" }>>();
 	private readonly endedStreams = new Set<string>();
@@ -606,15 +605,11 @@ class TelegramFeed extends Tui.Container {
 
 	private onEvent(event: TimelineEvent): void {
 		if (event.type === "append") {
-			const fresh = event.items.filter((item) => this.rememberItem(item));
-			this.items.push(...fresh);
-			this.appendItems(fresh);
+			this.items.push(...event.items);
+			this.appendItems(event.items);
 		} else if (event.type === "prepend") {
-			const fresh = event.items.filter((item) => this.rememberItem(item));
-			if (fresh.length > 0) {
-				this.items.unshift(...fresh);
-				this.rebuildItems();
-			}
+			this.items.unshift(...event.items);
+			this.rebuildItems();
 		} else if (event.type === "stats") {
 			this.statsValue = event.stats;
 			this.statusesValue = event.statuses;
@@ -632,13 +627,6 @@ class TelegramFeed extends Tui.Container {
 			this.clearStreams();
 		}
 		this.changed(event, this);
-	}
-
-	private rememberItem(item: TimelineItem): boolean {
-		const key = itemKey(item);
-		if (this.itemKeys.has(key)) return false;
-		this.itemKeys.add(key);
-		return true;
 	}
 
 	private appendItems(items: TimelineItem[]): void {

@@ -44,10 +44,12 @@ export class TelegramControlCoordinator {
 		private readonly db: Database,
 		private readonly commands: TelegramControlCommandPort,
 		private readonly apis: ReadonlyMap<string, TelegramControlApi>,
-		private readonly onSent?: (message: TelegramControlReplyNotification) => void,
-		private readonly warn: (operation: string, fields: Record<string, unknown>) => void = (operation, fields) =>
-			log.warn("telegram_control", "operation_failed", { operation, ...fields }),
+		private readonly onSent: (message: TelegramControlReplyNotification) => void,
 	) {}
+
+	private warn(operation: string, fields: Record<string, unknown>): void {
+		log.warn("telegram_control", "operation_failed", { operation, ...fields });
+	}
 
 	async handle(command: ParsedTelegramControlCommand): Promise<TelegramControlDeliveryResult> {
 		let result: TelegramControlResult;
@@ -64,11 +66,8 @@ export class TelegramControlCoordinator {
 			return this.editMenu(command, result);
 		}
 		if (result.text == null) return { outcome: "no_reply" };
-		const api = this.apis.get(result.replyBotId);
-		if (!api) {
-			this.warn("reply", { bot_id: result.replyBotId, message_id: result.replyToMessageId, category: "unknown_bot" });
-			return { outcome: "failed", category: "unknown_bot" };
-		}
+		// Every configured bot has an API client; commands only address configured bots.
+		const api = this.apis.get(result.replyBotId)!;
 
 		try {
 			const { canonical } = result.markdown
@@ -100,15 +99,7 @@ export class TelegramControlCoordinator {
 					category: localFailureCategory(error),
 				});
 			}
-			try {
-				this.onSent?.({ botId: result.replyBotId, chatId: canonical.chat_id, messageId: canonical.message_id });
-			} catch {
-				this.warn("reply_broadcast", {
-					bot_id: result.replyBotId,
-					message_id: canonical.message_id,
-					category: "local_failure",
-				});
-			}
+			this.onSent({ botId: result.replyBotId, chatId: canonical.chat_id, messageId: canonical.message_id });
 			return { outcome: "sent", botId: result.replyBotId, chatId: canonical.chat_id, messageId: canonical.message_id };
 		} catch (error) {
 			const category =
@@ -122,7 +113,7 @@ export class TelegramControlCoordinator {
 
 	private async answerCallback(command: ParsedTelegramControlCommand, notice?: string): Promise<void> {
 		try {
-			await this.apis.get(command.replyBotId)?.answerCallbackQuery(command.callbackQueryId!, notice);
+			await this.apis.get(command.replyBotId)!.answerCallbackQuery(command.callbackQueryId!, notice);
 		} catch {
 			this.warn("callback_answer", {
 				bot_id: command.replyBotId,
@@ -136,17 +127,12 @@ export class TelegramControlCoordinator {
 		command: ParsedTelegramControlCommand,
 		result: TelegramControlResult,
 	): Promise<TelegramControlDeliveryResult> {
-		const api = this.apis.get(result.replyBotId);
-		if (!api) return { outcome: "failed", category: "unknown_bot" };
 		try {
-			const raw = await api.editMessageText(
-				result.chatId,
-				command.messageId,
-				result.text!,
-				result.replyMarkup ?? { inline_keyboard: [] },
-			);
+			const raw = await this.apis
+				.get(result.replyBotId)!
+				.editMessageText(result.chatId, command.messageId, result.text!, result.replyMarkup ?? { inline_keyboard: [] });
 			await retrySqliteBusy(() => persistEditedControlMessage(this.db, raw));
-			this.onSent?.({ botId: result.replyBotId, chatId: result.chatId, messageId: command.messageId });
+			this.onSent({ botId: result.replyBotId, chatId: result.chatId, messageId: command.messageId });
 			return { outcome: "sent", botId: result.replyBotId, chatId: result.chatId, messageId: command.messageId };
 		} catch {
 			this.warn("menu_edit", { bot_id: command.replyBotId, message_id: command.messageId, category: "request_failed" });
@@ -172,17 +158,13 @@ export const TELEGRAM_CONTROL_MENU = [
 ] as const;
 
 /** Startup capability only: every bot attempts the same menu, failures never block polling. */
-export async function publishTelegramControlMenus(
-	apis: ReadonlyMap<string, TelegramMenuApi>,
-	warn: (fields: Record<string, unknown>) => void = (fields) =>
-		log.warn("telegram_control", "menu_publish_failed", fields),
-): Promise<void> {
+export async function publishTelegramControlMenus(apis: ReadonlyMap<string, TelegramMenuApi>): Promise<void> {
 	await Promise.all(
 		[...apis].map(async ([botId, api]) => {
 			try {
 				await api.setMyCommands(TELEGRAM_CONTROL_MENU);
 			} catch {
-				warn({ bot_id: botId, category: "request_failed" });
+				log.warn("telegram_control", "menu_publish_failed", { bot_id: botId, category: "request_failed" });
 			}
 		}),
 	);

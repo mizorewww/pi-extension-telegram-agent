@@ -88,7 +88,7 @@ console.log("[e2e] latest bot message in transcript:", JSON.stringify(sent));
 
 await rt.stop();
 db.close();
-// REQ-TEST-0001 R4: exit code reflects the result — a run that never happened (or an
+// exit code reflects the result — a run that never happened (or an
 // exception path) must not silently pass.
 if (!settled && !ranOnce) {
 	console.error(`[e2e] FAIL: no agent run completed within 120s (${bot.provider} error or wiring broken)`);
