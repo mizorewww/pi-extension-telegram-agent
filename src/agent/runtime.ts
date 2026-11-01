@@ -110,6 +110,7 @@ import {
 	DEFAULT_TOOL_FOLLOWUP_RESERVE,
 	estimateProviderTokensUpperBound,
 	packMessageEvents,
+	type PackedMessageEvents,
 } from "./token-packer.ts";
 import {
 	estimateCacheReadFromPrefix,
@@ -190,6 +191,24 @@ function steeredVisibleIds(entries: readonly SessionEntry[], turnHighWater: numb
 		)
 			for (const id of entry.details.visibleMessageIds) ids.add(id);
 	return ids;
+}
+
+/**
+ * One packed batch as a Telegram context message. Its content is the rendered text; the sticker
+ * note stays in details and is projected after the batch, so compaction never reads it.
+ */
+function batchMessage(
+	packed: Pick<PackedMessageEvents, "text" | "visibleMessageIds">,
+	consumedSeq: number,
+	stickerCandidates: string,
+) {
+	const details: TelegramContextDetails = {
+		version: TELEGRAM_CONTEXT_VERSION,
+		consumedSeq,
+		stickerCandidates,
+		visibleMessageIds: packed.visibleMessageIds,
+	};
+	return { customType: TELEGRAM_CONTEXT_TYPE, content: packed.text, display: false, details };
 }
 
 /** How long a turn waits for new media descriptions before replying without them. */
@@ -1398,12 +1417,7 @@ export class BotRuntime {
 		const consumedControl = consumedControlMessageIds(this.db, chatId);
 		const obligationIds = new Set(obligations.map((obligation) => obligation.messageId));
 		const ordinaryEvents = (): MessageEvent[] =>
-			recent.filter(
-				(event) =>
-					!consumedControl.has(event.messageId) &&
-					!obligationIds.has(event.messageId) &&
-					!(event.kind === "message" && this.visibleMessageIds.has(event.messageId)),
-			);
+			this.unseenEvents(recent, consumedControl).filter((event) => !obligationIds.has(event.messageId));
 		const requiredEvents = (): MessageEvent[] => {
 			const seen = new Set<number>();
 			const result: MessageEvent[] = [];
@@ -1486,17 +1500,8 @@ export class BotRuntime {
 			? estimateProviderTokensUpperBound(`\n\n${boundedStickerCandidates}`)
 			: 0;
 
-		// Persisted content is pure message bytes. The batch's sticker note lives only in
-		// details.stickerCandidates and reaches the provider as a separate projected message after
-		// this batch; compaction reads persisted content directly and never sees it.
 		const selectedIds = new Set(packed.visibleMessageIds);
 		const delivered = obligations.filter((obligation) => selectedIds.has(obligation.messageId));
-		const details: TelegramContextDetails = {
-			version: TELEGRAM_CONTEXT_VERSION,
-			consumedSeq: highWater,
-			stickerCandidates: boundedStickerCandidates,
-			visibleMessageIds: packed.visibleMessageIds,
-		};
 		this.currentTriggerMessageId ??= delivered[0]?.messageId ?? packed.events.at(-1)?.messageId ?? null;
 		this.pendingInputMetrics = {
 			inputEvents: packed.events.length,
@@ -1514,10 +1519,9 @@ export class BotRuntime {
 		try {
 			// While streaming, Pi would only queue the batch as steering and return at once.
 			if (this.session.isStreaming) throw new Error("session is already streaming");
-			await this.session.sendCustomMessage(
-				{ customType: TELEGRAM_CONTEXT_TYPE, content: packed.text, display: false, details },
-				{ triggerTurn: true },
-			);
+			await this.session.sendCustomMessage(batchMessage(packed, highWater, boundedStickerCandidates), {
+				triggerTurn: true,
+			});
 		} catch (error) {
 			await this.endSteering();
 			this.reconcileContextStateFromSession();
@@ -1936,14 +1940,12 @@ export class BotRuntime {
 			const owed = new Set(
 				listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN).map((o) => o.messageId),
 			);
-			const consumedControl = consumedControlMessageIds(this.db, chatId);
-			const events = eventsForBot(
-				listRecentMessageEvents(this.db, chatId, turn.steeredThrough, through, MAX_EVENT_SCAN),
-				this.bot.id,
-			).filter(
-				(event) =>
-					!consumedControl.has(event.messageId) &&
-					!(event.kind === "message" && this.visibleMessageIds.has(event.messageId)),
+			const events = this.unseenEvents(
+				eventsForBot(
+					listRecentMessageEvents(this.db, chatId, turn.steeredThrough, through, MAX_EVENT_SCAN),
+					this.bot.id,
+				),
+				consumedControlMessageIds(this.db, chatId),
 			);
 			if (!events.some((event) => owed.has(event.messageId))) return;
 			const packed = packMessageEvents(
@@ -1954,21 +1956,21 @@ export class BotRuntime {
 				this.bot.maxMessageTokens,
 			);
 			if (!packed.text.trim()) return;
-			const details: TelegramContextDetails = {
-				version: TELEGRAM_CONTEXT_VERSION,
-				consumedSeq: through,
-				stickerCandidates: "",
-				visibleMessageIds: packed.visibleMessageIds,
-			};
 			// reply_to may target the new messages as soon as the model can see them.
 			for (const id of packed.visibleMessageIds) this.visibleMessageIds.add(id);
-			await this.session.sendCustomMessage(
-				{ customType: TELEGRAM_CONTEXT_TYPE, content: packed.text, display: false, details },
-				{ deliverAs: "steer" },
-			);
+			await this.session.sendCustomMessage(batchMessage(packed, through, ""), { deliverAs: "steer" });
 			turn.steeredThrough = through;
 			log.info("agent_runtime", "turn_steered", { bot_id: this.bot.id, input_events: packed.events.length });
 		});
+	}
+
+	/** Events not yet in this context: control commands and already-visible messages drop out. */
+	private unseenEvents(events: readonly MessageEvent[], consumedControl: ReadonlySet<number>): MessageEvent[] {
+		return events.filter(
+			(event) =>
+				!consumedControl.has(event.messageId) &&
+				!(event.kind === "message" && this.visibleMessageIds.has(event.messageId)),
+		);
 	}
 
 	/** Close steering for the turn and drop batches Pi never delivered; the next flush reads them. */
