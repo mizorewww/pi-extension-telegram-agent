@@ -22,7 +22,7 @@ A bot's abilities come in two layers: the basics every bot has, and tools you sw
 A few notes:
 
 - Links in the group are never opened automatically; a bot reads one only when it decides to use `search`.
-- codemode scripts run in a sandbox with no network or file system, and cannot post for the bot; running real commands is what the `sandbox` work box is for.
+- codemode scripts run in a sandbox with no network or file system; a script can call `send` to post a quick reply and keep working, and running real commands is what the `sandbox` work box is for.
 - The work box is wiped every Monday at 05:00, and an admin can `/box reset` it at any time.
 - When a background task starts, the bot first tells you it is on it. Progress, questions for you and the final result are relayed by the bot; the task itself never sees the group.
 

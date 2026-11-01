@@ -74,7 +74,7 @@ tools: { send: true, search: false, codemode: false, sandbox: false, tasks: fals
 |---|---|---|
 | `send` | post in the group, send stickers, add reactions; turn it off for a bot that only watches | nothing |
 | `search` | web search (up to 5 snippets) or read one public page, paging through long ones; localhost and private addresses are refused | `tiny_fish_api_key` in `.env` |
-| `codemode` | the bot writes JavaScript scripts (Pi's native QuickJS sandbox) for exact calculations, to call other tools in bulk and filter the results, and to search the group's whole message history. Scripts have no network or file system and cannot post for the bot | nothing |
+| `codemode` | the bot writes JavaScript scripts (Pi's native QuickJS sandbox) for exact calculations, to call other tools in bulk and filter the results, and to search the group's whole message history. Scripts have no network or file system, and can call `send` | nothing |
 | `sandbox` | the bot's own Linux work box (a Docker container): run commands from scripts and copy in files people send; `send` can post images (jpg/png/webp up to 10 MB) and files (up to 50 MB) from the box straight to the group | `codemode: true`, a top-level `sandbox` section, rootless Docker on the host |
 | `tasks` | hand long searches and research to a background task and reply to the requester when it is done | `sandbox: true`, a top-level `tasks` section |
 

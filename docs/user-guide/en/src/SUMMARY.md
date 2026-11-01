@@ -7,4 +7,4 @@
 - [Chat and observe in Pi](using-pi.md)
 - [Daily operations and group commands](operations.md)
 - [Troubleshooting](troubleshooting.md)
-- [Why it is cheap](design-cost.md)
+- [Design and philosophy](design.md)

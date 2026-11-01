@@ -8,7 +8,8 @@
 - **扩展抛异常时 Pi 会退回默认摘要器。** 所以 `tg-compaction` 的任何失败都返回 `{ cancel: true }`，绝不 throw（`handleBeforeCompact`）。
 - **图片预算必须在 Pi 准备压缩之前换算。** 文字小于预算时 Pi 在触发 `session_before_compact` 之前就返回，钩子来不及；所以在 `agent_end` / `compact()` 前临时调整 `keepRecentTokens`。
 - **升级 Pi 时复核的行为差异。** `COMPACTION_SUMMARY_PREFIX` 不再导出（`src/agent/extensions/cache-observer.ts` 的本地常量）；`context` handler 收不到 system message；扩展的 `Image` 组件由 Pi 宿主把非 PNG 转成 Kitty 可用格式；`before_agent_start` 也会在 `sendMessage(..., { triggerTurn: true })` 启动的 run 上触发，本仓库只经 `session.prompt()` 启动 turn，`tg-context` handler 不读事件字段。
-- **脚本执行用 Pi 原生 codemode，不自建沙箱。** 自建的 `run_js`（子进程 + bubblewrap）已删除；QuickJS VM 的边界由 Pi 维护，本仓库只加宿主侧约束（结果上限、脚本图片不进 session、`send` 为 model-only）。需要真实命令行时走每 bot 的 rootless Docker 工作区，而不是放宽 VM。
+- **脚本执行用 Pi 原生 codemode，不自建沙箱。** 自建的 `run_js`（子进程 + bubblewrap）已删除；QuickJS VM 的边界由 Pi 维护，本仓库只加宿主侧约束（脚本图片不进 session；脚本里的 `send` 不结束本轮）。需要真实命令行时走每 bot 的 rootless Docker 工作区，而不是放宽 VM。
+- **2026-11-01 审计确认仍需自写、不能换成 Pi 的部分**：摘要器（Pi 模板固定英文、不收图、保留 thinking）、`provider-guard`（Pi `timeoutMs` 不是整流截止）、`session-trim`（无公开 API）、任务 RPC 帧（`RpcClient` 写死 `spawn("node")`）、daemon IPC（Pi RPC 一进程一会话）、`cache-observer` 的 miss 估算（Pi 的 `core/cache-stats` 未导出）。不采用：运行中换工具集 / `context_edit` / 会话内 `setModel`（改写前缀）、skills 与 prompt templates（加 system 字节）。
 - **bot session 不加载项目或用户 extension**（`noExtensions`），shared `ModelRuntime` 只加载用户级已安装的 provider extension 以获得模型目录与认证。
 
 ## 正确性边界

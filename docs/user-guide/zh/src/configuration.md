@@ -74,7 +74,7 @@ tools: { send: true, search: false, codemode: false, sandbox: false, tasks: fals
 |---|---|---|
 | `send` | 在群里发言、发 sticker、点 reaction；关掉就是只看不说的观察 bot | 无 |
 | `search` | 联网搜索（最多 5 条摘要）或读一个公开网页，长网页分页读完；不能访问 localhost 和内网地址 | `.env` 里有 `tiny_fish_api_key` |
-| `codemode` | 让 bot 写 JavaScript 脚本（Pi 原生 QuickJS 沙箱）：精确计算、在脚本里批量调用其他工具并筛选结果、检索本群全部历史消息。脚本没有网络和文件系统，不能替 bot 发言 | 无 |
+| `codemode` | 让 bot 写 JavaScript 脚本（Pi 原生 QuickJS 沙箱）：精确计算、在脚本里批量调用其他工具并筛选结果、检索本群全部历史消息。脚本没有网络和文件系统，可以在脚本里调用 `send` | 无 |
 | `sandbox` | bot 自己的 Linux 工作区（Docker 容器）：在脚本里执行命令、拷入群友发的文件；`send` 可以把工作区里的图片（≤10 MB 的 jpg/png/webp）和文件（≤50 MB）直接发到群里 | `codemode: true`，顶层 `sandbox` 段，主机准备好 rootless Docker |
 | `tasks` | 把耗时的深入搜索、调研交给后台任务，完成后回复发起人 | `sandbox: true`，顶层 `tasks` 段 |
 
