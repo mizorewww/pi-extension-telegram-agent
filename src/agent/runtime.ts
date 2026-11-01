@@ -5,21 +5,12 @@ import type { Database } from "bun:sqlite";
 import { readFileSync, mkdirSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import {
-	clampThinkingLevel,
-	contentText,
-	isContextOverflow,
-	retryAssistantCall,
-	type Api,
-	type JsonValue,
-	type Model,
-} from "@earendil-works/pi-ai";
+import { clampThinkingLevel, isContextOverflow, type Api, type JsonValue, type Model } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
 	SessionManager,
 	SettingsManager,
-	resizeImage,
 	VERSION as PI_VERSION,
 	type AgentSession,
 	type AgentSessionEvent,
@@ -105,7 +96,6 @@ import {
 } from "../db/message-events.ts";
 import {
 	availableSuffixBudget,
-	CONTEXT_IMAGE_TOKEN_ESTIMATE,
 	DEFAULT_REASONING_RESERVE,
 	DEFAULT_TOOL_FOLLOWUP_RESERVE,
 	estimateProviderTokensUpperBound,
@@ -115,9 +105,8 @@ import {
 import {
 	estimateCacheReadFromPrefix,
 	compactionTextBudget,
-	buildCompactionContent,
+	generateCompactionSummary,
 	isTelegramContextDetails,
-	viewImageRefs,
 	makeAssistantPersistencePolicyExtension,
 	makeCodemodeExtension,
 	CODEMODE_DECLARATION_TOKENS,
@@ -991,7 +980,17 @@ export class BotRuntime {
 		try {
 			const branchEntries = event.branchEntries;
 			const prep = event.preparation;
-			const gen = await this.generateCompactionSummary(prep, event.signal);
+			const gen = await generateCompactionSummary(prep, event.signal, {
+				botId: this.bot.id,
+				model: this.compactionModel,
+				reasoning: this.compactionReasoning,
+				modelRuntime: this.modelRuntime,
+				mediaDir: join(this.config.dataDir, "media"),
+				imageBudgetBytes: this.bot.contextImageBudgetBytes,
+				timeoutMs: this.bot.providerTimeoutMs,
+				retries: this.bot.providerRetries,
+				onUsage: (usage) => this.recordCompactionUsage(usage, Date.now(), this.compactionModel),
+			});
 			if (!("summary" in gen)) {
 				// NOTE: the SDK swallows extension handler exceptions and would silently fall back
 				// to the default summarizer, so refusal goes through cancel -> compaction_end { aborted: true }.
@@ -1023,130 +1022,6 @@ export class BotRuntime {
 			});
 			return { cancel: true };
 		}
-	}
-
-	/** The configured summary model shares the native retry policy and request watchdog. */
-	private async generateCompactionSummary(
-		prep: SessionBeforeCompactEvent["preparation"],
-		signal: AbortSignal,
-	): Promise<
-		{ summary: string; usage: Awaited<ReturnType<ModelRuntime["completeSimple"]>>["usage"] } | { failure: string }
-	> {
-		const model = this.compactionModel;
-		const messages = [...prep.messagesToSummarize, ...prep.turnPrefixMessages];
-		const imageReferences = messages.reduce(
-			(count, message) => count + (viewImageRefs(message)?.images.length ?? 0),
-			0,
-		);
-		const content = buildCompactionContent(
-			messages,
-			prep.previousSummary,
-			model.input.includes("image") ? createContextImageResolver(join(this.config.dataDir, "media")) : undefined,
-		);
-		const imagesAttached = typeof content === "string" ? 0 : content.filter((block) => block.type === "image").length;
-		const text =
-			typeof content === "string"
-				? content
-				: content
-						.filter((block) => block.type === "text")
-						.map((block) => block.text)
-						.join("");
-		const inputTokens =
-			estimateProviderTokensUpperBound(COMPACTION_SUMMARY_PROMPT + text) +
-			imagesAttached * CONTEXT_IMAGE_TOKEN_ESTIMATE;
-		const maxTokens = Math.min(4096, model.maxTokens);
-		log.info("agent_runtime", "compaction_input", {
-			bot_id: this.bot.id,
-			vision_supported: model.input.includes("image"),
-			images_attached: imagesAttached,
-			images_unavailable: imageReferences - imagesAttached,
-			input_tokens_estimated: inputTokens,
-		});
-		if (inputTokens + maxTokens + 2048 > model.contextWindow) {
-			log.warn("agent_runtime", "compaction_input_rejected", {
-				bot_id: this.bot.id,
-				category: "model_window_exceeded",
-			});
-			return { failure: "summary input exceeds model window" };
-		}
-		// Recovery must not send the same oversized image payload to the summary model.
-		// Resize only this uncached summary request; stored files and chat prefixes stay intact.
-		if (Array.isArray(content)) {
-			const images = content.filter((block) => block.type === "image");
-			const imageBytes = images.reduce((sum, image) => sum + Buffer.from(image.data, "base64").length, 0);
-			if (imageBytes > this.bot.contextImageBudgetBytes) {
-				const maxBytes = Math.floor(this.bot.contextImageBudgetBytes / images.length);
-				const resized = new Map<string, Awaited<ReturnType<typeof resizeImage>>>();
-				for (const image of images) {
-					signal.throwIfAborted();
-					const bytes = Buffer.from(image.data, "base64");
-					if (bytes.length <= maxBytes) continue;
-					const key = `${image.mimeType}:${image.data}`;
-					if (!resized.has(key))
-						resized.set(
-							key,
-							maxBytes > 0
-								? await resizeImage(bytes, image.mimeType, { maxBytes: Math.floor(maxBytes / 3) * 4 })
-								: null,
-						);
-					const result = resized.get(key);
-					if (!result || Buffer.from(result.data, "base64").length > maxBytes) {
-						log.warn("agent_runtime", "compaction_input_rejected", {
-							bot_id: this.bot.id,
-							category: "image_budget_exceeded",
-						});
-						return { failure: "summary images exceed transport budget" };
-					}
-					image.data = result.data;
-					image.mimeType = result.mimeType;
-				}
-			}
-		}
-		const request = {
-			systemPrompt: COMPACTION_SUMMARY_PROMPT,
-			messages: [{ role: "user" as const, content, timestamp: Date.now() }],
-		};
-		const result = await retryAssistantCall(
-			async () => {
-				const response = await guardProviderCall(
-					(attemptSignal) =>
-						this.modelRuntime.streamSimple(model, request, {
-							cacheRetention: "none",
-							maxTokens,
-							reasoning: this.compactionReasoning,
-							signal: attemptSignal,
-							timeoutMs: this.bot.providerTimeoutMs,
-							maxRetries: 0,
-						}),
-					model,
-					signal,
-					{ timeoutMs: this.bot.providerTimeoutMs },
-				).result();
-				try {
-					this.recordCompactionUsage(response.usage, Date.now(), model);
-				} catch {
-					log.warn("agent_runtime", "compaction_usage_failed", { bot_id: this.bot.id, category: "local_failure" });
-				}
-				return response;
-			},
-			providerRetryPolicy(this.bot.providerRetries),
-			signal,
-			{
-				onRetryScheduled: (attempt, _maxAttempts, delayMs) =>
-					log.warn("agent_runtime", "provider_retry_scheduled", {
-						bot_id: this.bot.id,
-						scope: "compaction",
-						attempt,
-						delay_ms: delayMs,
-					}),
-			},
-		);
-		if (result.stopReason === "error" || result.stopReason === "aborted") {
-			return { failure: `summary generation ${result.stopReason}` };
-		}
-		const summary = contentText(result.content);
-		if (!summary.trim()) return { failure: "empty summary" };
-		return { summary, usage: result.usage };
 	}
 
 	private sendContext(stopTyping: boolean): Parameters<typeof executeAgentSend>[1] {

@@ -1,7 +1,16 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import {
+	contentText,
+	retryAssistantCall,
+	type Api,
+	type ImageContent,
+	type Model,
+	type TextContent,
+} from "@earendil-works/pi-ai";
 import {
 	convertToLlm,
+	resizeImage,
+	type ModelRuntime,
 	estimateTokens,
 	serializeConversation,
 	sessionEntryToContextMessages,
@@ -10,8 +19,13 @@ import {
 	type SessionBeforeCompactEvent,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { CONTEXT_IMAGE_TOKEN_ESTIMATE } from "../token-packer.ts";
-import { entryImageRefs, projectTelegramContext, type TelegramContextImageResolver } from "./context.ts";
+import { createContextImageResolver } from "../../media/context-media.ts";
+import { log } from "../../observability/log.ts";
+import type { PiRequestThinkingLevel } from "../model-ref.ts";
+import { COMPACTION_SUMMARY_PROMPT } from "../prompt.ts";
+import { guardProviderCall, providerRetryPolicy } from "../provider-guard.ts";
+import { CONTEXT_IMAGE_TOKEN_ESTIMATE, estimateProviderTokensUpperBound } from "../token-packer.ts";
+import { entryImageRefs, projectTelegramContext, type TelegramContextImageResolver, viewImageRefs } from "./context.ts";
 
 type SessionBeforeCompactResult = { cancel?: boolean; compaction?: CompactionResult };
 
@@ -114,4 +128,135 @@ export function makeTelegramCompactionExtension(
 			pi.on("session_before_compact", handle);
 		},
 	};
+}
+
+export interface CompactionSummaryOptions {
+	botId: string;
+	model: Model<Api>;
+	reasoning: PiRequestThinkingLevel;
+	modelRuntime: Pick<ModelRuntime, "streamSimple">;
+	mediaDir: string;
+	imageBudgetBytes: number;
+	timeoutMs: number;
+	retries: number;
+	onUsage: (usage: Awaited<ReturnType<ModelRuntime["completeSimple"]>>["usage"]) => void;
+}
+
+/** The configured summary model shares the native retry policy and request watchdog. */
+export async function generateCompactionSummary(
+	prep: SessionBeforeCompactEvent["preparation"],
+	signal: AbortSignal,
+	options: CompactionSummaryOptions,
+): Promise<
+	{ summary: string; usage: Awaited<ReturnType<ModelRuntime["completeSimple"]>>["usage"] } | { failure: string }
+> {
+	const { model } = options;
+	const messages = [...prep.messagesToSummarize, ...prep.turnPrefixMessages];
+	const imageReferences = messages.reduce((count, message) => count + (viewImageRefs(message)?.images.length ?? 0), 0);
+	const content = buildCompactionContent(
+		messages,
+		prep.previousSummary,
+		model.input.includes("image") ? createContextImageResolver(options.mediaDir) : undefined,
+	);
+	const imagesAttached = typeof content === "string" ? 0 : content.filter((block) => block.type === "image").length;
+	const text =
+		typeof content === "string"
+			? content
+			: content
+					.filter((block) => block.type === "text")
+					.map((block) => block.text)
+					.join("");
+	const inputTokens =
+		estimateProviderTokensUpperBound(COMPACTION_SUMMARY_PROMPT + text) + imagesAttached * CONTEXT_IMAGE_TOKEN_ESTIMATE;
+	const maxTokens = Math.min(4096, model.maxTokens);
+	log.info("agent_runtime", "compaction_input", {
+		bot_id: options.botId,
+		vision_supported: model.input.includes("image"),
+		images_attached: imagesAttached,
+		images_unavailable: imageReferences - imagesAttached,
+		input_tokens_estimated: inputTokens,
+	});
+	if (inputTokens + maxTokens + 2048 > model.contextWindow) {
+		log.warn("agent_runtime", "compaction_input_rejected", {
+			bot_id: options.botId,
+			category: "model_window_exceeded",
+		});
+		return { failure: "summary input exceeds model window" };
+	}
+	// Recovery must not send the same oversized image payload to the summary model.
+	// Resize only this uncached summary request; stored files and chat prefixes stay intact.
+	if (Array.isArray(content)) {
+		const images = content.filter((block) => block.type === "image");
+		const imageBytes = images.reduce((sum, image) => sum + Buffer.from(image.data, "base64").length, 0);
+		if (imageBytes > options.imageBudgetBytes) {
+			const maxBytes = Math.floor(options.imageBudgetBytes / images.length);
+			const resized = new Map<string, Awaited<ReturnType<typeof resizeImage>>>();
+			for (const image of images) {
+				signal.throwIfAborted();
+				const bytes = Buffer.from(image.data, "base64");
+				if (bytes.length <= maxBytes) continue;
+				const key = `${image.mimeType}:${image.data}`;
+				if (!resized.has(key))
+					resized.set(
+						key,
+						maxBytes > 0 ? await resizeImage(bytes, image.mimeType, { maxBytes: Math.floor(maxBytes / 3) * 4 }) : null,
+					);
+				const result = resized.get(key);
+				if (!result || Buffer.from(result.data, "base64").length > maxBytes) {
+					log.warn("agent_runtime", "compaction_input_rejected", {
+						bot_id: options.botId,
+						category: "image_budget_exceeded",
+					});
+					return { failure: "summary images exceed transport budget" };
+				}
+				image.data = result.data;
+				image.mimeType = result.mimeType;
+			}
+		}
+	}
+	const request = {
+		systemPrompt: COMPACTION_SUMMARY_PROMPT,
+		messages: [{ role: "user" as const, content, timestamp: Date.now() }],
+	};
+	const result = await retryAssistantCall(
+		async () => {
+			const response = await guardProviderCall(
+				(attemptSignal) =>
+					options.modelRuntime.streamSimple(model, request, {
+						cacheRetention: "none",
+						maxTokens,
+						reasoning: options.reasoning,
+						signal: attemptSignal,
+						timeoutMs: options.timeoutMs,
+						maxRetries: 0,
+					}),
+				model,
+				signal,
+				{ timeoutMs: options.timeoutMs },
+			).result();
+			try {
+				options.onUsage(response.usage);
+			} catch {
+				log.warn("agent_runtime", "compaction_usage_failed", { bot_id: options.botId, category: "local_failure" });
+			}
+			return response;
+		},
+		providerRetryPolicy(options.retries),
+		signal,
+		{
+			onRetryScheduled: (attempt, _maxAttempts, delayMs) =>
+				log.warn("agent_runtime", "provider_retry_scheduled", {
+					bot_id: options.botId,
+					scope: "compaction",
+					attempt,
+					delay_ms: delayMs,
+				}),
+		},
+	);
+	if (result.stopReason === "error" || result.stopReason === "aborted") {
+		return { failure: `summary generation ${result.stopReason}` };
+	}
+	const summary = contentText(result.content);
+	if (!summary.trim()) return { failure: "empty summary" };
+	return { summary, usage: result.usage };
 }
