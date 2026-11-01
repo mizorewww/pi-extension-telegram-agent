@@ -2005,6 +2005,16 @@ export class BotRuntime {
 		}
 	}
 
+	/** Show a note in the local timeline; the provider sees it through the event stream instead. */
+	recordNote(note: NotePayload): void {
+		this.recordEvent("note", {
+			source: note.source,
+			task_id: note.task_id ?? null,
+			phase: note.phase ?? null,
+			text: note.text,
+		});
+	}
+
 	/** A task needs the bot: owe the requester a reply when asked, then wake up. */
 	wakeForTask(originMessageId: number, owe: boolean): void {
 		if (owe && this.bot.tools.send)
@@ -2033,12 +2043,15 @@ export class BotRuntime {
 		if (!this.box) return;
 		await this.box.reset();
 		this.recordEvent("box_reset", { reason });
-		if (reason !== "tool")
-			appendNoteEvent(this.db, this.config.groupChatId, 0, `box_reset:${this.bot.id}:${Date.now()}`, {
+		if (reason !== "tool") {
+			const note: NotePayload = {
 				bot_id: this.bot.id,
 				source: "system",
 				text: `你的工作区已被清空（${reason === "weekly" ? "每周例行" : "管理员操作"}），/work 里之前的文件都不在了。`,
-			});
+			};
+			appendNoteEvent(this.db, this.config.groupChatId, 0, `box_reset:${this.bot.id}:${Date.now()}`, note);
+			this.recordNote(note);
+		}
 		log.info("sandbox", "box_reset", { bot_id: this.bot.id, reason });
 	}
 

@@ -129,6 +129,7 @@ Telegram create 不可回滚，所以：
 
 - `/tg attach [bot]` 在 Pi transcript 里挂一个 TUI-only custom entry；消息、事件、图片用 Pi 原生组件渲染，滚动、resize、Kitty 图片由 Pi 负责。feed 内容不写 Pi session，也不进入 provider context。
 - `src/plugin/timeline.ts` 是无展示逻辑的 IPC client。协议：`hello`（可带 bot filter）→ snapshot；`history` 分页（复合游标 `(ts, rank, id)`，同秒不丢不重）；推送 `append`、`usage`（daemon 重新聚合好的整份 `BotStats`）、`vision_update`、`media_ready`、`agent_stream`；`send_message` → `send_result`。
+- 任务进展与系统通知除了写成 `note` 事件进入 bot 上下文，还镜像为 `note` agent event 推给 TUI（`[task t3 done] …` / `[系统] …`），只用于本地展示。
 - socket 权限 0600；接收缓冲 4 MB、出站队列 1 MB，超限断开；history limit 服务端夹到 [1, 500]；渲染前剥离 ANSI/OSC 等控制序列。
 - 未知 bot filter 直接断开，不降级为全局视图。daemon 与 extension 同仓库一起升级，不兼容新 client 连旧 daemon。
 - compose：attach 后 editor 默认发到 Telegram；ACK 丢失或断线时结果算未知，关闭 compose、恢复原文、**不自动重试**。

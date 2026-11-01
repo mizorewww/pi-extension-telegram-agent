@@ -157,6 +157,7 @@ const taskManager =
 				},
 				box: (botId) => runtimesForTasks.get(botId)?.workBox ?? null,
 				wake: (botId, originMessageId, owe) => runtimesForTasks.get(botId)?.wakeForTask(originMessageId, owe),
+				onNote: (botId, note) => runtimesForTasks.get(botId)?.recordNote(note),
 			})
 		: null;
 const composition = await composeDeployment(db, config, {

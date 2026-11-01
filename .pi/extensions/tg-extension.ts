@@ -509,6 +509,13 @@ function eventBody(event: EvtItem): string {
 		if (event.evtKind === "assistant_text") return sanitize(String(payload.text ?? ""));
 		if (event.evtKind === "tool_call")
 			return `${sanitize(String(payload.tool ?? "tool"))} · ${sanitize(JSON.stringify(payload.args ?? {})).slice(0, 180)}`;
+		if (event.evtKind === "note") {
+			const label =
+				payload.source === "system"
+					? "系统"
+					: `task ${sanitize(String(payload.task_id ?? ""))} ${sanitize(String(payload.phase ?? ""))}`;
+			return `[${label}] ${sanitize(String(payload.text ?? "")).slice(0, 400)}`;
+		}
 		if (event.evtKind === "tool_result")
 			return `${sanitize(String(payload.tool ?? "tool"))} · ${payload.isError ? "error" : "done"}`;
 		return `${sanitize(event.evtKind)} · ${sanitize(event.payload).slice(0, 240)}`;
