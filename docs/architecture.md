@@ -23,7 +23,7 @@ Telegram ── poller × N ──┐
 4. **Turn**（`src/agent/runtime.ts`）：每 bot 串行状态机 `idle → flushing → idle`，在途触发只合并为一次 pending；但人类在 provider 回合进行中直接点名时，新事件立即打包成一批，用 Pi `sendCustomMessage(…, { deliverAs: "steer" })` 插进正在跑的回合（当前工具调用结束后、下一次模型调用前送达）。插入时不提交任何状态：回合结束先清空 Pi 队列里没送达的批次，再按 session 里实际落地的批次推进 cursor、结清它们带来的义务，没落地的留给下一轮正常打包。一轮 flush：
    - 按 cursor 有界读取近期 event（≤256）和直接点名的回复义务（≤64），义务优先打包；
    - 按 `media.mode` 准备媒体；
-   - 打包成一条 `telegram_context_v2` custom message，经 Pi `session.prompt()` 发出；
+   - 打包成一条 `telegram_context_v2` custom message，用 Pi `sendCustomMessage(…, { triggerTurn: true })` 由批次本身启动 turn（Pi 照常先做阈值压缩检查）；
    - turn 结束后从 session 实际内容重建可见集合，原子写回 SQLite；图片字节压力只在下一批追加前检查。
 5. **Send**（`src/agent/send.ts`）：模型唯一的公开发言通道是 `send` tool（文字 / sticker / reaction）。详见下文“发送边界”。
 

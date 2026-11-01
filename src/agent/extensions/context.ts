@@ -3,28 +3,18 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import type { InlineExtension, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { statSync } from "node:fs";
 import { join } from "node:path";
-import type { MessageEventKind } from "../../db/message-events.ts";
 import type { ContextMediaImage } from "../../media/context-media.ts";
 import { SEND_NO_RETRY_ACK, SEND_SUCCESS_ACK } from "../tools.ts";
 
 export const TELEGRAM_CONTEXT_TYPE = "telegram_context_v2";
-export const TELEGRAM_CONTEXT_VERSION = 5;
+export const TELEGRAM_CONTEXT_VERSION = 6;
 
-export interface TelegramContextEventRef {
-	ingestSeq: number;
-	kind: MessageEventKind;
-	chatId: number;
-	messageId: number;
-	fullMessageVisible: boolean;
-}
-
+/** A batch's structured identity; its rendered text is the custom message content itself. */
 export interface TelegramContextDetails {
 	version: typeof TELEGRAM_CONTEXT_VERSION;
 	consumedSeq: number;
-	providerText: string;
 	stickerCandidates: string;
 	visibleMessageIds: number[];
-	events: TelegramContextEventRef[];
 }
 
 /** A prepared image file referenced by cache-relative basename; bytes join only at projection. */
@@ -46,21 +36,9 @@ export function isTelegramContextDetails(value: unknown): value is TelegramConte
 		details.version === TELEGRAM_CONTEXT_VERSION &&
 		Number.isSafeInteger(details.consumedSeq) &&
 		(details.consumedSeq as number) >= 0 &&
-		typeof details.providerText === "string" &&
 		typeof details.stickerCandidates === "string" &&
 		Array.isArray(details.visibleMessageIds) &&
-		details.visibleMessageIds.every((id) => Number.isSafeInteger(id) && id > 0) &&
-		Array.isArray(details.events) &&
-		details.events.every(
-			(event) =>
-				event != null &&
-				Number.isSafeInteger(event.ingestSeq) &&
-				event.ingestSeq > 0 &&
-				Number.isSafeInteger(event.chatId) &&
-				Number.isSafeInteger(event.messageId) &&
-				event.messageId > 0 &&
-				typeof event.fullMessageVisible === "boolean",
-		)
+		details.visibleMessageIds.every((id) => Number.isSafeInteger(id) && id > 0)
 	);
 }
 
@@ -109,9 +87,8 @@ export type TelegramContextImageResolver = (ref: { name: string; mime: string })
 const TELEGRAM_STICKER_CANDIDATES_TYPE = "telegram_sticker_candidates";
 
 /**
- * Keep the provider projection derived from extension-owned structured details. The same bytes
- * are also persisted as plain-text content for compaction/debugging, but restored sessions never
- * need to parse rendered Telegram grammar to recover message identities.
+ * Project persisted entries for the provider. Restored sessions recover message identities from
+ * structured details, never by parsing the rendered Telegram grammar in the content.
  *
  * Each batch's sticker note rides its own message right after that batch: glued to the chat text
  * it read as if the last speaker had pasted it, and keeping every note in place makes each
@@ -160,21 +137,11 @@ export function projectTelegramContext(
 	});
 }
 
-export function makeTelegramContextExtension(
-	getTurnContext: () => TelegramContextDetails | null,
-	resolveImage?: TelegramContextImageResolver,
-): InlineExtension {
+export function makeTelegramContextExtension(resolveImage?: TelegramContextImageResolver): InlineExtension {
 	return {
 		name: "tg-context",
 		hidden: true,
 		factory: (pi) => {
-			pi.on("before_agent_start", () => {
-				const details = getTurnContext();
-				if (!details) return;
-				return {
-					message: { customType: TELEGRAM_CONTEXT_TYPE, content: details.providerText, display: false, details },
-				};
-			});
 			pi.on("context", (event) => ({ messages: projectTelegramContext(event.messages, resolveImage) }));
 		},
 	};

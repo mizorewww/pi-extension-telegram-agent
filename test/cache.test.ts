@@ -14,7 +14,6 @@ import {
 	sha256Short,
 	CACHE_SCHEMA_VERSION,
 	COMPACTION_SUMMARY_PROMPT,
-	TELEGRAM_TURN_PROMPT,
 	REPLY_RECOVERY_PROMPT,
 	toolCapabilityDeclaration,
 } from "../src/agent/prompt.ts";
@@ -31,25 +30,22 @@ import {
 	buildCompactionContent,
 	TELEGRAM_CONTEXT_TYPE,
 	TELEGRAM_CONTEXT_VERSION,
-	TELEGRAM_EXTENSION_ORDER,
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 42,
-	systemZhTemplate: "b79b1c48df20",
-	systemEnTemplate: "84e35099beb1",
+	schemaVersion: 43,
+	systemZhTemplate: "2f1c2b564648",
+	systemEnTemplate: "f99097a7d046",
 	eventSerialize: "a05c0584eb08",
-	tools: "f7554b4d6621",
+	tools: "49d65d5de9c9",
 	codemodeTools: "7536d4103afc",
-	sendWithFiles: "b23c27537c13",
+	sendWithFiles: "8cea43279c23",
 	taskTool: "f5343a7cbdb5",
 	jobTool: "a913226f0cba",
 	compactionPrompt: "04da95f62da0",
 	multimodalCompaction: "9d306722b038",
 	replyRecovery: "4fc7e277e338",
-	telegramTurn: "43bb809c775c",
-	extensionOrder: "e04f7032d531",
-	contextProtocol: "3b3dcfd50324",
+	contextProtocol: "b7ee40682d09",
 };
 
 const CHAT_ID = -1004402809405;
@@ -106,8 +102,6 @@ test("prompt, tool and protocol hashes are stable", () => {
 	);
 	expect(sha256Short(JSON.stringify(summaryInput))).toBe(GOLDEN.multimodalCompaction);
 	expect(sha256Short(REPLY_RECOVERY_PROMPT)).toBe(GOLDEN.replyRecovery);
-	expect(sha256Short(TELEGRAM_TURN_PROMPT)).toBe(GOLDEN.telegramTurn);
-	expect(sha256Short(JSON.stringify(TELEGRAM_EXTENSION_ORDER))).toBe(GOLDEN.extensionOrder);
 	expect(
 		sha256Short(
 			JSON.stringify({ type: TELEGRAM_CONTEXT_TYPE, version: TELEGRAM_CONTEXT_VERSION, noSend: NO_SEND_MARKER }),

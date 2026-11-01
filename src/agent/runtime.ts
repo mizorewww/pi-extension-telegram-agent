@@ -39,7 +39,6 @@ import {
 	sha256Short,
 	CACHE_SCHEMA_VERSION,
 	COMPACTION_SUMMARY_PROMPT,
-	TELEGRAM_TURN_PROMPT,
 	REPLY_RECOVERY_PROMPT,
 	SHARED_PROTOCOL,
 } from "./prompt.ts";
@@ -128,7 +127,6 @@ import {
 	makeTelegramContextExtension,
 	TELEGRAM_CONTEXT_TYPE,
 	TELEGRAM_CONTEXT_VERSION,
-	TELEGRAM_EXTENSION_ORDER,
 	contextImageBytes,
 	type PreviousProviderPayloadFingerprint,
 	type ProviderPayloadObservation,
@@ -348,7 +346,6 @@ export class BotRuntime {
 	private pendingPayloadObservation: ProviderPayloadObservation | null = null;
 	private allowedReactions: ReadonlySet<string> | null = null;
 	private previousRequest: (PreviousProviderPayloadFingerprint & { cohort: string }) | null = null;
-	private pendingTurnContext: TelegramContextDetails | null = null;
 	private currentTriggerMessageId: number | null = null;
 	private pendingInputMetrics = emptyInputMetrics();
 	private providerCallsInRun = 0;
@@ -622,6 +619,29 @@ export class BotRuntime {
 			estimateProviderTokensUpperBound(
 				`${systemPrompt}\n${JSON.stringify(activeTools.map(({ name, description, parameters }) => ({ name, description, parameters })))}`,
 			) + (this.bot.tools.codemode ? CODEMODE_DECLARATION_TOKENS : 0);
+		const payloadKey = sha256(
+			`telegram-payload-observer:${this.config.routerSecret ?? this.config.dataDir}:${this.bot.id}`,
+		);
+		this.telemetryHmacKey = payloadKey;
+		const extensions = [
+			// Only hybrid mode has images in context: view_image results, resolved at projection.
+			makeTelegramContextExtension(
+				this.config.media.mode === "hybrid"
+					? createContextImageResolver(join(this.config.dataDir, "media"))
+					: undefined,
+			),
+			makeTelegramCompactionExtension((event) => this.handleBeforeCompact(event)),
+			makeCachePayloadObserverExtension(payloadKey, (observation) => {
+				this.pendingPayloadObservation = observation;
+			}),
+			...(this.bot.tools.codemode ? [makeCodemodeExtension()] : []),
+			makeAssistantPersistencePolicyExtension(
+				(text) => {
+					this.recordEvent("assistant_text", { text });
+				},
+				(message) => this.captureAssistantActivity(message),
+			),
+		];
 		this.contextFingerprintInput = {
 			piVersion: PI_VERSION,
 			provider: this.bot.provider,
@@ -638,7 +658,7 @@ export class BotRuntime {
 			compactionModel: compactionSelection.canonical,
 			stickerCatalogSnapshotSha256: stickerCatalogSnapshotHash(this.db, this.bot.id, this.bot.stickerSets),
 			mediaMode: this.config.media.mode,
-			extensionOrder: TELEGRAM_EXTENSION_ORDER,
+			extensionOrder: extensions.map((extension) => extension.name),
 			tools: declaredTools.map((tool) => ({
 				name: tool.name,
 				description: tool.description,
@@ -675,30 +695,6 @@ export class BotRuntime {
 			this.visibleMessageIds.clear();
 		}
 
-		const payloadKey = sha256(
-			`telegram-payload-observer:${this.config.routerSecret ?? this.config.dataDir}:${this.bot.id}`,
-		);
-		this.telemetryHmacKey = payloadKey;
-		const extensions = [
-			// Only hybrid mode has images in context: view_image results, resolved at projection.
-			makeTelegramContextExtension(
-				() => this.pendingTurnContext,
-				this.config.media.mode === "hybrid"
-					? createContextImageResolver(join(this.config.dataDir, "media"))
-					: undefined,
-			),
-			makeTelegramCompactionExtension((event) => this.handleBeforeCompact(event)),
-			makeCachePayloadObserverExtension(payloadKey, (observation) => {
-				this.pendingPayloadObservation = observation;
-			}),
-			...(this.bot.tools.codemode ? [makeCodemodeExtension()] : []),
-			makeAssistantPersistencePolicyExtension(
-				(text) => {
-					this.recordEvent("assistant_text", { text });
-				},
-				(message) => this.captureAssistantActivity(message),
-			),
-		];
 		this.createModelSession = async (selectedModel, thinking, manager) => {
 			const loader = new DefaultResourceLoader({
 				cwd: this.config.dataDir,
@@ -1498,16 +1494,8 @@ export class BotRuntime {
 		const details: TelegramContextDetails = {
 			version: TELEGRAM_CONTEXT_VERSION,
 			consumedSeq: highWater,
-			providerText: packed.text,
 			stickerCandidates: boundedStickerCandidates,
 			visibleMessageIds: packed.visibleMessageIds,
-			events: packed.events.map((event) => ({
-				ingestSeq: event.ingestSeq,
-				kind: event.kind,
-				chatId: event.chatId,
-				messageId: event.messageId,
-				fullMessageVisible: event.kind === "message" || event.kind === "edit",
-			})),
 		};
 		this.currentTriggerMessageId ??= delivered[0]?.messageId ?? packed.events.at(-1)?.messageId ?? null;
 		this.pendingInputMetrics = {
@@ -1517,21 +1505,23 @@ export class BotRuntime {
 			visionCalls: this.pendingInputMetrics.visionCalls,
 			imagesAttached: 0, // counted by view_image during the turn
 		};
-		// Native prompt preflight installs system/tools even on the first request; the
-		// before_agent_start extension appends this batch as a persistent custom message.
-		// Make packed references addressable during the turn; durable visibility commits below.
+		// The batch itself starts the turn: Pi runs the same pre-run threshold compaction check as
+		// for a prompt, then persists it as the turn's first message. Packed references become
+		// addressable during the turn; durable visibility commits below.
 		await this.checkContextImageBudget();
 		for (const messageId of packed.visibleMessageIds) this.visibleMessageIds.add(messageId);
-		this.pendingTurnContext = details;
 		this.activeTurn = { steeredThrough: highWater, steering: Promise.resolve() };
 		try {
-			await this.session.prompt(TELEGRAM_TURN_PROMPT, { expandPromptTemplates: false });
+			// While streaming, Pi would only queue the batch as steering and return at once.
+			if (this.session.isStreaming) throw new Error("session is already streaming");
+			await this.session.sendCustomMessage(
+				{ customType: TELEGRAM_CONTEXT_TYPE, content: packed.text, display: false, details },
+				{ triggerTurn: true },
+			);
 		} catch (error) {
 			await this.endSteering();
 			this.reconcileContextStateFromSession();
 			throw error;
-		} finally {
-			this.pendingTurnContext = null;
 		}
 		if (
 			!this.lastTurnFailed &&
@@ -1573,11 +1563,7 @@ export class BotRuntime {
 		const replyPending = this.turnSendOutcome === "none";
 		const deliveredObligationIds = replyPending ? [] : delivered.map((obligation) => obligation.messageId);
 		if (deliveredObligationIds.length > 0) {
-			this.session.sessionManager.appendCustomEntry(TELEGRAM_CONTEXT_COMMIT_TYPE, {
-				consumedSeq: highWater,
-				deliveredObligationIds,
-				outcome: this.turnSendOutcome,
-			});
+			this.session.sessionManager.appendCustomEntry(TELEGRAM_CONTEXT_COMMIT_TYPE, { deliveredObligationIds });
 		}
 		commitConsumedContext(this.db, {
 			botId: this.bot.id,
@@ -1971,21 +1957,13 @@ export class BotRuntime {
 			const details: TelegramContextDetails = {
 				version: TELEGRAM_CONTEXT_VERSION,
 				consumedSeq: through,
-				providerText: packed.text,
 				stickerCandidates: "",
 				visibleMessageIds: packed.visibleMessageIds,
-				events: packed.events.map((event) => ({
-					ingestSeq: event.ingestSeq,
-					kind: event.kind,
-					chatId: event.chatId,
-					messageId: event.messageId,
-					fullMessageVisible: event.kind === "message" || event.kind === "edit",
-				})),
 			};
 			// reply_to may target the new messages as soon as the model can see them.
 			for (const id of packed.visibleMessageIds) this.visibleMessageIds.add(id);
 			await this.session.sendCustomMessage(
-				{ customType: TELEGRAM_CONTEXT_TYPE, content: details.providerText, display: false, details },
+				{ customType: TELEGRAM_CONTEXT_TYPE, content: packed.text, display: false, details },
 				{ deliverAs: "steer" },
 			);
 			turn.steeredThrough = through;

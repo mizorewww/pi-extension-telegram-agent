@@ -15,10 +15,10 @@ provider prefix cache 是本项目的第一成本杠杆。本文是“哪些字�
 ## 哪些东西是 cache-visible
 
 - 共享协议、persona 及其顺序（`src/agent/prompt.ts`）；
-- tool name/description/schema 与顺序（`src/agent/tools.ts`）；
+- tool name/description/schema 与顺序（`src/agent/tools.ts`）。机制写在 tool description，用法与策略写在 prompt 的工具一节，同一句话不在两处重复；
 - Telegram 序列化 grammar（`src/agent/serialize.ts`）、context details 版本、sticker 候选 grammar；
 - 摘要 prompt 与摘要输入 envelope、所选 compaction model；
-- extension 顺序、`[no_send]` 持久化策略、每轮固定的触发消息与补答提示；
+- extension 顺序（取自实际注册的 extension 列表）、`[no_send]` 持久化策略、补答提示；
 - provider/api/model/reasoning/cache retention、Pi 版本、`media.mode`、该 bot 的 sticker 目录快照。
 
 以上全部进入 `src/agent/context-fingerprint.ts` 的 fingerprint。
@@ -35,12 +35,12 @@ golden 意外失败是报警：先查原因，不要直接改 expected。
 
 ```text
 system:   共享协议 --- persona [--- sticker 目录]
-messages: Telegram 批次（custom message，各自后面可能跟一条〔系统附注〕sticker 附注）、
-          assistant/tool/summary entries
+messages: Telegram 批次（custom message，各自后面可能跟一条〔系统附注〕sticker 附注；每轮由批次本身
+          启动，没有额外的触发消息）、assistant/tool/summary entries
 tools:    send, search, view_image, task[, codemode]（按 bot 开关与媒体模式过滤，顺序不变；codemode 声明由 Pi 按脚本工具渲染）
 ```
 
-- 一批 Telegram 消息投影为纯字符串；图片只出现在 view_image 结果里，投影时才把文件读成 image block。
+- 一批 Telegram 消息投影为纯字符串（持久化 content 本身），details 只存 cursor、可见 id 与 sticker 附注；图片只出现在 view_image 结果里，投影时才把文件读成 image block。
 - send 成功后模型只看到固定 ACK（`ok sent_message_ids=#…` 或 `no_retry`），发送详情只留本地。
 - 没调 send 的 assistant 文本在 session 里替换为 `[no_send]`。
 
