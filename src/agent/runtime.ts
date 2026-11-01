@@ -9,6 +9,7 @@ import {
 	clampThinkingLevel,
 	contentText,
 	retryAssistantCall,
+	validateToolArguments,
 	type Api,
 	type JsonValue,
 	type Model,
@@ -570,7 +571,14 @@ export class BotRuntime {
 								inputSchema: tool.parameters as unknown as CodemodeJsonSchema,
 								...("outputSchema" in tool ? { outputSchema: tool.outputSchema as unknown as CodemodeJsonSchema } : {}),
 								execute: async (args: unknown) => {
-									const result = await (tool.execute as (id: string, params: unknown) => Promise<any>)("job", args);
+									// A job's sandbox calls tools directly, outside Pi's tool pipeline: validate like a turn does.
+									const params = validateToolArguments(tool as never, {
+										type: "toolCall",
+										id: "job",
+										name: tool.name,
+										arguments: args as never,
+									});
+									const result = await (tool.execute as (id: string, params: unknown) => Promise<any>)("job", params);
 									return (
 										result.structuredContent ??
 										result.content.map((block: { text?: string }) => block.text ?? "").join("\n")
