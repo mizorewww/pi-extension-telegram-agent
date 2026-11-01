@@ -69,10 +69,6 @@ export interface PrepareMediaImagesOptions {
 	resize?: typeof resizeImage;
 }
 
-function transcoderReady(transcoder: VideoTranscoderAvailability): boolean {
-	return transcoder.ffmpeg && transcoder.ffprobe;
-}
-
 /** Download (or reuse) the source and turn it into bounded PNG/JPEG images. Never throws. */
 export async function prepareMediaImages(
 	db: Database,
@@ -86,8 +82,9 @@ export async function prepareMediaImages(
 		mime: string | null;
 	} | null;
 	if (!media || !isVisionMedia(media.kind, media.mime)) return { ok: false, outcome: "media_unavailable" };
-	let video = isVideoMedia(media.kind, media.mime);
-	if (video && !transcoderReady(options.videoTranscoder)) return { ok: false, outcome: "video_transcoder_unavailable" };
+	const video = isVideoMedia(media.kind, media.mime);
+	if (video && !(options.videoTranscoder.ffmpeg && options.videoTranscoder.ffprobe))
+		return { ok: false, outcome: "video_transcoder_unavailable" };
 
 	const local = await ensureLocalMedia(db, api, botId, fileUniqueId, {
 		cacheDir: options.cacheDir,
@@ -95,11 +92,6 @@ export async function prepareMediaImages(
 		botApis: options.botApis,
 	});
 	if (!local.ok) return local;
-	// Sticker rows may be recorded as static before the download reveals a video container.
-	if (!video && media.kind === "sticker" && local.mimeType.startsWith("video/")) {
-		video = true;
-		if (!transcoderReady(options.videoTranscoder)) return { ok: false, outcome: "video_transcoder_unavailable" };
-	}
 
 	if (video) {
 		const frames = await (options.extractFrames ?? extractVideoFrames)({
@@ -111,7 +103,6 @@ export async function prepareMediaImages(
 		return { ok: true, kind: "video", images: frames.frames };
 	}
 
-	if (local.mimeType.startsWith("video/")) return { ok: false, outcome: "unsupported_format" };
 	let bytes: Uint8Array = local.bytes;
 	let mimeType: string = local.mimeType;
 	if (mimeType === "image/webp" || mimeType === "image/gif") {
@@ -187,7 +178,7 @@ export function createImageRefResolver(cacheDir: string): (ref: ImageRef) => Ima
 	};
 }
 
-const viewInFlightByDb = new WeakMap<Database, Map<string, Promise<ViewImagesResult>>>();
+const viewInFlight = new Map<string, Promise<ViewImagesResult>>();
 
 /** view_image: prepared image files for one media identity, made once and reused. Never throws. */
 export function ensureViewImages(
@@ -197,7 +188,7 @@ export function ensureViewImages(
 	fileUniqueId: string,
 	options: PrepareMediaImagesOptions,
 ): Promise<ViewImagesResult> {
-	return dedupeInFlight(viewInFlightByDb, db, fileUniqueId, async (): Promise<ViewImagesResult> => {
+	return dedupeInFlight(viewInFlight, fileUniqueId, async (): Promise<ViewImagesResult> => {
 		const cached = existingImages(options.cacheDir, fileUniqueId);
 		if (cached.length > 0) return { ok: true, images: cached };
 		const prepared = await prepareMediaImages(db, api, botId, fileUniqueId, options);

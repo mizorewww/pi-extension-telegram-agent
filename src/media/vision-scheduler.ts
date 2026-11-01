@@ -1,4 +1,4 @@
-/** One deployment-wide vision-work gate; video reserves it before local preparation. */
+/** One deployment-wide gate over vision work: each description's preparation and provider call. */
 export class VisionScheduler {
 	private active = 0;
 	private readonly queue: Array<() => void> = [];

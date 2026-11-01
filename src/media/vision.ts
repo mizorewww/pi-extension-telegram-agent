@@ -23,8 +23,6 @@ import {
 	type PrepareMediaImagesOptions,
 } from "./prepare-images.ts";
 
-export { fileIdForBot } from "./local-cache.ts";
-
 const PHOTO_PROMPT = `你在帮一个群聊 bot 理解图片。简短描述：实际可见内容、重要文字/OCR（尤其是界面和报错）、人物或物体、对聊天可能有用的信息、不确定的地方。2-3 句话以内，用中文，直接给描述不要客套。`;
 
 const STICKER_PROMPT = `你在帮一个群聊 bot 理解一张 sticker（聊天表情贴图）。把它理解为一种聊天表达，输出短描述：communicative intent（想表达什么）、emotion、intensity、gesture/画面要点、可见文字。一两句话，用中文，例如"得意的赞同，smug/amused，中等强度"。直接给描述不要客套。`;
@@ -89,7 +87,7 @@ export interface EnsureVisionOptions extends PrepareMediaImagesOptions {
 	onPersist?: VisionUpdateSink;
 	/** Receives bounded aggregate fields only; never identity, path, prompt, or response text. */
 	onTelemetry?: VisionTelemetrySink;
-	/** Shared deployment-wide provider gate; cache/local work remains outside the queue. */
+	/** Shared deployment-wide gate over each description's preparation and provider call. */
 	scheduler?: VisionScheduler;
 }
 
@@ -213,7 +211,7 @@ export function assertPiVisionExecutorReady(executor: VisionExecutor): void {
 	}
 }
 
-const inFlightByDb = new WeakMap<Database, Map<string, Promise<string | null>>>();
+const inFlight = new Map<string, Promise<string | null>>();
 
 /** Ensure a terminal vision result exists; same-identity calls share one provider request. */
 export function ensureVision(
@@ -224,7 +222,7 @@ export function ensureVision(
 	executor: VisionExecutor,
 	options: EnsureVisionOptions,
 ): Promise<string | null> {
-	return dedupeInFlight(inFlightByDb, db, fileUniqueId, () =>
+	return dedupeInFlight(inFlight, fileUniqueId, () =>
 		ensureVisionInner(db, api, botId, fileUniqueId, executor, options),
 	);
 }
@@ -258,18 +256,8 @@ async function ensureVisionInner(
 		const cached = JSON.parse(media.vision) as { text?: string | null };
 		return cached.text?.trim() || null;
 	}
-	if (video) {
-		if (!options.videoTranscoder.ffmpeg || !options.videoTranscoder.ffprobe) {
-			emitTelemetry(options, emptyTelemetry(kind, "video_transcoder_unavailable", performance.now() - startedAt));
-			return null;
-		}
-		if (options.scheduler) {
-			return options.scheduler.schedule(() =>
-				ensureVisionPrepared(db, api, botId, fileUniqueId, executor, options, media.kind, kind, startedAt, true),
-			);
-		}
-	}
-	return ensureVisionPrepared(db, api, botId, fileUniqueId, executor, options, media.kind, kind, startedAt, false);
+	const run = () => ensureVisionPrepared(db, api, botId, fileUniqueId, executor, options, media.kind, kind, startedAt);
+	return options.scheduler ? options.scheduler.schedule(run) : run();
 }
 
 /** Only outcomes that cannot change on retry are cached; ffmpeg/provider/transport failures retry later. */
@@ -288,18 +276,16 @@ async function ensureVisionPrepared(
 	executor: VisionExecutor,
 	options: EnsureVisionOptions,
 	mediaKind: string,
-	initialKind: VisionKind,
+	kind: VisionKind,
 	startedAt: number,
-	providerSlotReserved: boolean,
 ): Promise<string | null> {
 	const prepared = await prepareMediaImages(db, api, botId, fileUniqueId, options);
 	if (!prepared.ok) {
 		const outcome: VisionOutcome = prepared.outcome === "aborted" ? "media_download_aborted" : prepared.outcome;
-		if (outcome === "unsupported_format") persistUnsupported(db, fileUniqueId, initialKind, outcome);
-		emitTelemetry(options, emptyTelemetry(initialKind, outcome, performance.now() - startedAt));
+		if (outcome === "unsupported_format") persistUnsupported(db, fileUniqueId, kind, outcome);
+		emitTelemetry(options, emptyTelemetry(kind, outcome, performance.now() - startedAt));
 		return null;
 	}
-	const kind: VisionKind = prepared.kind === "video" ? "video" : initialKind;
 
 	const describe = () =>
 		executor.describe({
@@ -307,8 +293,7 @@ async function ensureVisionPrepared(
 			images: prepared.images,
 			...(kind === "video" && mediaKind === "sticker" ? { videoSticker: true } : {}),
 		});
-	const result: VisionDescriptionResult =
-		options.scheduler && !providerSlotReserved ? await options.scheduler.schedule(describe) : await describe();
+	const result = await describe();
 	const text = result.text?.trim() || null;
 	if (text) {
 		db.query("UPDATE media SET vision = ? WHERE file_unique_id = ?").run(

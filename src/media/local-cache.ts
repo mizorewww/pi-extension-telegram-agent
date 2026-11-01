@@ -211,25 +211,12 @@ export function installMediaCacheFile(
 	}
 }
 
-/** Coalesce concurrent same-identity async work per database; each caller owns its WeakMap namespace. */
-export function dedupeInFlight<T>(
-	byDb: WeakMap<Database, Map<string, Promise<T>>>,
-	db: Database,
-	key: string,
-	work: () => Promise<T>,
-): Promise<T> {
-	let inFlight = byDb.get(db);
-	if (!inFlight) {
-		inFlight = new Map();
-		byDb.set(db, inFlight);
-	}
+/** Coalesce concurrent same-identity async work; each caller owns its map. */
+export function dedupeInFlight<T>(inFlight: Map<string, Promise<T>>, key: string, work: () => Promise<T>): Promise<T> {
 	const existing = inFlight.get(key);
 	if (existing) return existing;
-	const map = inFlight;
-	const promise = work().finally(() => {
-		map.delete(key);
-	});
-	map.set(key, promise);
+	const promise = work().finally(() => inFlight.delete(key));
+	inFlight.set(key, promise);
 	return promise;
 }
 
@@ -240,7 +227,7 @@ export function setMediaReadySink(sink: (fileUniqueId: string, mediaPath: string
 	mediaReadySink = sink;
 }
 
-const inFlightByDb = new WeakMap<Database, Map<string, Promise<LocalMediaResult>>>();
+const inFlight = new Map<string, Promise<LocalMediaResult>>();
 
 /** Share Telegram download and atomic cache installation across vision and view_image. */
 export function ensureLocalMedia(
@@ -250,9 +237,7 @@ export function ensureLocalMedia(
 	fileUniqueId: string,
 	options: EnsureLocalMediaOptions,
 ): Promise<LocalMediaResult> {
-	return dedupeInFlight(inFlightByDb, db, fileUniqueId, () =>
-		ensureLocalMediaInner(db, api, botId, fileUniqueId, options),
-	);
+	return dedupeInFlight(inFlight, fileUniqueId, () => ensureLocalMediaInner(db, api, botId, fileUniqueId, options));
 }
 
 async function ensureLocalMediaInner(
