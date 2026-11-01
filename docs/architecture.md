@@ -13,7 +13,7 @@ Telegram ── poller × N ──┐
 
 - **daemon**（`src/daemon/index.ts`）：持有 SQLite、全部 poller、每 bot 一个 `BotRuntime` 和 IPC server。整个进程只创建一个 Pi `ModelRuntime`。
 - **Pi extension**：观察和控制界面，不是第二个 daemon。关闭 Pi 或 `/tg detach` 不影响 bot。
-- 依赖：Bun；Pi 四包精确锁定 1.0.4；Telegram 直接调用 Bot API（fetch long polling），无第三方 SDK。`bun run pi` 启动 PATH 中本机安装的 Pi CLI。
+- 依赖：Bun；Pi 四包精确锁定 1.4.0；Telegram 直接调用 Bot API（fetch long polling），无第三方 SDK。`bun run pi` 启动 PATH 中本机安装的 Pi CLI。
 
 ## 一条消息的路径
 

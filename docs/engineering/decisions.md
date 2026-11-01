@@ -8,6 +8,7 @@
 - **扩展抛异常时 Pi 会退回默认摘要器。** 所以 `tg-compaction` 的任何失败都返回 `{ cancel: true }`，绝不 throw（`handleBeforeCompact`）。
 - **图片预算必须在 Pi 准备压缩之前换算。** 文字小于预算时 Pi 在触发 `session_before_compact` 之前就返回，钩子来不及；所以在 `agent_end` / `compact()` 前临时调整 `keepRecentTokens`。
 - **Pi 1.0.4 起** `COMPACTION_SUMMARY_PREFIX` 不再导出（本地常量），`context` handler 不再收到 system message，扩展的 `Image` 组件由 Pi 宿主负责把非 PNG 转成 Kitty 可用格式。
+- **Pi 1.4.0 起** `before_agent_start` 也会在 `sendMessage(..., { triggerTurn: true })` 启动的 run 上触发（事件按 `messageType` 区分）；本仓库只经 `session.prompt()` 启动 turn，`tg-context` handler 不读事件字段，语义不变。
 - **bot session 不加载项目或用户 extension**（`noExtensions`），shared `ModelRuntime` 只加载用户级已安装的 provider extension 以获得模型目录与认证。
 
 ## 正确性边界
