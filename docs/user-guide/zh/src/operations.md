@@ -9,7 +9,7 @@ bun run restart    # 修改配置后重启
 bun run stop       # 停止
 ```
 
-日志在 `data/daemon.log`（结构化 JSON，不含聊天正文）。长期运行建议用 systemd 托管，步骤见 [daemon runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/daemon.md)。
+日志在 `data/daemon.log`（结构化 JSON，不含聊天正文）。长期运行建议用 systemd 托管，步骤见 [daemon runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/daemon.md)；工作区和后台任务的主机准备见 [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md)。
 
 ## 群内命令
 
@@ -32,6 +32,8 @@ bun run stop       # 停止
 | `/compact` | 立即把上下文压缩成摘要（会调用摘要模型，产生少量费用） |
 | `/set` | 弹出按钮菜单，点选插话概率（0–1）和主动插话后的冷却时间，立即生效 |
 | `/fire on` / `/fire off` | 允许 / 禁止其他 bot 的消息触发这个 bot；不带参数的 `/fire` 切换开关 |
+| `/box reset` | 立即清空这个 bot 的工作区（开了 `tools.sandbox` 才有）；平时每周一 05:00 自动清空 |
+| `/task` | 查看这个 bot 的后台任务，或取消某个任务（开了 `tools.tasks` 才有，具体写法以 `/help` 为准） |
 
 - `/model`、`/set` 会写回 `telegram.config.ts`，重启后仍然有效。
 - bot 正在回复时，`/model`、`/new`、`/compact` 会提示稍后重试，不会打断回复。
@@ -51,7 +53,7 @@ bun run stop       # 停止
 ## 备份
 
 1. `bun run stop`，确认 `bun run status` 显示未运行；
-2. 复制 `telegram.config.ts`、`.env`、`personas/*.local.md` 和整个 `data/`；
+2. 复制 `telegram.config.ts`、`.env`、`personas/*.local.md` 和整个 `data/`（工作区里的文件不在备份范围内，它们本来就会每周清空）；
 3. `.env` 和私有 persona 放在安全的位置。
 
 SQLite（`data/agent.db`）是唯一的聊天历史来源，Telegram 不能用来恢复历史。

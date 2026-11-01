@@ -33,7 +33,7 @@ pi --version
 /tg restart
 ```
 
-再看 `data/daemon.log`。常见原因：token 错误、网络不通、bot 不在群里、所选模型不在 Pi 目录里，或在 `media.mode: "context"` 下选了不支持图片的模型（`image_input_unsupported`）。
+再看 `data/daemon.log`。常见原因：token 错误、网络不通、bot 不在群里、所选模型不在 Pi 目录里，或在 `media.mode` 为 `"context"` / `"hybrid"` 时选了不支持图片的模型（`image_input_unsupported`）。
 
 ## 群里 @ 了 bot 但没反应
 
@@ -60,6 +60,18 @@ bot 的上下文可能被某个误解带偏了（摘要会把它延续下去）�
 
 - 确认该 bot 的 `tools.search` 为 `true`，`.env` 里有 TinyFish key，然后重启。
 - `invalid_url` 表示目标不是公网 HTTP(S) 地址（例如 localhost、内网 IP、带用户名密码的链接），这是有意的安全限制。
+
+## 工作区命令失败
+
+- 启动时就报错：检查 `tools.sandbox` 是否同时开了 `tools.codemode`，以及顶层有没有 `sandbox` 段。
+- 运行中失败：在主机上执行 `DOCKER_HOST=unix:///run/tgbox/docker.sock docker info`，确认 rootless Docker 在运行、daemon 用户在 `tgbox` 组里；镜像名要与 `sandbox.image` 一致。步骤见 [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md)。
+- 工作区里的东西乱了：管理员发 `/box reset`，下次使用时自动重建。
+
+## 后台任务没有结果
+
+- 启动时就报错：`tools.tasks` 需要 `tools.sandbox` 和顶层 `tasks` 段，`tasks.workflows` 的每个目录里都要有 `.pi`。
+- 任务很快失败：多半是任务容器里的 Pi 没有模型凭证，按 [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md#任务凭证卷) 准备凭证卷。
+- 一直没有结果：超过 `tasks.timeout_minutes` 会判为失败并通知发起人；在主机上用 `docker ps --filter label=tg-task`（带上面的 `DOCKER_HOST`）查看正在运行的任务。daemon 重启会中断进行中的任务。
 
 ## 发送结果未知
 

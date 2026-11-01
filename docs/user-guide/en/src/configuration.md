@@ -64,30 +64,58 @@ Each bot has its own token, personality, session and statistics. They share the 
 
 ## Tools
 
+Each bot switches its tools on in `tools`; only `send` is on by default:
+
 ```ts
-tools: { send: true, search: false, codemode: false, sandbox: false }
+tools: { send: true, search: false, codemode: false, sandbox: false, tasks: false }
 ```
 
-- `send`: post in the group, send stickers, add reactions. Turn it off for a bot that only watches.
-- `search`: search the web or read one public page (TinyFish). Requires `tiny_fish_api_key` in `.env`. Links in the group are not opened automatically, and private network addresses are refused.
-- `codemode`: let the bot write JavaScript scripts (Pi's native QuickJS sandbox) for exact calculations, or to call other tools in bulk and filter their results before answering; off by default. Scripts have no file system or network and cannot post for the bot.
+| Switch | What it does | Needs |
+|---|---|---|
+| `send` | post in the group, send stickers, add reactions; turn it off for a bot that only watches | nothing |
+| `search` | web search (up to 5 snippets) or read one public page, paging through long ones; localhost and private addresses are refused | `tiny_fish_api_key` in `.env` |
+| `codemode` | the bot writes JavaScript scripts (Pi's native QuickJS sandbox) for exact calculations, to call other tools in bulk and filter the results, and to search the group's whole message history. Scripts have no network or file system and cannot post for the bot | nothing |
+| `sandbox` | the bot's own Linux work box (a Docker container): run commands from scripts and copy in files people send; `send` can post images (jpg/png/webp up to 10 MB) and files (up to 50 MB) from the box straight to the group | `codemode: true`, a top-level `sandbox` section, rootless Docker on the host |
+| `tasks` | hand long searches and research to a background task and reply to the requester when it is done | `sandbox: true`, a top-level `tasks` section |
 
-- `sandbox`: give the bot its own Linux work box (a Docker container) where codemode scripts run commands and process files people send. Requires `codemode: true` and a top-level `sandbox` section; host setup is in the repository's `docs/runbooks/sandbox.md`. The box is wiped every Monday 05:00, and admins can `/box reset` at any time.
+The `view_image` tool has no switch: every bot gets it when `media.mode` is `"hybrid"` (see below).
 
-- `tasks`: let the bot hand long research to a background task (one of your Pi workflows, run in the work box) and reply to the requester when it is done. Requires `sandbox: true` and a top-level `tasks` section.
+### Work box (`sandbox`)
+
+```ts
+sandbox: { image: "tg-box:2", docker_host: "unix:///run/tgbox/docker.sock", memory: "1g", cpus: 2, pids: 256, network: true },
+```
+
+These are the defaults, so write only what you change, but the `sandbox` section itself must exist. Each bot with `sandbox` gets one long-lived container, run by rootless Docker under a dedicated Linux user, with no host directories mounted and no credentials inside. `network: false` takes the box offline.
+
+- Files in the box stay until it is wiped every Monday at 05:00 (local time of the daemon's machine); the bot is told when that happens.
+- Admins can send `/box reset` in the group at any time, and the bot can wipe its own box when it breaks.
+- Host setup (the `tgbox` user, rootless Docker, building the image) is in the [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md). It has only been tested on Linux hosts so far.
+
+### Background tasks (`tasks`)
+
+```ts
+tasks: { workflows: { search: "~/pi-tasks/search" }, max_running: 2, timeout_minutes: 45, memory: "3g", cpus: 2 },
+```
+
+- `workflows` maps a name to a directory that must contain a `.pi` folder (Pi project settings, extensions, prompts). The bot picks a workflow when it starts a task; each task runs Pi with that `.pi` in a throwaway container sharing the box's `/work`, so the bot can post whatever files the task produces.
+- `max_running` is how many tasks one bot may run at once; a task running past `timeout_minutes` fails. `memory` / `cpus` cap each task container.
+- Pi inside a task needs its own model credentials, kept in a dedicated Docker volume; see the [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md#任务凭证卷).
+- In the group: the bot first says it is on it; progress, questions for you and the result reach the bot as `[task tN …]` lines, and the bot relays them and replies to whoever asked. To add details, just reply to the bot and it forwards them. A daemon restart interrupts running tasks, and the bot tells the requester.
 
 ## Images and videos
 
 `media.mode` decides how bots "see" media:
 
-| Mode | How | Requirement |
+| Mode | How | Needs |
 |---|---|---|
-| `"off"` (default) | media show up as text placeholders such as `[photo]` | none |
-| `"describe"` | a vision model (`media.vision_model`) describes each new image or video once as text, shared by all bots | none for the main model |
-| `"context"` | images and video frames go straight to the main model; no vision model is called | the main model must accept image input |
-| `"hybrid"` | like describe (text descriptions only), but the bot can call `view_image` to look at one message's actual image or video frames when it needs to, including replied-to or searched older messages | the main model must accept image input |
+| `"off"` (default) | text placeholders such as `[photo]` only | nothing |
+| `"context"` | images and video frames go straight to the main model | a main model with image input |
+| `"hybrid"` | a vision model (`media.vision_model`) describes each new image or video once as text, shared by all bots; when a description is not enough, the bot calls `view_image` to open one message's actual image or video frames (up to 4 per turn), including replied-to or searched older messages | a main model with image input |
 
-`media.max_per_turn` caps media handled per turn (2 by default for describe, 4 for context) and `media.concurrency` caps parallel jobs (default 2). Voice, audio, ordinary files and TGS animated stickers are placeholders in every mode. Videos require FFmpeg on the host.
+Which one: with many images or a tight budget, use `hybrid`, which pays only for text descriptions until the bot really needs to look; use `context` if the main model should see every image directly.
+
+`media.max_per_turn` caps new media handled per turn (4 by default for context, 2 for hybrid) and `media.concurrency` caps parallel jobs (default 2). Voice, audio, ordinary files and TGS animated stickers are placeholders in every mode (a bot with `sandbox` can copy files into its box and work on them). Videos require FFmpeg on the host.
 
 ## Limits and defaults
 

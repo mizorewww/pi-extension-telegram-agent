@@ -13,7 +13,7 @@ bun run pi
 
 `bun run pi` starts the Pi on your PATH and loads this project's Telegram extension.
 
-Optional: install `ffmpeg` (which also provides `ffprobe`) so bots can understand videos. Without it, videos show up as a text placeholder and everything else keeps working. Use `brew install ffmpeg` on macOS, `sudo apt install ffmpeg` on Debian/Ubuntu, or `sudo pacman -S ffmpeg` on Arch.
+Optional: install `ffmpeg` (which also provides `ffprobe`) so bots that look at media can understand videos. Without it, videos show up as a text placeholder and everything else keeps working. Use `brew install ffmpeg` on macOS, `sudo apt install ffmpeg` on Debian/Ubuntu, or `sudo pacman -S ffmpeg` on Arch.
 
 ## 2. Prepare Telegram
 
@@ -33,7 +33,7 @@ In Pi:
 1. `/login` to your model provider;
 2. `/model` to choose the default model.
 
-Model credentials stay in Pi and are never written to this repository. By default the main model does not need image input, because an optional helper vision model describes images. Only if you switch to `media.mode: "context"`, where the main model looks at images directly, must the model support image input.
+Model credentials stay in Pi and are never written to this repository. The default configuration does not look at images, so any chat model works; if you later set `media.mode` to `"context"` or `"hybrid"`, the main model must accept image input.
 
 ## 4. Run `/tg config`
 

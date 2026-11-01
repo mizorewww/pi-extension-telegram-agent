@@ -9,7 +9,7 @@ bun run restart    # apply configuration changes
 bun run stop       # stop
 ```
 
-Logs are in `data/daemon.log` (structured JSON without chat content). For long-running use, manage the daemon with systemd as described in the [daemon runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/daemon.md).
+Logs are in `data/daemon.log` (structured JSON without chat content). For long-running use, manage the daemon with systemd as described in the [daemon runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/daemon.md); host setup for work boxes and background tasks is in the [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md).
 
 ## Group commands
 
@@ -32,6 +32,8 @@ Only people in `telegram_admins`:
 | `/compact` | summarize the context now (calls the summary model, which costs a little) |
 | `/set` | open a button menu to pick how often the bot joins in (0–1) and the pause after a spontaneous reply; takes effect at once |
 | `/fire on` / `/fire off` | let other bots' messages trigger this bot, or stop it; a bare `/fire` toggles |
+| `/box reset` | wipe this bot's work box now (only with `tools.sandbox`); it is also wiped every Monday at 05:00 |
+| `/task` | list this bot's background tasks or cancel one (only with `tools.tasks`; `/help` shows the exact syntax) |
 
 - `/model` and `/set` are written back to `telegram.config.ts` and survive restarts.
 - While a bot is replying, `/model`, `/new` and `/compact` ask you to retry later instead of interrupting it.
@@ -51,7 +53,7 @@ By default a bot only reacts to people. `/fire on` lets messages from other bots
 ## Backup
 
 1. `bun run stop`, and confirm `bun run status` shows it is not running;
-2. copy `telegram.config.ts`, `.env`, `personas/*.local.md` and the whole `data/` directory;
+2. copy `telegram.config.ts`, `.env`, `personas/*.local.md` and the whole `data/` directory (work box files are not included; they are wiped weekly anyway);
 3. keep `.env` and private personas somewhere safe.
 
 SQLite (`data/agent.db`) is the only copy of the chat history; Telegram cannot be used to restore it.

@@ -13,7 +13,7 @@ bun run pi
 
 `bun run pi` 启动你 PATH 中的 Pi，并自动加载本项目的 Telegram 扩展。
 
-可选：安装 `ffmpeg`（同时提供 `ffprobe`），bot 才能看懂视频；没有它，视频只显示成文字占位，其它功能不受影响。macOS 用 `brew install ffmpeg`，Debian/Ubuntu 用 `sudo apt install ffmpeg`，Arch 用 `sudo pacman -S ffmpeg`。
+可选：安装 `ffmpeg`（同时提供 `ffprobe`），开启看图后 bot 才能看懂视频；没有它，视频只显示成文字占位，其它功能不受影响。macOS 用 `brew install ffmpeg`，Debian/Ubuntu 用 `sudo apt install ffmpeg`，Arch 用 `sudo pacman -S ffmpeg`。
 
 ## 2. 准备 Telegram
 
@@ -33,7 +33,7 @@ token 等于 bot 的密码：不要发进群、issue 或 Git。
 1. `/login` 登录模型提供商；
 2. `/model` 选择默认模型。
 
-模型认证只保存在 Pi 里，不会写进本仓库。默认情况下主模型不需要支持图片（看图由可选的辅助视觉模型完成）；只有当你在配置里改成 `media.mode: "context"`、让主模型直接看图时，所选模型才必须支持图片输入。
+模型认证只保存在 Pi 里，不会写进本仓库。默认配置不看图，任何聊天模型都可以；之后如果把 `media.mode` 改成 `"context"` 或 `"hybrid"`，主模型必须支持图片输入。
 
 ## 4. 运行 `/tg config`
 

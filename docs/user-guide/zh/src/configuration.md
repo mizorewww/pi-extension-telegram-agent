@@ -64,17 +64,44 @@ export default defineConfig({
 
 ## 工具
 
+每个 bot 在 `tools` 里单独开关，默认只开 `send`：
+
 ```ts
-tools: { send: true, search: false, codemode: false, sandbox: false }
+tools: { send: true, search: false, codemode: false, sandbox: false, tasks: false }
 ```
 
-- `send`：在群里发言、发 sticker、点 reaction。关掉就是只看不说的观察 bot。
-- `search`：联网搜索或读取一个公开网页（TinyFish），需要在 `.env` 加 `tiny_fish_api_key`。不会自动打开群里的每个链接，也不能访问内网地址。
-- `codemode`：让 bot 写 JavaScript 脚本（Pi 原生 QuickJS 沙箱）做精确计算，或在脚本里批量调用其他工具、过滤结果再回答，默认关闭。脚本没有文件系统和网络，也不能替 bot 发言。
+| 开关 | 作用 | 前提 |
+|---|---|---|
+| `send` | 在群里发言、发 sticker、点 reaction；关掉就是只看不说的观察 bot | 无 |
+| `search` | 联网搜索（最多 5 条摘要）或读一个公开网页，长网页分页读完；不能访问 localhost 和内网地址 | `.env` 里有 `tiny_fish_api_key` |
+| `codemode` | 让 bot 写 JavaScript 脚本（Pi 原生 QuickJS 沙箱）：精确计算、在脚本里批量调用其他工具并筛选结果、检索本群全部历史消息。脚本没有网络和文件系统，不能替 bot 发言 | 无 |
+| `sandbox` | bot 自己的 Linux 工作区（Docker 容器）：在脚本里执行命令、拷入群友发的文件；`send` 可以把工作区里的图片（≤10 MB 的 jpg/png/webp）和文件（≤50 MB）直接发到群里 | `codemode: true`，顶层 `sandbox` 段，主机准备好 rootless Docker |
+| `tasks` | 把耗时的深入搜索、调研交给后台任务，完成后回复发起人 | `sandbox: true`，顶层 `tasks` 段 |
 
-- `sandbox`：给 bot 一个自己的 Linux 工作区（Docker 容器），它可以在 codemode 脚本里执行命令、处理群友发来的文件。需要 `codemode: true` 和顶层 `sandbox` 段；主机准备见仓库的 `docs/runbooks/sandbox.md`。工作区每周一 05:00 自动清空，管理员可以随时 `/box reset`。
+看图工具 `view_image` 没有开关，`media.mode: "hybrid"` 时所有 bot 自动拥有（见下文）。
 
-- `tasks`：让 bot 把耗时的深入搜索、调研交给后台任务（在工作区里运行你配置的 Pi 工作流），完成后回复发起人。需要 `sandbox: true` 和顶层 `tasks` 段。
+### 工作区（`sandbox`）
+
+```ts
+sandbox: { image: "tg-box:2", docker_host: "unix:///run/tgbox/docker.sock", memory: "1g", cpus: 2, pids: 256, network: true },
+```
+
+上面就是默认值，只写要改的字段即可，但 `sandbox` 段本身必须存在。每个开了 `sandbox` 的 bot 有一个常驻容器，以独立 Linux 用户的 rootless Docker 运行，不挂载主机目录、不带任何凭证。`network: false` 可以给工作区断网。
+
+- 工作区里的文件一直保留到每周一 05:00（daemon 所在机器的本地时间）自动清空；清空后 bot 会收到通知。
+- 管理员随时可以在群里 `/box reset`，bot 自己也能在工作区坏掉时清空。
+- 主机准备（建 `tgbox` 用户、rootless Docker、构建镜像）见 [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md)。目前只在 Linux 主机上验证过。
+
+### 后台任务（`tasks`）
+
+```ts
+tasks: { workflows: { search: "~/pi-tasks/search" }, max_running: 2, timeout_minutes: 45, memory: "3g", cpus: 2 },
+```
+
+- `workflows` 是“名字 → 目录”，目录里必须有一个 `.pi`（Pi 的项目设置、扩展、提示词）。bot 开任务时选一个工作流；每个任务在一次性容器里用这份 `.pi` 运行 Pi，与工作区共用 `/work`，所以产出的文件 bot 可以直接发到群里。
+- `max_running` 是每个 bot 同时运行的任务数，超过 `timeout_minutes` 的任务判为失败；`memory` / `cpus` 是每个任务容器的上限。
+- 任务里的 Pi 需要自己的模型凭证，放在一个专用的 Docker 卷里，准备方法见 [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md#任务凭证卷)。
+- 群里的样子：bot 先回复“我去查了”；任务的进展、需要你补充的问题和结果会作为 `[task tN …]` 交给 bot，由 bot 转述并回复发起人。补充信息直接回复 bot 即可，它会转给任务。daemon 重启时进行中的任务会中断，bot 会告诉发起人。
 
 ## 图片和视频
 
@@ -83,11 +110,12 @@ tools: { send: true, search: false, codemode: false, sandbox: false }
 | 模式 | 方式 | 要求 |
 |---|---|---|
 | `"off"`（默认） | 只显示 `[图片]` 这类文字占位 | 无 |
-| `"describe"` | 视觉模型（`media.vision_model`）把每张新图片/视频描述成文字一次，所有 bot 共用 | 主模型无要求 |
-| `"context"` | 图片和视频截帧直接交给主模型，不调用视觉模型 | 主模型必须支持图片输入 |
-| `"hybrid"` | 平时同 describe（只看文字描述）；bot 觉得需要时用 `view_image` 查看某条消息的原图或视频帧，被引用、被检索到的旧消息也能看 | 主模型必须支持图片输入 |
+| `"context"` | 图片和视频截帧直接交给主模型 | 主模型支持图片输入 |
+| `"hybrid"` | 视觉模型（`media.vision_model`）把每张新图片/视频描述成文字一次，所有 bot 共用；bot 觉得描述不够时用 `view_image` 打开某条消息的原图或视频帧（每轮最多 4 张），被回复或检索到的旧消息也能看 | 主模型支持图片输入 |
 
-`media.max_per_turn` 是每轮最多处理的媒体数（describe 默认 2、context 默认 4），`media.concurrency` 是并行处理数（默认 2）。语音、音频、普通文件、TGS 动画贴纸在所有模式下都只是文字占位。视频需要主机装有 FFmpeg。
+怎么选：图片多、想省钱用 `hybrid`，平时只付文字描述的费用，真正需要细看时才把图片交给主模型；希望每张图都被主模型直接看到用 `context`。
+
+`media.max_per_turn` 是每轮最多处理的新媒体数（context 默认 4，hybrid 默认 2），`media.concurrency` 是并行处理数（默认 2）。语音、音频、普通文件、TGS 动画贴纸在所有模式下都只是文字占位（开了 `sandbox` 的 bot 可以把文件拷进工作区处理）。视频需要主机装有 FFmpeg。
 
 ## 上限与默认值
 

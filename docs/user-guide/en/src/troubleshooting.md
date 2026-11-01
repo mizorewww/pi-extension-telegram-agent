@@ -33,7 +33,7 @@ Make sure you ran `bun run pi` from the repository root. `/tg config` works with
 /tg restart
 ```
 
-Then read `data/daemon.log`. Typical causes: a wrong token, no network, the bot is not in the group, the model is not in Pi's catalog, or, with `media.mode: "context"`, a model without image input (`image_input_unsupported`).
+Then read `data/daemon.log`. Typical causes: a wrong token, no network, the bot is not in the group, the model is not in Pi's catalog, or, with `media.mode` set to `"context"` or `"hybrid"`, a model without image input (`image_input_unsupported`).
 
 ## The bot ignores a mention
 
@@ -60,6 +60,18 @@ Its context may be stuck on a misunderstanding, which summaries then carry forwa
 
 - Check that the bot has `tools.search: true` and a TinyFish key in `.env`, then restart.
 - `invalid_url` means the target is not a public HTTP(S) address (for example localhost, a private IP, or a link with a username and password). This is a deliberate safety limit.
+
+## Work box commands fail
+
+- Startup fails: `tools.sandbox` also needs `tools.codemode` and a top-level `sandbox` section.
+- Fails while running: on the host, run `DOCKER_HOST=unix:///run/tgbox/docker.sock docker info` to confirm rootless Docker is up and the daemon user is in the `tgbox` group; the image name must match `sandbox.image`. See the [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md).
+- The box is in a mess: an admin sends `/box reset`; it is rebuilt on next use.
+
+## Background tasks never report back
+
+- Startup fails: `tools.tasks` needs `tools.sandbox` and a top-level `tasks` section, and every directory in `tasks.workflows` must contain `.pi`.
+- Tasks fail right away: usually Pi inside the task container has no model credentials; prepare the credentials volume as described in the [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md#任务凭证卷).
+- No result for a long time: a task past `tasks.timeout_minutes` fails and the requester is told; on the host, `docker ps --filter label=tg-task` (with the `DOCKER_HOST` above) lists running tasks. A daemon restart interrupts running tasks.
 
 ## A send outcome is unknown
 
