@@ -19,7 +19,7 @@ import {
 	type SessionBeforeCompactEvent,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { createContextImageResolver } from "../../media/context-media.ts";
+import { createImageRefResolver } from "../../media/prepare-images.ts";
 import { log } from "../../observability/log.ts";
 import type { PiRequestThinkingLevel } from "../model-ref.ts";
 import { COMPACTION_SUMMARY_PROMPT } from "../prompt.ts";
@@ -156,7 +156,7 @@ export async function generateCompactionSummary(
 	const content = buildCompactionContent(
 		messages,
 		prep.previousSummary,
-		model.input.includes("image") ? createContextImageResolver(options.mediaDir) : undefined,
+		model.input.includes("image") ? createImageRefResolver(options.mediaDir) : undefined,
 	);
 	const imagesAttached = typeof content === "string" ? 0 : content.filter((block) => block.type === "image").length;
 	const text =

@@ -7,7 +7,7 @@ Pi `/tg status`、Telegram `/status` 与 attached 状态栏的字段含义、公
 | 来源 | 拥有什么 |
 |---|---|
 | SQLite `llm_runs`（`src/db/usage.ts` 的 `loadBotStats`） | 每次成功 provider 响应的 usage、费用、延迟；保留期内累计（默认 90 天） |
-| SQLite `task_usage` | 后台任务主会话的 usage 与费用（每条 assistant 消息一行），不进入 bot 的聊天统计；`task status` 与 `/task` 按任务汇总 |
+| SQLite `tasks` 用量列 | 后台任务主会话累计的 token 与费用，不进入 bot 的聊天统计，不按遥测保留期清理；`task status` 与 `/task` 显示它 |
 | daemon runtime snapshot（`BotRuntime.controlSnapshot()`） | 当前 provider/model、**实际生效**的 reasoning、context window、epoch、运行状态、路由参数、最近压缩结果、Pi session 的实时 context 用量 |
 
 两者只在 `src/observability/status.ts` 的 `buildBotStatusView` 里合并一次；详细字段由 `botStatusFields` 生成，Pi 与 Telegram 迭代同一组有序字段。新增或改字段只改这一处。

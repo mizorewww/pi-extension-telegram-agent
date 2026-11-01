@@ -13,7 +13,7 @@ import {
 	PiModelConfigurationError,
 	type PiProviderFailureCategory,
 } from "../agent/model-runtime.ts";
-import { bytesBucket, dedupeInFlight, isVideoMedia, isVisionMedia, type MediaBytesBucket } from "./local-cache.ts";
+import { dedupeInFlight, isVideoMedia, isVisionMedia } from "./local-cache.ts";
 import { appendMediaUpdateEvents } from "../db/message-events.ts";
 import type { VisionScheduler } from "./vision-scheduler.ts";
 import {
@@ -22,8 +22,6 @@ import {
 	type PrepareMediaImagesFailure,
 	type PrepareMediaImagesOptions,
 } from "./prepare-images.ts";
-
-export { fileIdForBot } from "./local-cache.ts";
 
 const PHOTO_PROMPT = `你在帮一个群聊 bot 理解图片。简短描述：实际可见内容、重要文字/OCR（尤其是界面和报错）、人物或物体、对聊天可能有用的信息、不确定的地方。2-3 句话以内，用中文，直接给描述不要客套。`;
 
@@ -37,7 +35,6 @@ export const VISION_TIMEOUT_MS = 90_000;
 export const VISION_MAX_OUTPUT_TOKENS = 256;
 
 export type VisionKind = "photo" | "sticker" | "video";
-export type VisionBytesBucket = MediaBytesBucket | "gte_512_kib";
 export type VisionOutcome =
 	| "ok"
 	| "empty_response"
@@ -47,8 +44,6 @@ export type VisionOutcome =
 
 export interface VisionTelemetry {
 	kind: VisionKind;
-	sourceBytesBucket: VisionBytesBucket;
-	convertedBytesBucket: VisionBytesBucket;
 	latencyMs: number;
 	inputTokens: number;
 	outputTokens: number;
@@ -72,7 +67,6 @@ export interface VisionImageInput {
 
 export interface VisionDescribeInput {
 	kind: VisionKind;
-	sourceBytes: number;
 	images: VisionImageInput[];
 	videoSticker?: boolean;
 }
@@ -93,21 +87,15 @@ export interface EnsureVisionOptions extends PrepareMediaImagesOptions {
 	onPersist?: VisionUpdateSink;
 	/** Receives bounded aggregate fields only; never identity, path, prompt, or response text. */
 	onTelemetry?: VisionTelemetrySink;
-	/** Shared deployment-wide provider gate; cache/local work remains outside the queue. */
+	/** Shared deployment-wide gate over each description's preparation and provider call. */
 	scheduler?: VisionScheduler;
 }
 
 type VisionModelRuntime = Pick<ModelRuntime, "getModel" | "completeSimple">;
 
-function boundedNumber(value: unknown): number {
-	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
-}
-
 function emptyTelemetry(kind: VisionKind, outcome: VisionOutcome, latencyMs: number): VisionTelemetry {
 	return {
 		kind,
-		sourceBytesBucket: "unavailable",
-		convertedBytesBucket: "unavailable",
 		latencyMs: Math.max(0, Math.round(latencyMs)),
 		inputTokens: 0,
 		outputTokens: 0,
@@ -119,8 +107,6 @@ function emptyTelemetry(kind: VisionKind, outcome: VisionOutcome, latencyMs: num
 
 function usageTelemetry(
 	kind: VisionKind,
-	sourceBytes: number,
-	convertedBytes: number,
 	latencyMs: number,
 	outcome: VisionOutcome,
 	message: AssistantMessage | undefined,
@@ -128,13 +114,11 @@ function usageTelemetry(
 ): VisionTelemetry {
 	return {
 		kind,
-		sourceBytesBucket: bytesBucket(sourceBytes, "gte_512_kib"),
-		convertedBytesBucket: bytesBucket(convertedBytes, "gte_512_kib"),
 		latencyMs: Math.max(0, Math.round(latencyMs)),
-		inputTokens: boundedNumber(message?.usage.input),
-		outputTokens: boundedNumber(message?.usage.output),
-		reasoningTokens: boundedNumber(message?.usage.reasoning),
-		cost: boundedNumber(message?.usage.cost.total),
+		inputTokens: message?.usage.input ?? 0,
+		outputTokens: message?.usage.output ?? 0,
+		reasoningTokens: message?.usage.reasoning ?? 0,
+		cost: message?.usage.cost.total ?? 0,
 		outcome,
 		frames,
 		providerCalled: true,
@@ -157,9 +141,7 @@ export function createPiVisionExecutor(runtime: VisionModelRuntime, modelRef: st
 		readinessFailure,
 		async describe(input): Promise<VisionDescriptionResult> {
 			const startedAt = performance.now();
-			const sourceBytes = input.sourceBytes;
 			// Images arrive already converted/resized by prepareMediaImages; only encode them here.
-			const convertedBytes = input.images.reduce((total, image) => total + image.bytes.byteLength, 0);
 			const images = input.images.map((image) => ({
 				data: Buffer.from(image.bytes).toString("base64"),
 				mimeType: image.mimeType,
@@ -196,25 +178,21 @@ export function createPiVisionExecutor(runtime: VisionModelRuntime, modelRef: st
 				],
 			};
 			const telemetry = (outcome: VisionOutcome, message?: AssistantMessage): VisionTelemetry =>
-				usageTelemetry(
-					input.kind,
-					sourceBytes,
-					convertedBytes,
-					performance.now() - startedAt,
-					outcome,
-					message,
-					input.images.length,
-				);
+				usageTelemetry(input.kind, performance.now() - startedAt, outcome, message, input.images.length);
 			let message: AssistantMessage;
 			try {
-				// Single timeout layer: the SDK enforces VISION_TIMEOUT_MS inside completeSimple.
-				message = await runtime.completeSimple(model!, context, {
-					cacheRetention: "none",
-					maxTokens: VISION_MAX_OUTPUT_TOKENS,
-					maxRetries: 0,
-					reasoning: selection.thinkingLevel,
-					timeoutMs: VISION_TIMEOUT_MS,
-				});
+				// Pi's timeoutMs only bounds its own SDK call; this deadline also frees the vision
+				// slot and aborts the HTTP request when a provider stalls mid-body.
+				message = await withVisionDeadline((signal) =>
+					runtime.completeSimple(model!, context, {
+						cacheRetention: "none",
+						maxTokens: VISION_MAX_OUTPUT_TOKENS,
+						maxRetries: 0,
+						reasoning: selection.thinkingLevel,
+						timeoutMs: VISION_TIMEOUT_MS,
+						signal,
+					}),
+				);
 			} catch (error) {
 				return { text: null, telemetry: telemetry(classifyPiProviderFailure(error)) };
 			}
@@ -237,7 +215,20 @@ export function assertPiVisionExecutorReady(executor: VisionExecutor): void {
 	}
 }
 
-const inFlightByDb = new WeakMap<Database, Map<string, Promise<string | null>>>();
+/** Fail a vision call at the deadline even if the provider never settles; the abort is best effort. */
+function withVisionDeadline<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+	const controller = new AbortController();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => {
+			controller.abort();
+			reject(new Error("provider_timeout: vision request deadline exceeded"));
+		}, VISION_TIMEOUT_MS);
+	});
+	return Promise.race([work(controller.signal), deadline]).finally(() => clearTimeout(timer));
+}
+
+const inFlight = new Map<string, Promise<string | null>>();
 
 /** Ensure a terminal vision result exists; same-identity calls share one provider request. */
 export function ensureVision(
@@ -248,7 +239,7 @@ export function ensureVision(
 	executor: VisionExecutor,
 	options: EnsureVisionOptions,
 ): Promise<string | null> {
-	return dedupeInFlight(inFlightByDb, db, fileUniqueId, () =>
+	return dedupeInFlight(inFlight, fileUniqueId, () =>
 		ensureVisionInner(db, api, botId, fileUniqueId, executor, options),
 	);
 }
@@ -282,18 +273,8 @@ async function ensureVisionInner(
 		const cached = JSON.parse(media.vision) as { text?: string | null };
 		return cached.text?.trim() || null;
 	}
-	if (video) {
-		if (!options.videoTranscoder.ffmpeg || !options.videoTranscoder.ffprobe) {
-			emitTelemetry(options, emptyTelemetry(kind, "video_transcoder_unavailable", performance.now() - startedAt));
-			return null;
-		}
-		if (options.scheduler) {
-			return options.scheduler.schedule(() =>
-				ensureVisionPrepared(db, api, botId, fileUniqueId, executor, options, media.kind, kind, startedAt, true),
-			);
-		}
-	}
-	return ensureVisionPrepared(db, api, botId, fileUniqueId, executor, options, media.kind, kind, startedAt, false);
+	const run = () => ensureVisionPrepared(db, api, botId, fileUniqueId, executor, options, media.kind, kind, startedAt);
+	return options.scheduler ? options.scheduler.schedule(run) : run();
 }
 
 /** Only outcomes that cannot change on retry are cached; ffmpeg/provider/transport failures retry later. */
@@ -312,28 +293,24 @@ async function ensureVisionPrepared(
 	executor: VisionExecutor,
 	options: EnsureVisionOptions,
 	mediaKind: string,
-	initialKind: VisionKind,
+	kind: VisionKind,
 	startedAt: number,
-	providerSlotReserved: boolean,
 ): Promise<string | null> {
 	const prepared = await prepareMediaImages(db, api, botId, fileUniqueId, options);
 	if (!prepared.ok) {
 		const outcome: VisionOutcome = prepared.outcome === "aborted" ? "media_download_aborted" : prepared.outcome;
-		if (outcome === "unsupported_format") persistUnsupported(db, fileUniqueId, initialKind, outcome);
-		emitTelemetry(options, emptyTelemetry(initialKind, outcome, performance.now() - startedAt));
+		if (outcome === "unsupported_format") persistUnsupported(db, fileUniqueId, kind, outcome);
+		emitTelemetry(options, emptyTelemetry(kind, outcome, performance.now() - startedAt));
 		return null;
 	}
-	const kind: VisionKind = prepared.kind === "video" ? "video" : initialKind;
 
 	const describe = () =>
 		executor.describe({
 			kind,
-			sourceBytes: prepared.sourceBytes,
 			images: prepared.images,
 			...(kind === "video" && mediaKind === "sticker" ? { videoSticker: true } : {}),
 		});
-	const result: VisionDescriptionResult =
-		options.scheduler && !providerSlotReserved ? await options.scheduler.schedule(describe) : await describe();
+	const result = await describe();
 	const text = result.text?.trim() || null;
 	if (text) {
 		db.query("UPDATE media SET vision = ? WHERE file_unique_id = ?").run(

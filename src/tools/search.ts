@@ -5,7 +5,6 @@ import { parsePublicHttpUrl } from "../net/public-url.ts";
 
 const SEARCH_URL = "https://api.search.tinyfish.ai";
 const FETCH_URL = "https://api.fetch.tinyfish.ai";
-const MAX_QUERY_CHARS = 1_000;
 const MAX_RESULTS = 5;
 const MAX_TITLE_CHARS = 120;
 const MAX_SNIPPET_CHARS = 200;
@@ -211,7 +210,6 @@ async function requestJson(
 
 export async function tinyFishSearch(apiKey: string, query: string, opts: SearchOptions = {}): Promise<SearchHit[]> {
 	const trimmedQuery = query.trim();
-	if (!trimmedQuery || trimmedQuery.length > MAX_QUERY_CHARS) throw new TinyFishClientError("invalid_request");
 	const endpoint = opts.endpoint ?? SEARCH_URL;
 	const target = new URL(endpoint);
 	target.searchParams.set("query", trimmedQuery);
@@ -373,11 +371,11 @@ export async function runTinyFishTool(
 	const query = typeof params.query === "string" ? params.query.trim() : "";
 	const rawUrl = typeof params.url === "string" ? params.url.trim() : "";
 	const offsetProvided = params.offset !== undefined;
+	// Pi validates types and lengths against the tool schema; the pairing rules live here.
 	if (
 		Number(queryProvided) + Number(urlProvided) !== 1 ||
-		(queryProvided && (!query || query.length > MAX_QUERY_CHARS || offsetProvided)) ||
-		(urlProvided && !rawUrl) ||
-		(offsetProvided && (!Number.isSafeInteger(params.offset) || (params.offset as number) < 0))
+		(queryProvided && (!query || offsetProvided)) ||
+		(urlProvided && !rawUrl)
 	) {
 		return toolFailure(new TinyFishClientError("invalid_request"), "tool_search");
 	}

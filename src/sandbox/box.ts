@@ -96,6 +96,28 @@ export function normalizeBoxPath(path: string): string {
 	return normalized;
 }
 
+/**
+ * Flags every container from the box image carries, the work box and task runs alike: the box
+ * user, no capabilities, no privilege gain, a read-only root, and only the bot's /work volume.
+ */
+export function isolationArgs(botId: string, network: boolean): string[] {
+	return [
+		"--user",
+		"1000:1000",
+		"--cap-drop",
+		"ALL",
+		"--security-opt",
+		"no-new-privileges",
+		"--read-only",
+		"--network",
+		network ? "bridge" : "none",
+		"--env",
+		`HOME=${BOX_WORKDIR}/.home`,
+		"--volume",
+		`tg-work-${botId}:${BOX_WORKDIR}`,
+	];
+}
+
 export class WorkBox {
 	readonly container: string;
 	readonly volume: string;
@@ -125,13 +147,7 @@ export class WorkBox {
 			"box",
 			"--label",
 			`tg-box=${this.botId}`,
-			"--user",
-			"1000:1000",
-			"--cap-drop",
-			"ALL",
-			"--security-opt",
-			"no-new-privileges",
-			"--read-only",
+			...isolationArgs(this.botId, this.config.network),
 			"--tmpfs",
 			"/tmp:rw,nosuid,nodev,size=256m",
 			"--memory",
@@ -140,12 +156,6 @@ export class WorkBox {
 			String(this.config.cpus),
 			"--pids-limit",
 			String(this.config.pids),
-			"--network",
-			this.config.network ? "bridge" : "none",
-			"--env",
-			`HOME=${BOX_WORKDIR}/.home`,
-			"--volume",
-			`${this.volume}:${BOX_WORKDIR}`,
 			"--workdir",
 			BOX_WORKDIR,
 			this.config.image,

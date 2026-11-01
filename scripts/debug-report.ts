@@ -123,7 +123,7 @@ export async function main(args = process.argv.slice(2), rootDir = process.cwd()
 			modelReasoning,
 			videoTranscoder: {
 				required: config.media.mode !== "off",
-				...inspectVideoTranscoder(),
+				available: inspectVideoTranscoder(),
 			},
 		});
 		const providerContexts = Object.fromEntries(

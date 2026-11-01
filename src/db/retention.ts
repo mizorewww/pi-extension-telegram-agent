@@ -35,7 +35,6 @@ export function applyRetention(db: Database, config: RetentionConfig, now = Date
 	const prune = db.transaction((): RetentionResult => {
 		const agentEvents = db.query("DELETE FROM agent_events WHERE ts < ?").run(telemetryCutoffMs).changes;
 		const llmRuns = db.query("DELETE FROM llm_runs WHERE ts < ?").run(telemetryCutoffMs).changes;
-		db.query("DELETE FROM task_usage WHERE ts < ?").run(telemetryCutoffMs);
 		const rawUpdates = db
 			.query(
 				"DELETE FROM raw_updates WHERE received_at < ? AND NOT EXISTS (SELECT 1 FROM pending_telegram_dispatch p WHERE p.bot_id = raw_updates.bot_id AND p.update_id = raw_updates.update_id)",

@@ -14,7 +14,7 @@ export interface DebugReportInput {
 	logs?: readonly LogRecord[];
 	daemon?: { pid: number | null; alive: boolean; socket: boolean };
 	modelReasoning?: readonly DebugModelReasoning[];
-	videoTranscoder?: { required: boolean; ffmpeg: boolean; ffprobe: boolean };
+	videoTranscoder?: { required: boolean; available: boolean };
 }
 
 export interface DebugModelReasoning {
@@ -184,7 +184,7 @@ export function buildDebugReport(db: Database, input: DebugReportInput) {
 	});
 
 	const findings: DebugFinding[] = [];
-	if (input.videoTranscoder?.required && (!input.videoTranscoder.ffmpeg || !input.videoTranscoder.ffprobe)) {
+	if (input.videoTranscoder?.required && !input.videoTranscoder.available) {
 		findings.push({
 			code: "video_transcoder_unavailable",
 			bot_id: "deployment",

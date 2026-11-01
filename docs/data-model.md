@@ -27,24 +27,22 @@ SQLite（WAL），默认 `data/agent.db`，schema 在 `src/db/schema.sql`，启�
 | `bot_cursors` | `(bot_id, chat_id)` | 已消费到的 `ingest_seq`，只增不减 |
 | `bot_visible_messages` | `(bot_id, chat_id, message_id)` + `context_epoch` | 当前 context 真正包含完整内容的消息；压缩或换 session 时整组替换 |
 | `bot_session_manifest` | `bot_id` | 当前 session id、文件路径、完整 fingerprint |
-| `tasks` | `task_id`（`t<rowid>`） | 后台任务：所属 bot、发起消息、工作流、标题、状态（running / need_input / done / failed / cancelled / interrupted） |
-| `task_usage` | `id`（自增） | 任务主会话每条 assistant 消息的 provider 用量（输入 / 输出 / 缓存 / 费用）；任务内 subagent 是独立进程，不计入；按遥测保留期清理 |
-| `messages_fts` | `rowid`（= `messages.rowid`） | FTS5 trigram 外部内容索引（text、caption），由 trigger 同步；打开旧库时按 `daemon_state.messages_fts_version` 补建一次。`tg_messages` 的 3 字以上子串查询与 relevance 排序用它 |
+| `tasks` | `task_id`（`t<rowid>`） | 后台任务：所属 bot、发起消息、工作流、标题、状态（running / need_input / done / failed / cancelled / interrupted），以及任务主会话累计的 provider 用量（`input_tokens` 含缓存读写、`output_tokens`、`cost`；任务内 subagent 是独立进程，不计入） |
+| `messages_fts` | `rowid`（= `messages.rowid`） | FTS5 trigram 外部内容索引（text、caption），由 trigger 同步。`tg_messages` 的 3 字以上子串查询与 relevance 排序用它 |
 | `reply_obligations` | `(bot_id, chat_id, message_id)` | 直接点名后待回复的消息身份（不存正文） |
 | `routing_claims` | `(chat_id, message_id, bot_id, route_version)` | 防止同一消息对同一 bot 重复启动 |
 | `bot_state` | `(bot_id, key)` | epoch、Telegram offset、bot user id / username |
 | `daemon_state` | `key` | router secret、当前 cache schema、每个 bot 工作区上次每周清空时间（`box_reset_at:<bot>`）等单例 |
 
-- 新配置的 bot 没有 cursor 时，默认从 `message_events_backfill_max_seq`（若存在）开始，不重放更早历史。
 - daemon 启动删除已不在配置中的 bot 的 cursor 与回复义务，否则它们会永久卡住 `message_events` 的保留期清理。
 
 ## 媒体、事件与遥测
 
-- `media`：`file_unique_id` 是共享身份；`short_id` 由 rowid 分配（不能用 COUNT+1）；`vision`（hybrid 模式描述 JSON）与 `context_files`（view_image 用的派生图片 `[{name, mime}]`）按身份持久化、跨 bot 复用；`local_path` 只存 `data/media` 下的文件名。
+- `media`：`file_unique_id` 是共享身份；`short_id` 由 rowid 分配（不能用 COUNT+1）；`vision`（hybrid 模式描述 JSON）按身份持久化、跨 bot 复用；`local_path` 只存 `data/media` 下的文件名。view_image 用的派生图片不入库：文件名由身份和槽位（`#ctx` / `#frameN`）哈希得出，随源文件一起清理。
 - `media_file_ids(bot_id, file_id, file_unique_id)`：bot 专属的可发送/可下载能力。
 - `aliases(chat_id, user_id) → u<N>`：无 username 发送者的稳定别名（rowid 分配）。
 - `agent_events`：只追加的本地行为流（assistant 文本、thinking、tool、send、错误、压缩、控制审计……）。一次 agent run 的原始事件带 `activity_id`，结束时另追加一条 `agent_activity` 作为 TUI 卡片。不存 token、prompt、完整 URL 或路径。
-- `llm_runs`：每次成功 provider 响应一行：usage、费用、延迟、thinking/send 耗时、provider/api/model、session hash、system/tools/完整 payload 的 HMAC 与首个分叉位置（逐条消息的 hash 列表只在内存中用于前缀估算，`messages_hash` 列不再写入）、上下文构成估算、trigger、公开发送数、图片数等。口径见 [telemetry.md](telemetry.md)。
+- `llm_runs`：每次成功 provider 响应一行：usage、费用、延迟、thinking/send 耗时、provider/api/model、session hash、system/tools/完整 payload 的 HMAC 与首个分叉位置（逐条消息的 hash 列表只在内存中用于前缀估算）、上下文构成估算、trigger、公开发送数、图片数等。口径见 [telemetry.md](telemetry.md)。
 
 ## 保留期
 

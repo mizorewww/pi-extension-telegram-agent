@@ -7,7 +7,7 @@ import type { Database } from "bun:sqlite";
 import { spawn } from "node:child_process";
 import { appendNoteEvent, type NotePayload } from "../db/message-events.ts";
 import { log } from "../observability/log.ts";
-import type { WorkBox } from "../sandbox/box.ts";
+import { runDocker, type WorkBox } from "../sandbox/box.ts";
 import { type ReportKind, type Spawner, TaskProcess, type TaskRunConfig, type TaskUsage } from "./process.ts";
 
 export const PROGRESS_INTERVAL_MS = 5 * 60_000;
@@ -32,6 +32,9 @@ export interface TaskRow {
 	status: TaskStatus;
 	created_at: number;
 	updated_at: number;
+	input_tokens: number;
+	output_tokens: number;
+	cost: number;
 }
 
 export interface TaskManagerDeps {
@@ -73,19 +76,16 @@ const packWorkflowDir = (dir: string) =>
 		);
 	});
 
-const removeTaskContainers = (dockerHost: string) =>
-	new Promise<void>((resolve) => {
-		const child = spawn(
-			"sh",
-			["-c", 'ids=$(docker ps -aq --filter label=tg-task); [ -z "$ids" ] || docker rm -f $ids'],
-			{
-				env: { PATH: process.env.PATH ?? "/usr/bin:/bin", DOCKER_HOST: dockerHost },
-				stdio: "ignore",
-			},
-		);
-		child.on("close", () => resolve());
-		child.on("error", () => resolve());
-	});
+async function removeTaskContainers(dockerHost: string): Promise<void> {
+	const options = { dockerHost, timeoutMs: 60_000 };
+	try {
+		const listed = await runDocker(["ps", "-aq", "--filter", "label=tg-task"], options);
+		const ids = new TextDecoder().decode(listed.stdout).split(/\s+/).filter(Boolean);
+		if (ids.length > 0) await runDocker(["rm", "--force", ...ids], options);
+	} catch {
+		// Best effort: startup recovery must not fail because the docker daemon is unreachable.
+	}
+}
 
 export class TaskManager {
 	private readonly live = new Map<string, Live>();
@@ -105,14 +105,10 @@ export class TaskManager {
 	describe(botId: string, limit = 10): string {
 		const rows = this.list(botId, limit);
 		if (rows.length === 0) return "no tasks yet";
-		const usage = this.deps.db.query(
-			"SELECT COALESCE(SUM(input_tokens + cache_read + cache_write), 0) input, COALESCE(SUM(output_tokens), 0) output, COALESCE(SUM(cost), 0) cost FROM task_usage WHERE task_id = ?",
-		);
 		return rows
 			.map((row) => {
-				const used = usage.get(row.task_id) as { input: number; output: number; cost: number };
-				const tokens = `${Math.round(used.input / 1000)}k in / ${Math.round(used.output / 1000)}k out`;
-				const cost = used.cost > 0 ? ` $${used.cost.toFixed(2)}` : "";
+				const tokens = `${Math.round(row.input_tokens / 1000)}k in / ${Math.round(row.output_tokens / 1000)}k out`;
+				const cost = row.cost > 0 ? ` $${row.cost.toFixed(2)}` : "";
 				return `${row.task_id} [${row.status}] ${row.workflow}: ${row.title} (↪ #${row.origin_message_id}; ${tokens}${cost})`;
 			})
 			.join("\n");
@@ -207,7 +203,7 @@ export class TaskManager {
 			botId,
 			this.deps.run,
 			{
-				onUsage: (usage) => this.recordUsage(taskId, botId, usage),
+				onUsage: (usage) => this.recordUsage(taskId, usage),
 				onReport: (kind, text, files) => this.onReport(taskId, kind, text, files),
 				onSettled: (lastText) => this.onSettled(taskId, lastText),
 				onExit: (code) => this.onExit(taskId, code),
@@ -229,24 +225,12 @@ export class TaskManager {
 		return task;
 	}
 
-	private recordUsage(taskId: string, botId: string, usage: TaskUsage): void {
+	private recordUsage(taskId: string, usage: TaskUsage): void {
 		this.deps.db
 			.query(
-				`INSERT INTO task_usage (task_id, bot_id, ts, provider, model, input_tokens, output_tokens, cache_read, cache_write, cost)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				"UPDATE tasks SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?, cost = cost + ? WHERE task_id = ?",
 			)
-			.run(
-				taskId,
-				botId,
-				Date.now(),
-				usage.provider,
-				usage.model,
-				usage.input,
-				usage.output,
-				usage.cacheRead,
-				usage.cacheWrite,
-				usage.cost,
-			);
+			.run(usage.input, usage.output, usage.cost, taskId);
 	}
 
 	private ownLive(botId: string, taskId: string): Live {

@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { resolveMediaSourcePath } from "./local-cache.ts";
+import { derivedImageNames } from "./prepare-images.ts";
 
 export const MEDIA_PRUNE_BATCH_LIMIT = 256;
 
@@ -51,11 +52,6 @@ const ACTIVE_MEDIA_REFERENCE_SQL = `EXISTS (
 	               WHERE cursor.bot_id = configured.value
 	                 AND cursor.chat_id = event.chat_id
 	            ),
-	            CAST((
-	              SELECT state.value
-	                FROM daemon_state state
-	               WHERE state.key = 'message_events_backfill_max_seq'
-	            ) AS INTEGER),
 	            0
 	          )
 	     )
@@ -77,36 +73,10 @@ const defaultRemove: NonNullable<MediaPruneOptions["remove"]> = (path) => {
 	}
 };
 
-/** Return only missing static-display files that still have an active configured-bot reference. */
-export function listReferencedMissingDisplayMediaIds(
-	db: Database,
-	configuredBotIds: readonly string[],
-	limit: number,
-): string[] {
-	const botIdsJson = configuredBotIdsJson(configuredBotIds);
-	if (!botIdsJson || limit <= 0) return [];
-	return (
-		db
-			.query(`
-				SELECT media.file_unique_id AS fileUniqueId
-				  FROM media
-				 WHERE media.local_path IS NULL
-				   AND (
-				     media.kind = 'photo'
-				     OR (media.kind = 'sticker' AND COALESCE(media.mime, 'image/webp') = 'image/webp')
-				   )
-				   AND ${ACTIVE_MEDIA_REFERENCE_SQL}
-				 ORDER BY media.rowid DESC
-				 LIMIT ?2
-			`)
-			.all(botIdsJson, Math.max(1, Math.floor(limit))) as Array<{ fileUniqueId: string }>
-	).map((row) => row.fileUniqueId);
-}
-
 /**
  * Delete a bounded batch of reproducible local media after compaction visibility is committed.
- * Derived context images (media.context_files) are removed together with their source file and
- * the DB refs are cleared for every scanned row (unlink failures are counted, never retried).
+ * Derived view_image files are removed together with their source file and the DB ref is
+ * cleared for every scanned row (unlink failures are counted, never retried).
  * Canonical messages, file-id mappings, short ids and vision results remain untouched.
  */
 export function pruneUnreferencedMediaCache(
@@ -120,22 +90,19 @@ export function pruneUnreferencedMediaCache(
 	const limit = Math.min(MEDIA_PRUNE_BATCH_LIMIT, Math.max(1, Math.floor(options.limit ?? MEDIA_PRUNE_BATCH_LIMIT)));
 	const rows = db
 		.query(`
-			SELECT media.file_unique_id AS fileUniqueId, media.local_path AS localPath,
-			       media.context_files AS contextFiles
+			SELECT media.file_unique_id AS fileUniqueId, media.local_path AS localPath
 			  FROM media
-			 WHERE (media.local_path IS NOT NULL OR media.context_files IS NOT NULL)
+			 WHERE media.local_path IS NOT NULL
 			   AND NOT ${ACTIVE_MEDIA_REFERENCE_SQL}
 			 ORDER BY media.rowid
 			 LIMIT ?2
 		`)
-		.all(botIdsJson, limit) as Array<{ fileUniqueId: string; localPath: string | null; contextFiles: string | null }>;
+		.all(botIdsJson, limit) as Array<{ fileUniqueId: string; localPath: string }>;
 	const result: MediaPruneResult = { scanned: rows.length, deleted: 0, stale: 0, failed: 0 };
-	const clear = db.query(
-		"UPDATE media SET local_path = NULL, context_files = NULL WHERE file_unique_id = ? AND local_path IS ?",
-	);
+	const clear = db.query("UPDATE media SET local_path = NULL WHERE file_unique_id = ? AND local_path IS ?");
 	const remove = options.remove ?? defaultRemove;
 	for (const row of rows) {
-		const path = row.localPath ? resolveMediaSourcePath(mediaDir, row.localPath) : null;
+		const path = resolveMediaSourcePath(mediaDir, row.localPath);
 		if (path) {
 			try {
 				if (remove(path) === "deleted") result.deleted++;
@@ -143,10 +110,10 @@ export function pruneUnreferencedMediaCache(
 			} catch {
 				result.failed++;
 			}
-		} else if (row.localPath) {
+		} else {
 			result.stale++;
 		}
-		for (const name of parseContextFileNames(row.contextFiles)) {
+		for (const name of derivedImageNames(row.fileUniqueId)) {
 			try {
 				remove(join(mediaDir, name));
 			} catch {
@@ -159,17 +126,4 @@ export function pruneUnreferencedMediaCache(
 		clear.run(row.fileUniqueId, row.localPath);
 	}
 	return result;
-}
-
-function parseContextFileNames(value: string | null): string[] {
-	if (!value) return [];
-	try {
-		const parsed = JSON.parse(value) as unknown;
-		if (!Array.isArray(parsed)) return [];
-		return parsed
-			.map((entry) => (entry && typeof entry === "object" ? (entry as { name?: unknown }).name : null))
-			.filter((name): name is string => typeof name === "string" && name.length > 0 && !name.includes("/"));
-	} catch {
-		return [];
-	}
 }

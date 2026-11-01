@@ -13,17 +13,26 @@ export function openDb(dbPath: string): Database {
 	db.exec("PRAGMA foreign_keys = ON;");
 	db.exec(readFileSync(SCHEMA_PATH, "utf8"));
 	assertCurrentSchema(db);
-	buildMessageIndexOnce(db);
+	foldTaskUsage(db);
 	return db;
 }
 
-const MESSAGE_INDEX_VERSION = "1";
-
-/** Databases created before messages_fts get it filled once; triggers keep it current after. */
-function buildMessageIndexOnce(db: Database): void {
-	if (getDaemonState(db, "messages_fts_version") === MESSAGE_INDEX_VERSION) return;
-	db.exec("INSERT INTO messages_fts (messages_fts) VALUES ('rebuild')");
-	setDaemonState(db, "messages_fts_version", MESSAGE_INDEX_VERSION);
+/** One-time: databases from before the tasks usage counters get them, summed from task_usage. */
+function foldTaskUsage(db: Database): void {
+	const columns = new Set((db.query("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name));
+	if (columns.has("cost")) return;
+	db.transaction(() => {
+		db.exec(`ALTER TABLE tasks ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;
+			ALTER TABLE tasks ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;
+			ALTER TABLE tasks ADD COLUMN cost REAL NOT NULL DEFAULT 0;`);
+		if (db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_usage'").get()) {
+			db.exec(`UPDATE tasks SET
+				input_tokens = (SELECT COALESCE(SUM(u.input_tokens + u.cache_read + u.cache_write), 0) FROM task_usage u WHERE u.task_id = tasks.task_id),
+				output_tokens = (SELECT COALESCE(SUM(u.output_tokens), 0) FROM task_usage u WHERE u.task_id = tasks.task_id),
+				cost = (SELECT COALESCE(SUM(u.cost), 0) FROM task_usage u WHERE u.task_id = tasks.task_id);
+				DROP TABLE task_usage;`);
+		}
+	})();
 }
 
 /** Databases created before the current schema are not migrated; fail before touching them. */

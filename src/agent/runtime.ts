@@ -5,7 +5,14 @@ import type { Database } from "bun:sqlite";
 import { readFileSync, mkdirSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { clampThinkingLevel, isContextOverflow, type Api, type JsonValue, type Model } from "@earendil-works/pi-ai";
+import {
+	clampThinkingLevel,
+	isContextOverflow,
+	validateToolArguments,
+	type Api,
+	type JsonValue,
+	type Model,
+} from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
@@ -50,7 +57,7 @@ import {
 } from "./tools.ts";
 import { MessageQueryError, queryMessages, type MessageQuery } from "../tools/messages.ts";
 import { runTinyFishTool } from "../tools/search.ts";
-import { createContextImageResolver, ensureContextMedia } from "../media/context-media.ts";
+import { createImageRefResolver, ensureViewImages } from "../media/prepare-images.ts";
 import { downloadSource, MEDIA_DOWNLOAD_MAX_BYTES } from "../media/local-cache.ts";
 import { WorkBox } from "../sandbox/box.ts";
 import { TaskError, type TaskManager } from "../tasks/manager.ts";
@@ -131,7 +138,6 @@ import {
 import { contextStateFromEntries } from "./context-state.ts";
 import { trimSessionBeforeCompaction } from "./session-trim.ts";
 import { parsePiModelReference, type PiRequestThinkingLevel } from "./model-ref.ts";
-import type { VideoTranscoderAvailability } from "../media/video-frames.ts";
 import { errorCategory, log } from "../observability/log.ts";
 import { fitContextBreakdown } from "../observability/usage.ts";
 import { AssistantActivityStream } from "./activity.ts";
@@ -334,7 +340,7 @@ export class BotRuntime {
 	private thinkingFinished = false;
 	private readonly visionScheduler: VisionScheduler | null;
 	private readonly typingLease: TelegramTypingLease;
-	private readonly videoTranscoder: VideoTranscoderAvailability;
+	private readonly videoTranscoder: boolean;
 	/** Optional sink for TUI/live broadcasting of agent events. */
 	eventSink: ((event: { id: number; ts: number; kind: string; payload: unknown }) => void) | null = null;
 	/** Optional sink for messages this bot sent (poller echo dedupes them, so TUI needs this path). */
@@ -357,7 +363,7 @@ export class BotRuntime {
 		modelRuntime: ModelRuntime,
 		options: {
 			/** Startup probe result; both media modes sample video frames through it. */
-			videoTranscoder: VideoTranscoderAvailability;
+			videoTranscoder: boolean;
 			chatActionSender?: (signal: AbortSignal) => Promise<unknown>;
 			api?: BotApi;
 			botApis?: ReadonlyMap<string, MediaDownloadApi>;
@@ -533,7 +539,14 @@ export class BotRuntime {
 								inputSchema: tool.parameters as unknown as CodemodeJsonSchema,
 								...("outputSchema" in tool ? { outputSchema: tool.outputSchema as unknown as CodemodeJsonSchema } : {}),
 								execute: async (args: unknown) => {
-									const result = await (tool.execute as (id: string, params: unknown) => Promise<any>)("job", args);
+									// A job's sandbox calls tools directly, outside Pi's tool pipeline: validate like a turn does.
+									const params = validateToolArguments(tool as never, {
+										type: "toolCall",
+										id: "job",
+										name: tool.name,
+										arguments: args as never,
+									});
+									const result = await (tool.execute as (id: string, params: unknown) => Promise<any>)("job", params);
 									return (
 										result.structuredContent ??
 										result.content.map((block: { text?: string }) => block.text ?? "").join("\n")
@@ -611,9 +624,7 @@ export class BotRuntime {
 		const extensions = [
 			// Only hybrid mode has images in context: view_image results, resolved at projection.
 			makeTelegramContextExtension(
-				this.config.media.mode === "hybrid"
-					? createContextImageResolver(join(this.config.dataDir, "media"))
-					: undefined,
+				this.config.media.mode === "hybrid" ? createImageRefResolver(join(this.config.dataDir, "media")) : undefined,
 			),
 			makeTelegramCompactionExtension((event) => this.handleBeforeCompact(event)),
 			makeCachePayloadObserverExtension(payloadKey, (observation) => {
@@ -1674,7 +1685,7 @@ export class BotRuntime {
 		if (!row) return fail("message_not_found");
 		const media = row.media ? (JSON.parse(row.media) as { file_unique_id?: unknown }) : null;
 		if (typeof media?.file_unique_id !== "string") return fail("no_image");
-		const prepared = await ensureContextMedia(this.db, this.api, this.bot.id, media.file_unique_id, {
+		const prepared = await ensureViewImages(this.db, this.api, this.bot.id, media.file_unique_id, {
 			cacheDir: join(this.config.dataDir, "media"),
 			botApis: this.botApis,
 			videoTranscoder: this.videoTranscoder,
@@ -1851,7 +1862,7 @@ export class BotRuntime {
 	/** tg_download: any attachment, by this bot's (or a sibling bot's) file_id, into /work/inbox. */
 	private async downloadToBox(messageId: number): Promise<{ path: string; size: number; kind: string }> {
 		const chatId = this.config.groupChatId;
-		const row = groupMessage(this.db, chatId, messageId) as (MessageRow & { first_seen_by: string }) | null;
+		const row = groupMessage(this.db, chatId, messageId);
 		const media = row?.media
 			? (JSON.parse(row.media) as { kind: string; file_unique_id: string; file_id: string; file_size?: number })
 			: null;
@@ -1859,9 +1870,10 @@ export class BotRuntime {
 		const tooBig =
 			"tg_download failed: the file is larger than the 20 MB Telegram lets bots download; ask for a smaller file or a link";
 		if ((media.file_size ?? 0) > MEDIA_DOWNLOAD_MAX_BYTES) throw new Error(tooBig);
-		const mapped = downloadSource(this.db, this.api, this.bot.id, media.file_unique_id, this.botApis);
-		const source = mapped ?? { api: this.botApis.get(row.first_seen_by), fileId: media.file_id };
-		if (!source.api) throw new Error("tg_download failed: file_id_unavailable");
+		// Ingest records a file_id mapping for every bot that saw the media, so a stored message
+		// with an attachment always resolves; only a removed sibling bot leaves it dangling.
+		const source = downloadSource(this.db, this.api, this.bot.id, media.file_unique_id, this.botApis);
+		if (!source) throw new Error("tg_download failed: file_id_unavailable");
 		const file = await source.api.getFile(source.fileId).catch((error: unknown) => {
 			if (error instanceof Error && /file is too big/i.test(error.message)) throw new Error(tooBig);
 			throw error;

@@ -21,7 +21,7 @@ import { createSharedModelRuntime, PiModelConfigurationError, piAuthSource } fro
 import { parsePiModelReference } from "../agent/model-ref.ts";
 import { assertPiVisionExecutorReady, createPiVisionExecutor } from "../media/vision.ts";
 import { VisionScheduler } from "../media/vision-scheduler.ts";
-import { MediaCacheQueue } from "../media/media-cache.ts";
+import { setMediaReadySink } from "../media/local-cache.ts";
 import type { IngestResult } from "../telegram/ingest.ts";
 import { Poller } from "../telegram/poller.ts";
 import { applyRetention, pruneUnconfiguredBotState } from "../db/retention.ts";
@@ -39,10 +39,8 @@ acquirePidLock(config.dataDir);
 const videoTranscoder = inspectVideoTranscoder();
 // Frame sampling feeds vision descriptions and view_image.
 const mediaNeedsFrames = config.media.mode !== "off";
-if (mediaNeedsFrames && (!videoTranscoder.ffmpeg || !videoTranscoder.ffprobe)) {
+if (mediaNeedsFrames && !videoTranscoder) {
 	log.warn("media_transcoder", "tools_unavailable", {
-		ffmpeg: videoTranscoder.ffmpeg,
-		ffprobe: videoTranscoder.ffprobe,
 		category: "video_transcoder_unavailable",
 		impact: "video_frame_sampling_disabled",
 		action: "install_ffmpeg_and_restart",
@@ -207,18 +205,7 @@ const broadcastMessageRow = (chatId: number, messageId: number): MessageRow | nu
 ipc = new IpcServer(db, join(config.dataDir, "daemon.sock"), botNames, botUserIds, (botId) =>
 	runtimes.get(botId)?.controlSnapshot(),
 );
-const mediaCache = new MediaCacheQueue(db, botApis, {
-	cacheDir: mediaDir,
-	onReady: (fileUniqueId, mediaPath) => ipc.broadcastMediaReady({ fileUniqueId, mediaPath }),
-	onTelemetry: (event) => {
-		log.info("media_cache", event.event, {
-			kind: event.kind,
-			outcome: event.outcome,
-			bytes_bucket: event.bytesBucket,
-			queue_depth: event.queueDepth,
-		});
-	},
-});
+setMediaReadySink((fileUniqueId, mediaPath) => ipc.broadcastMediaReady({ fileUniqueId, mediaPath }));
 for (const [botId, rt] of runtimes) {
 	rt.eventSink = (event) => {
 		ipc.broadcast({
@@ -235,7 +222,6 @@ for (const [botId, rt] of runtimes) {
 		const m = rawMsg as { chat: { id: number }; message_id: number };
 		const row = broadcastMessageRow(m.chat.id, m.message_id);
 		if (!row) return; // persistence failed: nothing durable to route
-		mediaCache.scheduleMessage(botId, row);
 		// Only agent sends reach this sink; control replies never route.
 		router.routeLocalSend(row);
 	};
@@ -257,8 +243,6 @@ for (const [botId, rt] of runtimes) {
 	rt.streamSink = (stream) => ipc.broadcastStream(stream);
 	rt.streamDemand = () => ipc.hasStreamListener(botId);
 }
-const mediaBackfillCount = mediaCache.scheduleBackfill();
-log.info("media_cache", "startup_scheduled", { scheduled: mediaBackfillCount, limit: 100, concurrency: 2 });
 
 const telegramControl = new TelegramControlCommandService(
 	db,
@@ -313,8 +297,6 @@ const onMessage = async (result: IngestResult, update: unknown, botId: string) =
 	if (command) await telegramControlCoordinator.handle(command);
 	else router.route(result, row);
 	ipc.broadcast(ipc.msgToItem(row));
-	// Poller offset + canonical row are durable before this non-blocking side effect.
-	mediaCache.scheduleMessage(botId, row);
 };
 const onCallback = async (update: unknown, botId: string) => {
 	const command = parseTelegramControlCallback(update, botId, config.groupChatId);
@@ -340,7 +322,6 @@ async function shutdown(signal: string, exitCode = 0) {
 	clearInterval(retentionTimer);
 	clearInterval(boxResetTimer);
 	taskManager?.stopAll();
-	const mediaCacheStop = mediaCache.stop();
 	const runtimeStops = await Promise.allSettled([...runtimes.values()].map((rt) => rt.stop()));
 	for (const [index, result] of runtimeStops.entries()) {
 		if (result.status === "rejected") {
@@ -352,7 +333,6 @@ async function shutdown(signal: string, exitCode = 0) {
 			});
 		}
 	}
-	await mediaCacheStop;
 	ipc.stop();
 	releasePidLock(config.dataDir);
 	// wait for the poller loops to actually exit; stop() aborts any in-flight long

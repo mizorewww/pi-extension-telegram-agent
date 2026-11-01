@@ -161,14 +161,10 @@ CREATE TABLE IF NOT EXISTS media (
 	file_unique_id TEXT PRIMARY KEY,
 	kind TEXT NOT NULL, -- photo | sticker | animation | video | document
 	mime TEXT,
-	width INTEGER,
-	height INTEGER,
 	local_path TEXT, -- cache-relative source filename; resolved inside configured data/media
 	vision TEXT, -- JSON: {model, kind, text, at} — vision-mode description shared by all bots
-	context_files TEXT, -- JSON: [{name, mime}] derived images/frames for view_image in data/media
 	sticker_set TEXT,
 	sticker_emoji TEXT,
-	semantic TEXT, -- sticker semantic description
 	short_id TEXT UNIQUE -- s<N> catalog id shown to the model for sticker sending
 );
 
@@ -207,7 +203,6 @@ CREATE TABLE IF NOT EXISTS llm_runs (
 	compaction INTEGER NOT NULL DEFAULT 0,
 	system_hash TEXT,
 	tools_hash TEXT,
-	messages_hash TEXT,
 	provider TEXT,
 	api TEXT,
 	session_id_hash TEXT,
@@ -295,26 +290,13 @@ CREATE TABLE IF NOT EXISTS tasks (
 	title TEXT NOT NULL,
 	status TEXT NOT NULL CHECK (status IN ('running', 'need_input', 'done', 'failed', 'cancelled', 'interrupted')),
 	created_at INTEGER NOT NULL,
-	updated_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_tasks_bot_status ON tasks(bot_id, status);
-
--- Provider usage of a task's main Pi session, one row per assistant message. Subagents run as
--- separate processes inside the task and are not included.
-CREATE TABLE IF NOT EXISTS task_usage (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	task_id TEXT NOT NULL,
-	bot_id TEXT NOT NULL,
-	ts INTEGER NOT NULL,
-	provider TEXT,
-	model TEXT,
-	input_tokens INTEGER NOT NULL DEFAULT 0,
+	updated_at INTEGER NOT NULL,
+	-- Provider usage of the task's main Pi session; subagents run as separate processes and are not included.
+	input_tokens INTEGER NOT NULL DEFAULT 0, -- including cache reads and writes
 	output_tokens INTEGER NOT NULL DEFAULT 0,
-	cache_read INTEGER NOT NULL DEFAULT 0,
-	cache_write INTEGER NOT NULL DEFAULT 0,
 	cost REAL NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_task_usage_task ON task_usage(task_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_bot_status ON tasks(bot_id, status);
 
 CREATE TABLE IF NOT EXISTS reply_obligations (
 	bot_id TEXT NOT NULL,
