@@ -22,6 +22,8 @@ export function lastWeeklyBoundary(now: Date): Date {
 
 export interface ResettableBox {
 	readonly botId: string;
+	/** A box with running tasks waits for the next check. */
+	busy?(): boolean;
 	resetBox(reason: "weekly"): Promise<void>;
 }
 
@@ -40,7 +42,7 @@ export async function runWeeklyBoxReset(
 			setDaemonState(db, key, String(now.getTime()));
 			continue;
 		}
-		if (last >= boundary) continue;
+		if (last >= boundary || box.busy?.()) continue;
 		try {
 			await box.resetBox("weekly");
 			setDaemonState(db, key, String(now.getTime()));

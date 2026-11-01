@@ -74,6 +74,8 @@ tools: { send: true, search: false, codemode: false, sandbox: false }
 
 - `sandbox`：给 bot 一个自己的 Linux 工作区（Docker 容器），它可以在 codemode 脚本里执行命令、处理群友发来的文件。需要 `codemode: true` 和顶层 `sandbox` 段；主机准备见仓库的 `docs/runbooks/sandbox.md`。工作区每周一 05:00 自动清空，管理员可以随时 `/box reset`。
 
+- `tasks`：让 bot 把耗时的深入搜索、调研交给后台任务（在工作区里运行你配置的 Pi 工作流），完成后回复发起人。需要 `sandbox: true` 和顶层 `tasks` 段。
+
 ## 图片和视频
 
 `media.mode` 决定 bot 怎么“看”媒体：

@@ -53,7 +53,9 @@ import {
 	TOOL_DEFS,
 	TOOL_EXPOSURE,
 	sendToolWithFiles,
+	taskToolDefinition,
 	toolProtocolHash,
+	type TaskParams,
 	type SendParams,
 	type SearchParams,
 	type ViewImageParams,
@@ -63,6 +65,7 @@ import { runTinyFishTool } from "../tools/search.ts";
 import { contextMediaRefs, createContextImageResolver, ensureContextMedia } from "../media/context-media.ts";
 import { downloadSource } from "../media/local-cache.ts";
 import { WorkBox } from "../sandbox/box.ts";
+import { TaskError, type TaskManager } from "../tasks/manager.ts";
 import { isVisionMedia, type MediaDownloadApi } from "../media/local-cache.ts";
 import { ensureVision, type VisionExecutor, type VisionUpdateSink } from "../media/vision.ts";
 import type { VisionScheduler } from "../media/vision-scheduler.ts";
@@ -95,7 +98,9 @@ import {
 	replaceVisibleMessageIds,
 	setConsumedSeq,
 	setSessionManifest,
+	appendNoteEvent,
 	type MessageEvent,
+	type NotePayload,
 } from "../db/message-events.ts";
 import {
 	availableSuffixBudget,
@@ -187,6 +192,7 @@ const ACTIVITY_RAW_EVENT_KINDS = new Set([
 	"file_sent",
 	"tool_tg_download",
 	"box_reset",
+	"task_started",
 	"markdown_sent",
 	"plain_fallback",
 	"send",
@@ -323,6 +329,7 @@ export class BotRuntime {
 	private staticPrefixTokenEstimate = 0;
 	private viewedImagesThisTurn = 0;
 	private readonly box: WorkBox | null;
+	private readonly tasks: TaskManager | null;
 	private pendingPayloadObservation: ProviderPayloadObservation | null = null;
 	private allowedReactions: ReadonlySet<string> | null = null;
 	private previousRequest: (PreviousProviderPayloadFingerprint & { cohort: string }) | null = null;
@@ -366,6 +373,7 @@ export class BotRuntime {
 			visionExecutor?: VisionExecutor;
 			visionScheduler?: VisionScheduler;
 			box?: WorkBox;
+			tasks?: TaskManager;
 		},
 	) {
 		this.db = db;
@@ -377,6 +385,7 @@ export class BotRuntime {
 		this.videoTranscoder = options.videoTranscoder;
 		this.api = options.api ?? new BotApi(bot.token);
 		this.botApis = options.botApis ?? new Map([[bot.id, this.api]]);
+		this.tasks = bot.tools.tasks ? (options.tasks ?? null) : null;
 		this.box = options.box ?? (bot.tools.sandbox && config.sandbox ? new WorkBox(bot.id, config.sandbox) : null);
 		const chatId = config.groupChatId;
 		this.typingLease = new TelegramTypingLease(
@@ -458,6 +467,14 @@ export class BotRuntime {
 			exposure: TOOL_EXPOSURE.view_image,
 			execute: async (_toolCallId: string, params: ViewImageParams) => await this.executeViewImage(params),
 		};
+		const taskTool = {
+			...taskToolDefinition(this.tasks?.workflows ?? []),
+			exposure: TOOL_EXPOSURE.task,
+			execute: async (_toolCallId: string, params: TaskParams) => ({
+				content: [{ type: "text" as const, text: await this.executeTask(params) }],
+				details: {},
+			}),
+		};
 		const messagesTool = {
 			...CODEMODE_TOOL_DEFS[0],
 			exposure: "codemode" as const,
@@ -528,9 +545,13 @@ export class BotRuntime {
 		// Tool order is cache-visible protocol: never reorder (docs/cache.md, REQ-TEST-0001 R2).
 		// Per-bot tool toggles (REQ-CONF-0001): filter the fixed-order tool list. send off
 		// means the bot cannot speak in-group (observer-only); search/codemode off saves tokens.
-		const activeTools = [sendTool, searchTool, viewImageTool].filter((t) =>
-			t.name === "send" ? this.bot.tools.send : t.name === "search" ? this.bot.tools.search : this.bot.tools.viewImage,
-		);
+		const enabled: Record<string, boolean> = {
+			send: this.bot.tools.send,
+			search: this.bot.tools.search,
+			view_image: this.bot.tools.viewImage,
+			task: this.tasks != null,
+		};
+		const activeTools = [sendTool, searchTool, viewImageTool, taskTool].filter((tool) => enabled[tool.name]);
 		// Pi renders the codemode declaration from the callable tools; it is pinned by the Pi
 		// version and these tools, both already in the fingerprint.
 		const declaredTools = this.bot.tools.codemode
@@ -1308,8 +1329,11 @@ export class BotRuntime {
 
 		const consumedSeq = getConsumedSeq(this.db, this.bot.id, chatId);
 		let highWater = messageEventHighWater(this.db, chatId);
-		let recent = listRecentMessageEvents(this.db, chatId, consumedSeq, highWater, MAX_EVENT_SCAN);
-		let obligationEvents = listReplyObligationEvents(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN);
+		// Notes belong to one bot; every other bot's cursor just passes over them.
+		const ownEvents = (events: MessageEvent[]) =>
+			events.filter((event) => event.kind !== "note" || (event.payload as NotePayload).bot_id === this.bot.id);
+		let recent = ownEvents(listRecentMessageEvents(this.db, chatId, consumedSeq, highWater, MAX_EVENT_SCAN));
+		let obligationEvents = ownEvents(listReplyObligationEvents(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN));
 		let rowsScanned = recent.length + obligationEvents.length;
 		const consumedControl = consumedControlMessageIds(this.db, chatId);
 		const obligationIds = new Set(obligations.map((obligation) => obligation.messageId));
@@ -1345,8 +1369,8 @@ export class BotRuntime {
 			const postVisionHighWater = messageEventHighWater(this.db, chatId);
 			if (postVisionHighWater > highWater) {
 				highWater = postVisionHighWater;
-				recent = listRecentMessageEvents(this.db, chatId, consumedSeq, highWater, MAX_EVENT_SCAN);
-				obligationEvents = listReplyObligationEvents(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN);
+				recent = ownEvents(listRecentMessageEvents(this.db, chatId, consumedSeq, highWater, MAX_EVENT_SCAN));
+				obligationEvents = ownEvents(listReplyObligationEvents(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN));
 				rowsScanned += recent.length + obligationEvents.length;
 				mandatory = requiredEvents();
 				normal = ordinaryEvents();
@@ -1934,6 +1958,50 @@ export class BotRuntime {
 		};
 	}
 
+	/** The task tool: start, steer, cancel or list this bot's background tasks. */
+	private async executeTask(params: TaskParams): Promise<string> {
+		const tasks = this.tasks!;
+		try {
+			switch (params.action) {
+				case "start": {
+					const origin = params.for_message ?? this.currentTriggerMessageId;
+					if (!params.workflow || !params.title?.trim() || !params.brief?.trim())
+						throw new TaskError("start needs workflow, title and brief");
+					if (origin == null) throw new TaskError("start needs for_message: the requester's message #id");
+					const id = await tasks.start(this.bot.id, origin, params.workflow, params.title.trim(), params.brief.trim());
+					this.recordEvent("task_started", { task_id: id, workflow: params.workflow });
+					return `started ${id}; tell the requester now, the result will arrive as [task ${id} …]`;
+				}
+				case "message":
+					if (!params.task_id || !params.text?.trim()) throw new TaskError("message needs task_id and text");
+					tasks.message(this.bot.id, params.task_id, params.text.trim());
+					return `forwarded to ${params.task_id}`;
+				case "cancel":
+					if (!params.task_id) throw new TaskError("cancel needs task_id");
+					tasks.cancel(this.bot.id, params.task_id);
+					return `cancelled ${params.task_id}`;
+				case "status": {
+					const rows = tasks.list(this.bot.id);
+					if (rows.length === 0) return "no tasks yet";
+					return rows
+						.map((row) => `${row.task_id} [${row.status}] ${row.workflow}: ${row.title} (↪ #${row.origin_message_id})`)
+						.join("\n");
+				}
+			}
+		} catch (error) {
+			if (error instanceof TaskError) throw new Error(`task failed: ${error.message}`);
+			throw error;
+		}
+		throw new Error("task failed: unknown action");
+	}
+
+	/** A task needs the bot: owe the requester a reply when asked, then wake up. */
+	wakeForTask(originMessageId: number, owe: boolean): void {
+		if (owe && this.bot.tools.send)
+			createReplyObligation(this.db, this.bot.id, this.config.groupChatId, originMessageId);
+		this.trigger("explicit");
+	}
+
 	/** The bot's work box, when this deployment gives it one. */
 	get workBox(): WorkBox | null {
 		return this.box;
@@ -1955,6 +2023,12 @@ export class BotRuntime {
 		if (!this.box) return;
 		await this.box.reset();
 		this.recordEvent("box_reset", { reason });
+		if (reason !== "tool")
+			appendNoteEvent(this.db, this.config.groupChatId, 0, `box_reset:${this.bot.id}:${Date.now()}`, {
+				bot_id: this.bot.id,
+				source: "system",
+				text: `你的工作区已被清空（${reason === "weekly" ? "每周例行" : "管理员操作"}），/work 里之前的文件都不在了。`,
+			});
 		log.info("sandbox", "box_reset", { bot_id: this.bot.id, reason });
 	}
 

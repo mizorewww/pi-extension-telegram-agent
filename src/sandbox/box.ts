@@ -228,6 +228,19 @@ export class WorkBox {
 		return target;
 	}
 
+	/** Unpack a tar archive into a /work directory as the box user. */
+	async extractTar(dir: string, tar: Uint8Array): Promise<string> {
+		const target = normalizeBoxPath(dir);
+		await this.ensure();
+		const result = await this.call(
+			["exec", "--interactive", this.container, "sh", "-c", 'mkdir -p "$1" && tar -x -C "$1"', "sh", target],
+			DOCKER_CALL_TIMEOUT_MS,
+			tar,
+		);
+		if (result.code !== 0) throw new BoxError(`extract failed: ${firstLine(result.stderr)}`);
+		return target;
+	}
+
 	/**
 	 * Copy one regular file out of /work into a fresh host temp dir. The path is resolved inside
 	 * the box first, so a symlink cannot point the copy outside /work.

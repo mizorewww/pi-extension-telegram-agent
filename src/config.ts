@@ -8,6 +8,7 @@ import { homedir } from "node:os";
 import { createJiti } from "jiti";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { BoxConfig } from "./sandbox/box.ts";
+import type { TasksConfig } from "./tasks/manager.ts";
 import { isPiThinkingLevel, loadPiModelDefaults, type PiModelDefaults } from "./agent/model-settings.ts";
 import {
 	canonicalPiModelReference,
@@ -65,7 +66,7 @@ export interface TelegramBotConfigInput extends SharedConfigInput {
 	persona_path: string;
 	/** Probability for unaddressed human messages; all bots together must total <= 1. */
 	routing_p?: number;
-	tools?: { send?: boolean; search?: boolean; codemode?: boolean; sandbox?: boolean };
+	tools?: { send?: boolean; search?: boolean; codemode?: boolean; sandbox?: boolean; tasks?: boolean };
 	sticker_sets?: readonly string[];
 }
 
@@ -118,7 +119,7 @@ export interface BotConfig {
 	maxSuffixTokens: number;
 	maxMessageTokens: number;
 	/** viewImage is not a toggle: it follows media.mode "hybrid". */
-	tools: { send: boolean; search: boolean; codemode: boolean; sandbox: boolean; viewImage: boolean };
+	tools: { send: boolean; search: boolean; codemode: boolean; sandbox: boolean; tasks: boolean; viewImage: boolean };
 	stickerSets: string[];
 }
 
@@ -140,6 +141,8 @@ export interface AppConfig {
 	media: { mode: MediaMode; visionModel: string; maxPerTurn: number; concurrency: number };
 	/** Work box settings; null when the deployment has no sandbox section. */
 	sandbox: BoxConfig | null;
+	/** Background task workflows; null when the deployment has no tasks section. */
+	tasks: (TasksConfig & { memory: string; cpus: number }) | null;
 	retention: RetentionConfig;
 	/** Generated and persisted by the daemon when absent. */
 	routerSecret: string | null;
@@ -220,8 +223,28 @@ const SANDBOX_RULES: Record<string, Rule> = {
 	pids: range(16, 65_536, true),
 	network: boolean,
 };
-const TOOL_RULES: Record<string, Rule> = { send: boolean, search: boolean, codemode: boolean, sandbox: boolean };
-const ROOT_KEYS = new Set([...Object.keys(ROOT_RULES), "group_peer_id", "media", "sandbox", "telegram_admins", "bots"]);
+const TASKS_RULES: Record<string, Rule> = {
+	max_running: range(1, 8, true),
+	timeout_minutes: range(1, 24 * 60, true),
+	memory: nonEmpty,
+	cpus: range(0.1, 64),
+};
+const TOOL_RULES: Record<string, Rule> = {
+	send: boolean,
+	search: boolean,
+	codemode: boolean,
+	sandbox: boolean,
+	tasks: boolean,
+};
+const ROOT_KEYS = new Set([
+	...Object.keys(ROOT_RULES),
+	"group_peer_id",
+	"media",
+	"sandbox",
+	"tasks",
+	"telegram_admins",
+	"bots",
+]);
 const BOT_KEYS = new Set([
 	...Object.keys(BOT_RULES),
 	"id",
@@ -330,6 +353,23 @@ function validate(rootDir: string, raw: Raw, env: Record<string, string>, identi
 			checkFields(errors, "media.", raw.media, MEDIA_RULES);
 		} else errors.push("[config] media: expected object");
 	}
+	if (raw.tasks !== undefined) {
+		if (isObject(raw.tasks)) {
+			checkKeys(errors, "tasks.", raw.tasks, new Set([...Object.keys(TASKS_RULES), "workflows"]));
+			checkFields(errors, "tasks.", raw.tasks, TASKS_RULES);
+			const workflows = raw.tasks.workflows;
+			if (!isObject(workflows) || Object.keys(workflows).length === 0)
+				errors.push("[config] tasks.workflows: expected { name: directory } with at least one workflow");
+			else
+				for (const [name, dir] of Object.entries(workflows)) {
+					if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name))
+						errors.push(`[config] tasks.workflows.${name}: names are lowercase letters, digits, - or _`);
+					if (typeof dir !== "string" || !existsSync(join(resolvePath(rootDir, dir), ".pi")))
+						errors.push(`[config] tasks.workflows.${name}: expected a directory containing .pi`);
+				}
+			if (raw.sandbox === undefined) errors.push("[config] tasks: requires a top-level sandbox section");
+		} else errors.push("[config] tasks: expected object");
+	}
 	if (raw.sandbox !== undefined) {
 		if (isObject(raw.sandbox)) {
 			checkKeys(errors, "sandbox.", raw.sandbox, new Set(Object.keys(SANDBOX_RULES)));
@@ -393,6 +433,8 @@ function validate(rootDir: string, raw: Raw, env: Record<string, string>, identi
 			const tools = isObject(bot.tools) ? bot.tools : {};
 			if (tools.sandbox === true && tools.codemode !== true)
 				errors.push(`[config] ${at}.tools.sandbox: requires tools.codemode (sandbox tools are called from scripts)`);
+			if (tools.tasks === true && (tools.sandbox !== true || raw.tasks === undefined))
+				errors.push(`[config] ${at}.tools.tasks: requires tools.sandbox and a top-level tasks section`);
 			if (tools.sandbox === true && raw.sandbox === undefined)
 				errors.push(`[config] ${at}.tools.sandbox: requires a top-level sandbox section`);
 		}
@@ -497,6 +539,7 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 				search: tools.search === true,
 				codemode: tools.codemode === true,
 				sandbox: tools.sandbox === true,
+				tasks: tools.tasks === true,
 				viewImage: mediaMode === "hybrid",
 			},
 			stickerSets: [...((bot.sticker_sets as string[] | undefined) ?? [])],
@@ -525,6 +568,7 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 			concurrency: (media.concurrency as number | undefined) ?? 2,
 		},
 		sandbox: raw.sandbox === undefined ? null : sandboxConfig(raw.sandbox as Raw),
+		tasks: raw.tasks === undefined ? null : tasksConfig(rootDir, raw.tasks as Raw),
 		retention: {
 			telemetryDays: (raw.telemetry_retention_days as number | undefined) ?? 90,
 			rawUpdateDays: (raw.raw_update_retention_days as number | undefined) ?? 30,
@@ -539,11 +583,23 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 
 function sandboxConfig(raw: Raw): BoxConfig {
 	return {
-		image: (raw.image as string | undefined) ?? "tg-box:1",
+		image: (raw.image as string | undefined) ?? "tg-box:2",
 		dockerHost: (raw.docker_host as string | undefined) ?? "unix:///run/tgbox/docker.sock",
 		memory: (raw.memory as string | undefined) ?? "1g",
 		cpus: (raw.cpus as number | undefined) ?? 2,
 		pids: (raw.pids as number | undefined) ?? 256,
 		network: (raw.network as boolean | undefined) ?? true,
+	};
+}
+
+function tasksConfig(rootDir: string, raw: Raw): TasksConfig & { memory: string; cpus: number } {
+	return {
+		workflows: Object.fromEntries(
+			Object.entries(raw.workflows as Record<string, string>).map(([name, dir]) => [name, resolvePath(rootDir, dir)]),
+		),
+		maxRunning: (raw.max_running as number | undefined) ?? 2,
+		timeoutMs: ((raw.timeout_minutes as number | undefined) ?? 45) * 60_000,
+		memory: (raw.memory as string | undefined) ?? "3g",
+		cpus: (raw.cpus as number | undefined) ?? 2,
 	};
 }

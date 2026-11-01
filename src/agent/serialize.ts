@@ -8,10 +8,28 @@
 // extensions/context.ts).
 
 import type { Database } from "bun:sqlite";
-import type { MediaUpdatePayload, MessageEvent } from "../db/message-events.ts";
+import type { MediaUpdatePayload, MessageEvent, NotePayload } from "../db/message-events.ts";
 import type { ReplySnapshot } from "../telegram/normalize.ts";
 
-export const TELEGRAM_SERIALIZER_VERSION = 5;
+export const TELEGRAM_SERIALIZER_VERSION = 6;
+
+const TASK_PHASE_LABEL: Record<NonNullable<NotePayload["phase"]>, string> = {
+	progress: "进展",
+	need_input: "需要输入",
+	done: "完成",
+	failed: "失败",
+	cancelled: "已取消",
+	interrupted: "中断",
+};
+
+/** `[task t3 完成 ↪ #18452] text（文件：/work/...）` or `[系统] text`. */
+export function renderNote(messageId: number, note: NotePayload): string {
+	const files = note.files?.length ? `（文件：${note.files.join("、")}）` : "";
+	if (note.source === "system") return `[系统] ${note.text}${files}`;
+	const label = TASK_PHASE_LABEL[note.phase ?? "progress"];
+	const origin = messageId > 0 && note.phase !== "progress" ? ` ↪ #${messageId}` : "";
+	return `[task ${note.task_id} ${label}${origin}] ${note.text}${files}`;
+}
 
 export interface MessageRow {
 	chat_id: number;
@@ -165,6 +183,10 @@ export function serializeMessageEventSegments(
 			lastDate = day;
 			segments.push({ event, text: `${separator}${renderMessageLine(db, row, opts)}` });
 			opts.visibleIds.add(row.message_id);
+			continue;
+		}
+		if (event.kind === "note") {
+			segments.push({ event, text: renderNote(event.messageId, event.payload as NotePayload) });
 			continue;
 		}
 		if (event.kind === "media_update") {

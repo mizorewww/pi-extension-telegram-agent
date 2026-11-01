@@ -12,7 +12,7 @@ SQLite（WAL），默认 `data/agent.db`，schema 在 `src/db/schema.sql`，启�
 | `pending_telegram_dispatch` | `bot_id` | 每个 poller 至多一条未交付的 routing/control handoff，与 ingest、offset 同事务写入；回调成功后删除 |
 | `messages` | `(chat_id, message_id)` | canonical 最新投影：发送者、reply/quote/forward、text/caption/entities、Rich Message（source ≤256 KiB，`text` 是确定性纯文本投影）、`reply_snapshot`、media JSON |
 | `message_revisions` | `(chat_id, message_id, edit_date)` | 被替换的旧版本，key 用旧版本自己的时间 |
-| `message_events` | `ingest_seq`（自增），`event_key` 唯一 | 不可变事件流：`message`、`edit`、`metadata`、`media_update`；由 trigger 在同一事务追加 |
+| `message_events` | `ingest_seq`（自增），`event_key` 唯一 | 不可变事件流：`message`、`edit`、`metadata`、`media_update`（由 trigger 在同一事务追加）与 `note`（任务进展 / 系统通知，payload 带 `bot_id`，只进入该 bot 的上下文；`message_id` 是任务的发起消息或 0） |
 | `telegram_control_messages` | `(chat_id, message_id)` | 控制命令与回复的永久排除名单，不受遥测保留期影响 |
 
 - 只更新更大的 `edit_date`；多个 poller 乱序送达的旧 edit 不会回退 canonical。
@@ -27,6 +27,7 @@ SQLite（WAL），默认 `data/agent.db`，schema 在 `src/db/schema.sql`，启�
 | `bot_cursors` | `(bot_id, chat_id)` | 已消费到的 `ingest_seq`，只增不减 |
 | `bot_visible_messages` | `(bot_id, chat_id, message_id)` + `context_epoch` | 当前 context 真正包含完整内容的消息；压缩或换 session 时整组替换 |
 | `bot_session_manifest` | `bot_id` | 当前 session id、文件路径、完整 fingerprint |
+| `tasks` | `task_id`（`t<rowid>`） | 后台任务：所属 bot、发起消息、工作流、标题、状态（running / need_input / done / failed / cancelled / interrupted） |
 | `reply_obligations` | `(bot_id, chat_id, message_id)` | 直接点名后待回复的消息身份（不存正文） |
 | `routing_claims` | `(chat_id, message_id, bot_id, route_version)` | 防止同一消息对同一 bot 重复启动 |
 | `bot_state` | `(bot_id, key)` | epoch、Telegram offset、bot user id / username |

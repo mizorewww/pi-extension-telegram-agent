@@ -30,6 +30,7 @@ import { log } from "../observability/log.ts";
 import { inspectVideoTranscoder } from "../media/video-frames.ts";
 import { pruneUnreferencedMediaCache } from "../media/lifecycle.ts";
 import { BOX_RESET_CHECK_MS, runWeeklyBoxReset } from "../sandbox/schedule.ts";
+import { TaskManager } from "../tasks/manager.ts";
 
 const rootDir = process.cwd();
 const config = loadConfig(rootDir);
@@ -140,6 +141,24 @@ for (const bot of config.bots) {
 		auth: piAuthSource(sharedModelRuntime, bot.provider),
 	});
 }
+// Tasks run in the work boxes; the manager reaches runtimes lazily, once they exist.
+let runtimesForTasks: ReadonlyMap<string, BotRuntime> = new Map();
+const taskManager =
+	config.tasks && config.sandbox
+		? new TaskManager({
+				db,
+				chatId: config.groupChatId,
+				config: config.tasks,
+				run: {
+					...config.sandbox,
+					taskMemory: config.tasks.memory,
+					taskCpus: config.tasks.cpus,
+					tinyfishApiKey: config.tinyfishApiKey,
+				},
+				box: (botId) => runtimesForTasks.get(botId)?.workBox ?? null,
+				wake: (botId, originMessageId, owe) => runtimesForTasks.get(botId)?.wakeForTask(originMessageId, owe),
+			})
+		: null;
 const composition = await composeDeployment(db, config, {
 	createApi: (bot) => new BotApi(bot.token),
 	createRuntime: async (bot, api, botApis) => {
@@ -148,6 +167,7 @@ const composition = await composeDeployment(db, config, {
 			botApis,
 			...(sharedVisionExecutor ? { visionExecutor: sharedVisionExecutor } : {}),
 			...(visionScheduler ? { visionScheduler } : {}),
+			...(taskManager ? { tasks: taskManager } : {}),
 			videoTranscoder,
 		});
 		await runtime.init();
@@ -162,6 +182,8 @@ const composition = await composeDeployment(db, config, {
 	},
 });
 const { botApis, runtimes, identities, botNames, botUserIds } = composition;
+runtimesForTasks = runtimes as ReadonlyMap<string, BotRuntime>;
+taskManager?.recoverInterrupted();
 
 // The per-bot content fingerprint rotated incompatible sessions before they were opened.
 const storedSchema = getDaemonState(db, "cache_schema_version");
@@ -274,7 +296,9 @@ const telegramControlCoordinator = new TelegramControlCoordinator(
 void publishTelegramControlMenus(botApis);
 
 const boxes = [...runtimes].flatMap(([botId, rt]) =>
-	rt.workBox ? [{ botId, resetBox: (reason: "weekly") => rt.resetBox(reason) }] : [],
+	rt.workBox
+		? [{ botId, busy: () => taskManager?.busy(botId) ?? false, resetBox: (reason: "weekly") => rt.resetBox(reason) }]
+		: [],
 );
 const runBoxReset = () => void runWeeklyBoxReset(db, boxes);
 runBoxReset();
@@ -332,6 +356,7 @@ async function shutdown(signal: string, exitCode = 0) {
 	for (const p of pollers) p.stop();
 	clearInterval(retentionTimer);
 	clearInterval(boxResetTimer);
+	taskManager?.stopAll();
 	const mediaCacheStop = mediaCache.stop();
 	const runtimeStops = await Promise.allSettled([...runtimes.values()].map((rt) => rt.stop()));
 	for (const [index, result] of runtimeStops.entries()) {

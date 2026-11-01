@@ -43,7 +43,7 @@ function makeBot(): BotConfig {
 		contextImageBudgetBytes: 10_000_000,
 		maxSuffixTokens: 512,
 		maxMessageTokens: 4096,
-		tools: { send: true, search: false, codemode: false, sandbox: false, viewImage: false },
+		tools: { send: true, search: false, codemode: false, sandbox: false, tasks: false, viewImage: false },
 		stickerSets: [],
 	};
 }
@@ -59,6 +59,7 @@ function makeConfig(bot: BotConfig): AppConfig {
 		contextWindow: 65536,
 		media: { mode: "off", visionModel: "test/vision:off", maxPerTurn: 2, concurrency: 2 },
 		sandbox: null,
+		tasks: null,
 		retention: { telemetryDays: 90, rawUpdateDays: 30, messageEventDays: 365 },
 		routerSecret: null,
 		telegramAdmins: [],

@@ -2,7 +2,20 @@ import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import type { MessageRow } from "../agent/serialize.ts";
 
-export type MessageEventKind = "message" | "edit" | "metadata" | "media_update";
+export type MessageEventKind = "message" | "edit" | "metadata" | "media_update" | "note";
+
+/**
+ * A non-Telegram input for one bot: a task update or a system notice. `message_id` of the event
+ * is the message it concerns (a task's origin), or 0.
+ */
+export interface NotePayload {
+	bot_id: string;
+	source: "task" | "system";
+	task_id?: string;
+	phase?: "progress" | "need_input" | "done" | "failed" | "cancelled" | "interrupted";
+	text: string;
+	files?: string[];
+}
 
 export interface MediaUpdatePayload {
 	file_unique_id: string;
@@ -17,7 +30,7 @@ export interface MessageEvent {
 	revision: number;
 	kind: MessageEventKind;
 	eventDate: number;
-	payload: MessageRow | MediaUpdatePayload;
+	payload: MessageRow | MediaUpdatePayload | NotePayload;
 }
 
 interface MessageEventDbRow {
@@ -38,7 +51,7 @@ function decodeEvent(row: MessageEventDbRow): MessageEvent {
 		revision: row.revision,
 		kind: row.kind,
 		eventDate: row.eventDate,
-		payload: JSON.parse(row.payloadJson) as MessageRow | MediaUpdatePayload,
+		payload: JSON.parse(row.payloadJson) as MessageRow | MediaUpdatePayload | NotePayload,
 	};
 }
 
@@ -236,6 +249,24 @@ export function appendMediaUpdateEvents(db: Database, fileUniqueId: string, text
 	});
 	transaction();
 	return changes;
+}
+
+/** Append one note event; `key` makes the append idempotent. Returns its ingest_seq, or null. */
+export function appendNoteEvent(
+	db: Database,
+	chatId: number,
+	messageId: number,
+	key: string,
+	payload: NotePayload,
+): number | null {
+	const result = db
+		.query(`
+			INSERT OR IGNORE INTO message_events
+				(event_key, chat_id, message_id, revision, kind, event_date, payload_json)
+			VALUES (?, ?, ?, 0, 'note', ?, ?)
+		`)
+		.run(`note:${key}`, chatId, messageId, Math.floor(Date.now() / 1000), JSON.stringify(payload));
+	return result.changes > 0 ? Number(result.lastInsertRowid) : null;
 }
 
 export interface SessionManifest {

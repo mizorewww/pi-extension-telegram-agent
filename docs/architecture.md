@@ -36,6 +36,18 @@ Telegram ── poller × N ──┐
 - bot 消息只从两个入口进入同一个 `MessageRouter`（`src/agent/router.ts`）：poller 实际收到的 update；本部署 bot 的 agent `send` 成功写库后由 `sentMessageSink` 本地路由（`routeLocalSend`，route version 1）。写库失败的发送不路由；控制回复与 TUI 手动发送不经过该 sink，且登记在 `telegram_control_messages` 的 bot 消息一律不触发。同一条消息的 poller 回声或重放由 `routing_claims` 去重，不会二次 dispatch。
 - Telegram 一般不把其他 bot 的群消息投递给 bot，`/fire` 不改变任何投递；部署外的 bot 只有在 Telegram 真的投递时才能触发。
 
+## 后台任务
+
+- bot 用 model-only `task` 工具（`tools.tasks`，需要工作区与顶层 `tasks` 段）把耗时工作交给工作流（`tasks.workflows`，目录里的 `.pi` 原样拷进任务目录）。`TaskManager`（`src/tasks/manager.ts`）为每个任务起一个一次性容器 `tg-task-<bot>-<id>`（`src/tasks/process.ts`）：与工作区同一镜像、同一 `/work` 卷，另挂凭证卷 `tg-pihome-<bot>:/pi-agent`，运行 `pi -a --mode rpc` 加载桥接扩展（`deploy/box/task-bridge`）。
+- 任务只通过 `report(progress | need_input | done)` 与 bot 通信；daemon 读 RPC 事件流，把报告写成该 bot 的 `note` 事件。进展同一任务至少间隔 5 分钟才唤醒 bot；完成、失败、需要输入时在发起消息上重新创建回复义务并唤醒，复用补答与不重发语义。run 结束却没报 done 时取最后的 assistant 文本当结果。
+- 群友的补充经 `task message` 转给任务（运行中 steer，等待输入时开始下一 run）；`task cancel` 停止；每个 bot 最多 `tasks.max_running` 个，超过 `tasks.timeout_minutes` 判失败。daemon 重启时进行中的任务标记 interrupted 并通知发起人，残留容器按 label 删除；有任务时每周清空顺延。
+
+## 任务威胁模型
+
+- **威胁**：任务会抓取网页，网页里的 prompt injection 可以驱动任务里的 agent 执行命令、读写 `/work`、调用凭证卷里的 provider。
+- **边界**：任务容器的隔离与工作区相同（uid 1000、无 capability、只读根、资源上限、无宿主机挂载）；凭证（swe-2 代理 key、ollama-cloud key）只在 `tgbox` 拥有的卷里，TinyFish key 以环境变量名传入、不出现在 argv。工作区容器 `tg-box-<bot>` 不挂凭证卷，所以 bot 自己的 `sh_exec` 读不到这些凭证。
+- **残余风险**：被注入的任务可以使用、外发这些凭证（群被信任，接受）；`/work` 是 bot 与任务共用的。
+
 ## 回复义务
 
 - 人类直接点名（@、回复、配置名称）在 provider 调用前写入 `reply_obligations`。只有 send 返回终态（已发送、部分发送或结果未知）后才结清；结果未知或部分发送**永不自动重发**。

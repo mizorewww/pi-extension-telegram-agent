@@ -1,7 +1,8 @@
-# Work box image for the bot's sh_exec tool (docs/runbooks/sandbox.md). The container runs with a
-# read-only root, so everything the bot needs at runtime is installed here; per-user installs
-# (pip --user, npm prefix) land under HOME=/work/.home and vanish with the weekly reset.
-FROM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+# Image for the bot's work box (sh_exec) and its task runs (docs/runbooks/sandbox.md). Both run
+# with a read-only root, so everything needed at runtime is installed here; per-user installs
+# (pip --user, npm -g) land under HOME=/work/.home and vanish with the weekly reset.
+# Pi needs Node >= 22.19, hence the Node base rather than plain Debian.
+FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -10,13 +11,29 @@ RUN apt-get update \
       python3 python3-pip python3-venv python3-pil python3-numpy python3-requests \
       ffmpeg imagemagick poppler-utils qrencode \
       fonts-noto-cjk fonts-noto-color-emoji \
-      nodejs npm \
- && rm -rf /var/lib/apt/lists/* \
+      chromium \
+ && rm -rf /var/lib/apt/lists/*
+
+# Task runs: Pi, the packages the search workflow uses, and the CLIs its rules call.
+RUN npm install -g --ignore-scripts \
+      @earendil-works/pi-coding-agent@1.4.0 \
+      @tiny-fish/cli@0.54.0 \
+      agent-browser@0.41.0 \
+ && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-x64 \
+ && mkdir -p /opt/pi-packages \
+ && cd /opt/pi-packages \
+ && npm init -y >/dev/null \
+ && npm install --ignore-scripts pi-subagents@0.84.0 pi-ollama-cloud@0.13.1 \
+ && npm cache clean --force
+COPY task-bridge /opt/tg-task-bridge
+
+RUN userdel --remove node \
  && useradd --uid 1000 --create-home --home-dir /home/box --shell /bin/bash box
 
 ENV PIP_BREAK_SYSTEM_PACKAGES=1 \
     NPM_CONFIG_PREFIX=/work/.home/.npm-global \
     PATH=/work/.home/.local/bin:/work/.home/.npm-global/bin:/usr/local/bin:/usr/bin:/bin \
+    AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \
     LANG=C.UTF-8 \
     TZ=Asia/Singapore
 

@@ -55,10 +55,14 @@ tools:    send, search[, codemode]（按 bot 开关过滤，顺序不变；codem
 [message_edit #18453] 修改后的文本
 [message_metadata #18453] ↪ #18452
 [media_update #18453] [图片: 新的视觉描述]
+[task t3 进展] 已核对 5 个来源
+[task t3 完成 ↪ #18452] 结论……（文件：/work/tasks/t3/report.md）
+[系统] 你的工作区已被清空（每周例行），/work 里之前的文件都不在了。
 ```
 
 - 无 username 的发送者用稳定别名 `u<N>`（rowid 分配）。
 - 引用父消息优先用随消息保存的 `reply_snapshot`；父消息在同一新批次里时只写裸 `↪ #id`。
+- `[task …]` / `[系统]` 来自 `note` 事件（serializer v6），只出现在它所属 bot 的上下文里；除进展外都带 `↪ #origin`。
 - `media_update` 只出现在 off / describe 模式；context 模式的图片在消息首次打包时就位，或永远不出现。
 
 ## Compaction
@@ -75,8 +79,9 @@ provider 没有返回 cache 用量时，若同一 cache cohort（provider/api/mo
 
 ## 版本记录
 
-当前：**32**。更早的版本见 git 历史。
+当前：**33**。更早的版本见 git 历史。
 
+- **v33**：后台任务：model-only `task` 工具（workflow 选项来自配置，golden `taskTool`）、`note` 事件 grammar（serializer v6）、系统提示的 task 摘要。
 - **v32**：带工作区的 bot 的 `send` 声明多出 `files`（golden `sendWithFiles`），系统提示多一句工作区说明；没有工作区的 bot 字节不变。
 - **v31**：codemode 脚本工具新增 `tg_download`、`sh_exec`、`sh_reset`（`tools.sandbox` 开启时注册；fingerprint 只含实际注册的脚本工具）。
 - **v30**：新增 `media.mode: "hybrid"` 与 model-only `view_image` 工具（`TOOL_DEFS` 第三项）；view_image 结果的图片只在 `context` 投影时由引用物化。

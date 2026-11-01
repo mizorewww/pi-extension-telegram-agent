@@ -19,6 +19,16 @@ export interface SendParams {
 	files?: SendFile[];
 }
 
+export interface TaskParams {
+	action: "start" | "message" | "cancel" | "status";
+	workflow?: string;
+	title?: string;
+	brief?: string;
+	task_id?: string;
+	text?: string;
+	for_message?: number;
+}
+
 export interface ViewImageParams {
 	message_id: number;
 }
@@ -48,7 +58,12 @@ export interface SendDegradedDetails {
  * How the model reaches each tool. `send` is model-only: a codemode script must never post, and
  * its terminate:true only ends a turn when the model itself calls it.
  */
-export const TOOL_EXPOSURE = { send: "model-only", search: "direct", view_image: "model-only" } as const;
+export const TOOL_EXPOSURE = {
+	send: "model-only",
+	search: "direct",
+	view_image: "model-only",
+	task: "model-only",
+} as const;
 
 /** Fixed tool order — never reorder (cache-visible). */
 export const TOOL_DEFS = [
@@ -267,6 +282,45 @@ export function sendToolWithFiles() {
 				),
 			),
 		}),
+	};
+}
+
+/** The task tool; its workflow choices come from the deployment's tasks section. */
+export function taskToolDefinition(workflows: readonly string[]) {
+	return {
+		name: "task",
+		label: "Task",
+		description:
+			"把需要较长时间的工作（多来源的深入搜索、调研、整理报告等）交给后台任务，在你自己的工作区里运行，不占用聊天。start 之后在同一轮用 send 告诉发起人你去做了。任务的进展、需要输入和结果会以 [task tN …] 出现在群消息里：完成、失败或需要输入时你必须回复发起人；结果文件可以用 send 的 files 发出。message 把群友的补充或回答转给正在运行的任务，cancel 停止任务，status 列出最近的任务。简单问题直接回答或用 search，不要开任务。",
+		parameters: Type.Object(
+			{
+				action: Type.Union([
+					Type.Literal("start"),
+					Type.Literal("message"),
+					Type.Literal("cancel"),
+					Type.Literal("status"),
+				]),
+				workflow: Type.Optional(
+					Type.Union(
+						workflows.map((name) => Type.Literal(name)),
+						{ description: "start：用哪个工作流" },
+					),
+				),
+				title: Type.Optional(Type.String({ maxLength: 80, description: "start：简短标题" })),
+				brief: Type.Optional(
+					Type.String({
+						maxLength: 8000,
+						description: "start：自包含的任务说明，写清要做什么、关注点、希望的产出和语言；任务看不到群聊",
+					}),
+				),
+				task_id: Type.Optional(Type.String({ description: "message / cancel：任务 id，如 t3" })),
+				text: Type.Optional(Type.String({ maxLength: 4000, description: "message：转给任务的内容" })),
+				for_message: Type.Optional(
+					Type.Integer({ description: "start：发起人的消息 #id；省略时为触发本轮的消息。结果会回复这条消息" }),
+				),
+			},
+			{ additionalProperties: false },
+		),
 	};
 }
 

@@ -74,6 +74,8 @@ tools: { send: true, search: false, codemode: false, sandbox: false }
 
 - `sandbox`: give the bot its own Linux work box (a Docker container) where codemode scripts run commands and process files people send. Requires `codemode: true` and a top-level `sandbox` section; host setup is in the repository's `docs/runbooks/sandbox.md`. The box is wiped every Monday 05:00, and admins can `/box reset` at any time.
 
+- `tasks`: let the bot hand long research to a background task (one of your Pi workflows, run in the work box) and reply to the requester when it is done. Requires `sandbox: true` and a top-level `tasks` section.
+
 ## Images and videos
 
 `media.mode` decides how bots "see" media:

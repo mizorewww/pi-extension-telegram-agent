@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import type { MediaUpdatePayload, MessageEvent } from "../db/message-events.ts";
+import type { MediaUpdatePayload, MessageEvent, NotePayload } from "../db/message-events.ts";
 import type { ContextMediaImage } from "../media/context-media.ts";
 import type { MessageRow, SerializeOptions, SerializedEventSegment } from "./serialize.ts";
 import { replySnapshot, serializeMessageEvents, serializeMessageEventSegments } from "./serialize.ts";
@@ -75,8 +75,8 @@ function truncateBody(value: string, maxTokens: number): string {
 }
 
 export function capMessageEvent(event: MessageEvent, maxTokens = DEFAULT_MESSAGE_TOKEN_CAP): MessageEvent {
-	if (event.kind === "media_update") {
-		const payload = event.payload as MediaUpdatePayload;
+	if (event.kind === "media_update" || event.kind === "note") {
+		const payload = event.payload as MediaUpdatePayload | NotePayload;
 		return { ...event, payload: { ...payload, text: truncateBody(payload.text, maxTokens) } };
 	}
 	const row = event.payload as MessageRow;

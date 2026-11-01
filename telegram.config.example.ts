@@ -44,7 +44,9 @@ export default defineConfig({
 	max_message_tokens: 4_096, // tokens per single message
 
 	// ===== Work box for tools.sandbox (host setup: docs/runbooks/sandbox.md) =====
-	// sandbox: { image: "tg-box:1", docker_host: "unix:///run/tgbox/docker.sock", memory: "1g", cpus: 2, pids: 256, network: true },
+	// sandbox: { image: "tg-box:2", docker_host: "unix:///run/tgbox/docker.sock", memory: "1g", cpus: 2, pids: 256, network: true },
+
+	// tasks: { workflows: { search: "~/pi-tasks/search" }, max_running: 2, timeout_minutes: 45, memory: "3g", cpus: 2 },
 
 	// ===== Media: how images and videos reach a model =====
 	// "off" (default): media are text placeholders such as [photo].
@@ -92,6 +94,7 @@ export default defineConfig({
 				search: false, // needs tiny_fish_api_key in .env
 				codemode: false, // Pi-native JavaScript scripts that can call the other tools; off by default
 				sandbox: false, // own Linux work box for scripts (needs codemode and the sandbox section)
+				tasks: false, // background tasks running a Pi workflow in the box (needs sandbox and tasks)
 			},
 		},
 	],

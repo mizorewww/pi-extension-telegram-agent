@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 32; // v32: send files from the work box
+export const CACHE_SCHEMA_VERSION = 33; // v33: background tasks (task tool, note events)
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
@@ -13,6 +13,7 @@ export interface EnabledTools {
 	search: boolean;
 	codemode: boolean;
 	sandbox: boolean;
+	tasks: boolean;
 	viewImage: boolean;
 }
 
@@ -23,9 +24,10 @@ const TOOL_SUMMARIES = [
 		"写 JavaScript 脚本做精确计算，或在脚本里批量调用其他工具并过滤结果；脚本里的 tools.tg_messages 能检索本群全部历史消息，包括已不在你上下文里的",
 	],
 	["view_image", "查看某条消息的原图或视频帧；平时你只看到图片的文字描述"],
+	["task", "把耗时的深入搜索、调研交给后台任务，完成后把结果回复给发起人"],
 	["send", "唯一的公开发言通道，也能对某条消息点 reaction 表态"],
 ] as const;
-const COUNT = ["零", "一", "两", "三", "四"] as const;
+const COUNT = ["零", "一", "两", "三", "四", "五"] as const;
 
 /** Describe only the tools this bot really has, so it never claims or calls a missing one. */
 export function toolCapabilityDeclaration(tools: EnabledTools): string {
@@ -36,7 +38,9 @@ export function toolCapabilityDeclaration(tools: EnabledTools): string {
 				? tools.codemode
 				: name === "view_image"
 					? tools.viewImage
-					: tools.send,
+					: name === "task"
+						? tools.tasks
+						: tools.send,
 	);
 	const list = enabled.map(([name, summary]) => `${name}（${summary}）`).join("、");
 	const intro = enabled.length > 0 ? `你有${COUNT[enabled.length]}个工具：${list}。` : "你没有可用工具。";

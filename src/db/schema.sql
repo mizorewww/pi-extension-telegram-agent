@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS message_events (
 	chat_id INTEGER NOT NULL,
 	message_id INTEGER NOT NULL,
 	revision INTEGER NOT NULL,
-	kind TEXT NOT NULL, -- message | edit | metadata | media_update
+	kind TEXT NOT NULL, -- message | edit | metadata | media_update | note
 	event_date INTEGER NOT NULL,
 	payload_json TEXT NOT NULL
 );
@@ -284,6 +284,21 @@ CREATE TABLE IF NOT EXISTS routing_claims (
 CREATE INDEX IF NOT EXISTS idx_routing_claims_message ON routing_claims(chat_id, message_id, status);
 
 -- Human direct replies that must enter a specific bot's next provider suffix.
+-- Background tasks a bot started in its work box (src/tasks/). Progress reaches the bot as
+-- message_events of kind 'note'; this table is the task's own lifecycle.
+CREATE TABLE IF NOT EXISTS tasks (
+	task_id TEXT PRIMARY KEY, -- t<rowid>
+	bot_id TEXT NOT NULL,
+	chat_id INTEGER NOT NULL,
+	origin_message_id INTEGER NOT NULL, -- the message that asked for it; the result replies to it
+	workflow TEXT NOT NULL,
+	title TEXT NOT NULL,
+	status TEXT NOT NULL CHECK (status IN ('running', 'need_input', 'done', 'failed', 'cancelled', 'interrupted')),
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_bot_status ON tasks(bot_id, status);
+
 CREATE TABLE IF NOT EXISTS reply_obligations (
 	bot_id TEXT NOT NULL,
 	chat_id INTEGER NOT NULL,

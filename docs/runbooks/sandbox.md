@@ -44,19 +44,36 @@ DOCKER_HOST=unix:///run/tgbox/docker.sock docker run --rm --memory 256m alpine c
 
 ```bash
 scp deploy/box/Dockerfile <host>:/tmp/tgbox-build/
-DOCKER_HOST=unix:///run/tgbox/docker.sock docker build -t tg-box:1 /tmp/tgbox-build
+DOCKER_HOST=unix:///run/tgbox/docker.sock docker build -t tg-box:2 /tmp/tgbox-build
 ```
 
-改了 Dockerfile 就换新 tag（`tg-box:2`），改 `telegram.config.ts` 的 `sandbox.image` 后 `/box reset` 或等每周清空，旧容器才会用新镜像重建。
+改了 Dockerfile 就换新 tag（例如 `tg-box:3`），改 `telegram.config.ts` 的 `sandbox.image` 后 `/box reset` 或等每周清空，旧容器才会用新镜像重建。
+
+### 任务凭证卷
+
+任务容器把 `tg-pihome-<bot>` 挂成 Pi 的 agent 目录。脚本从主机现有配置读取 swe-2 代理 key（`~/.config/devin-openai-proxy/env`，通过 `https://devin.mizore.blog/v1` 访问）和 ollama-cloud key（`~/.pi/agent/auth.json`），直接流进卷里，不落盘、不打印：
+
+```bash
+deploy/box/init-task-home.sh <bot_id> tg-box:2
+```
+
+换 key 或改模型设置后重跑即可。工作流目录要在主机上（例如 `rsync -a ~/pi-tasks/ <host>:pi-tasks/`）。
 
 ## 配置
 
 ```ts
-sandbox: { image: "tg-box:1", docker_host: "unix:///run/tgbox/docker.sock", memory: "1g", cpus: 2, pids: 256, network: true },
+sandbox: { image: "tg-box:2", docker_host: "unix:///run/tgbox/docker.sock", memory: "1g", cpus: 2, pids: 256, network: true },
 bots: [{ ..., tools: { codemode: true, sandbox: true } }],
 ```
 
 `tools.sandbox` 需要 `tools.codemode`（这些工具只能从脚本调用）和顶层 `sandbox` 段。
+
+后台任务：
+
+```ts
+tasks: { workflows: { search: "~/pi-tasks/search" }, max_running: 2, timeout_minutes: 45, memory: "3g", cpus: 2 },
+bots: [{ ..., tools: { codemode: true, sandbox: true, tasks: true } }],
+```
 
 ## 日常
 
@@ -65,4 +82,5 @@ bots: [{ ..., tools: { codemode: true, sandbox: true } }],
 | 清空某个 bot 的工作区 | 群里管理员 `/box reset`（多 bot 时 `/box reset@bot_username`），或 bot 自己调 `sh_reset` |
 | 每周清空 | 每周一 05:00（进程本地时间）后的第一次检查（10 分钟一次）；上次清空时间存在 `daemon_state` 的 `box_reset_at:<bot>`，重启不重复清 |
 | 查看容器 | `DOCKER_HOST=unix:///run/tgbox/docker.sock docker ps --filter label=tg-box` |
+| 查看任务 | `docker ps --filter label=tg-task`；数据库 `SELECT * FROM tasks ORDER BY created_at DESC` |
 | 手动删除 | `docker rm -f tg-box-<bot> && docker volume rm tg-work-<bot>`（下次调用自动重建） |
