@@ -306,7 +306,7 @@ function loadConfigSource(path: string): Raw {
 	if (!existsSync(path)) {
 		throw new ConfigError([
 			`[config] missing configuration: ${path}`,
-			"[config] copy telegram.config.example.ts to telegram.config.ts, or run /tg config",
+			"[config] copy telegram.config.example.ts to telegram.config.ts and fill it in",
 		]);
 	}
 	let loaded: unknown;
