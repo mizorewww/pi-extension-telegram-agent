@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 28; // v28: Pi-native codemode replaces run_js
+export const CACHE_SCHEMA_VERSION = 29; // v29: tg_messages history search for codemode scripts
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
@@ -16,7 +16,10 @@ export interface EnabledTools {
 
 const TOOL_SUMMARIES = [
 	["search", "联网搜索，也可读取一个公开网页"],
-	["codemode", "写 JavaScript 脚本做精确计算，或在脚本里批量调用其他工具并过滤结果"],
+	[
+		"codemode",
+		"写 JavaScript 脚本做精确计算，或在脚本里批量调用其他工具并过滤结果；脚本里的 tools.tg_messages 能检索本群全部历史消息，包括已不在你上下文里的",
+	],
 	["send", "唯一的公开发言通道，也能对某条消息点 reaction 表态"],
 ] as const;
 const COUNT = ["零", "一", "两", "三"] as const;

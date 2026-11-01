@@ -18,7 +18,7 @@ import {
 	REPLY_RECOVERY_PROMPT,
 	toolCapabilityDeclaration,
 } from "../src/agent/prompt.ts";
-import { TOOL_DEFS, toolProtocolHash } from "../src/agent/tools.ts";
+import { CODEMODE_TOOL_DEFS, TOOL_DEFS, toolProtocolHash } from "../src/agent/tools.ts";
 import { batchStickerCandidates, stickerCatalogPromptBlock } from "../src/media/sticker-catalog.ts";
 import {
 	NO_SEND_MARKER,
@@ -31,11 +31,12 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 28,
-	systemZhTemplate: "7d18cb780f8d",
-	systemEnTemplate: "18c62f301993",
+	schemaVersion: 29,
+	systemZhTemplate: "2e5bf4023481",
+	systemEnTemplate: "692c40e98b9c",
 	eventSerialize: "a05c0584eb08",
 	tools: "9c2cac4e7b29",
+	codemodeTools: "c3b0015642dc",
 	compactionPrompt: "04da95f62da0",
 	multimodalCompaction: "e2da2b8b68fa",
 	replyRecovery: "4fc7e277e338",
@@ -86,6 +87,7 @@ test("prompt, tool and protocol hashes are stable", () => {
 	expect(sendOnly).not.toContain("search（");
 	expect(sendOnly).toContain("你不能联网搜索");
 	expect(toolProtocolHash(TOOL_DEFS)).toBe(GOLDEN.tools);
+	expect(toolProtocolHash(CODEMODE_TOOL_DEFS)).toBe(GOLDEN.codemodeTools);
 	expect(sha256Short(COMPACTION_SUMMARY_PROMPT)).toBe(GOLDEN.compactionPrompt);
 	expect(sha256Short(REPLY_RECOVERY_PROMPT)).toBe(GOLDEN.replyRecovery);
 	expect(sha256Short(TELEGRAM_TURN_PROMPT)).toBe(GOLDEN.telegramTurn);

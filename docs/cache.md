@@ -75,8 +75,9 @@ provider 没有返回 cache 用量时，若同一 cache cohort（provider/api/mo
 
 ## 版本记录
 
-当前：**28**。更早的版本见 git 历史。
+当前：**29**。更早的版本见 git 历史。
 
+- **v29**：codemode 脚本可调用 `tg_messages`（声明含 `outputSchema`，计入 `toolProtocolHash` 与 golden `codemodeTools`）；系统提示的 codemode 摘要写明可检索历史。
 - **v28**：`run_js` 删除，改用 Pi 原生 `codemode`（`send` 为 model-only）；系统提示工具摘要相应改变。
 - **v27**：`search` 读页改为分页：新增 `offset`，每页约 4k token，结尾给出继续读取的 offset；token 估算改为 CJK 约 1 token/字（原先按 UTF-8 字节/2，中文页只剩约 1.3k 字且无法续读）。
 - **v26**：sticker 附注改为每批各一条、永久保留（只列该批新出现的、不在固定目录里的可发送 sticker），让每个请求成为下一请求的严格前缀；系统提示里的工具声明按 bot 实际开启的工具生成（三个工具全开时字节不变）。

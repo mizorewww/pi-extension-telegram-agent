@@ -105,17 +105,97 @@ export const TOOL_DEFS = [
 	},
 ] as const;
 
+const Nullable = <T extends Parameters<typeof Type.Union>[0][number]>(schema: T) => Type.Union([schema, Type.Null()]);
+
+/**
+ * Tools only codemode scripts can call (exposure "codemode"). Pi renders their name, description,
+ * parameters and outputSchema into the codemode declaration, so they are cache-visible too.
+ */
+export const CODEMODE_TOOL_DEFS = [
+	{
+		name: "tg_messages",
+		label: "Messages",
+		description:
+			"Read this group's message history, newest first by default, including messages no longer in your context. Filter here, then refine in the script (regex, grouping, counting) and output only what you need. Page with next_before_id / next_after_id. Control commands are excluded.",
+		parameters: Type.Object(
+			{
+				ids: Type.Optional(
+					Type.Array(Type.Integer(), { minItems: 1, maxItems: 200, description: "Exact message ids" }),
+				),
+				since: Type.Optional(Type.String({ description: "ISO date/time, inclusive" })),
+				until: Type.Optional(Type.String({ description: "ISO date/time, exclusive" })),
+				before_id: Type.Optional(Type.Integer({ description: "Only messages with a smaller id" })),
+				after_id: Type.Optional(Type.Integer({ description: "Only messages with a larger id" })),
+				sender: Type.Optional(
+					Type.Union([Type.Integer(), Type.String()], { description: "User id, @username or u<N> alias" }),
+				),
+				reply_to: Type.Optional(Type.Integer({ description: "Only replies to this message id" })),
+				has_media: Type.Optional(
+					Type.Union([
+						Type.Literal("photo"),
+						Type.Literal("video"),
+						Type.Literal("sticker"),
+						Type.Literal("document"),
+						Type.Literal("any"),
+					]),
+				),
+				text_contains: Type.Optional(
+					Type.String({ minLength: 1, maxLength: 200, description: "Case-insensitive substring of text or caption" }),
+				),
+				order: Type.Optional(Type.Union([Type.Literal("desc"), Type.Literal("asc")])),
+				limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, default: 100 })),
+			},
+			{ additionalProperties: false },
+		),
+		outputSchema: Type.Object({
+			rows: Type.Array(
+				Type.Object({
+					id: Type.Integer({ description: "The #id shown in your context" }),
+					date: Type.String({ description: "Local time, YYYY-MM-DD HH:mm:ss" }),
+					ts: Type.Integer({ description: "Unix seconds" }),
+					edited: Type.Boolean(),
+					sender: Type.Object({
+						id: Nullable(Type.Integer()),
+						name: Nullable(Type.String()),
+						username: Nullable(Type.String()),
+						alias: Nullable(Type.String({ description: "u<N> alias for users without username" })),
+						is_bot: Type.Boolean(),
+					}),
+					text: Nullable(Type.String({ description: "Text or caption, at most 4000 characters" })),
+					reply_to: Nullable(Type.Integer()),
+					quote: Nullable(Type.String()),
+					forwarded: Type.Boolean(),
+					media: Nullable(
+						Type.Object({
+							kind: Type.String(),
+							description: Nullable(Type.String({ description: "Vision description, when one exists" })),
+						}),
+					),
+				}),
+			),
+			next_before_id: Nullable(Type.Integer()),
+			next_after_id: Nullable(Type.Integer()),
+		}),
+	},
+] as const;
+
 interface ProviderToolProtocol {
 	name: string;
 	description: string;
 	parameters: unknown;
+	outputSchema?: unknown;
 }
 
 /** Hash every provider-visible field in registration order; labels stay local-only. */
 export function toolProtocolHash(definitions: readonly ProviderToolProtocol[]): string {
 	return sha256Short(
 		JSON.stringify(
-			definitions.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters })),
+			definitions.map((tool) => ({
+				name: tool.name,
+				description: tool.description,
+				parameters: tool.parameters,
+				outputSchema: tool.outputSchema,
+			})),
 		),
 	);
 }

@@ -5,7 +5,14 @@ import type { Database } from "bun:sqlite";
 import { readFileSync, mkdirSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { clampThinkingLevel, contentText, retryAssistantCall, type Api, type Model } from "@earendil-works/pi-ai";
+import {
+	clampThinkingLevel,
+	contentText,
+	retryAssistantCall,
+	type Api,
+	type JsonValue,
+	type Model,
+} from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
@@ -35,7 +42,15 @@ import {
 	REPLY_RECOVERY_PROMPT,
 	SHARED_PROTOCOL,
 } from "./prompt.ts";
-import { TOOL_DEFS, TOOL_EXPOSURE, toolProtocolHash, type SendParams, type SearchParams } from "./tools.ts";
+import {
+	CODEMODE_TOOL_DEFS,
+	TOOL_DEFS,
+	TOOL_EXPOSURE,
+	toolProtocolHash,
+	type SendParams,
+	type SearchParams,
+} from "./tools.ts";
+import { MessageQueryError, queryMessages, type MessageQuery } from "../tools/messages.ts";
 import { runTinyFishTool } from "../tools/search.ts";
 import { contextMediaRefs, createContextImageResolver, ensureContextMedia } from "../media/context-media.ts";
 import { isVisionMedia, type MediaDownloadApi } from "../media/local-cache.ts";
@@ -143,6 +158,7 @@ const ACTIVITY_RAW_EVENT_KINDS = new Set([
 	"tool_result",
 	"tool_search",
 	"tool_fetch",
+	"tool_messages",
 	"markdown_sent",
 	"plain_fallback",
 	"send",
@@ -401,6 +417,25 @@ export class BotRuntime {
 				};
 			},
 		};
+		const messagesTool = {
+			...CODEMODE_TOOL_DEFS[0],
+			exposure: "codemode" as const,
+			execute: async (_toolCallId: string, params: MessageQuery) => {
+				try {
+					const result = queryMessages(this.db, chatId, params);
+					this.recordEvent("tool_messages", { rows: result.rows.length });
+					return {
+						content: [{ type: "text" as const, text: JSON.stringify(result) }],
+						details: { rows: result.rows.length },
+						structuredContent: result as unknown as JsonValue,
+					};
+				} catch (error) {
+					if (error instanceof MessageQueryError) throw new Error(error.message);
+					throw error;
+				}
+			},
+		};
+		const scriptTools = this.bot.tools.codemode ? [messagesTool] : [];
 		const catalogModel = this.modelRuntime.getModel(this.bot.provider, this.bot.model);
 		if (!catalogModel) throw new Error(`model not found: ${this.bot.provider}/${this.bot.model}`);
 		const model = { ...catalogModel, contextWindow: Math.min(catalogModel.contextWindow, this.config.contextWindow) };
@@ -424,7 +459,9 @@ export class BotRuntime {
 		);
 		// Pi renders the codemode declaration from the callable tools; it is pinned by the Pi
 		// version and these tools, both already in the fingerprint.
-		const declaredTools = this.bot.tools.codemode ? [...activeTools, CODEMODE_FINGERPRINT_ENTRY] : activeTools;
+		const declaredTools = this.bot.tools.codemode
+			? [...activeTools, CODEMODE_FINGERPRINT_ENTRY, ...CODEMODE_TOOL_DEFS]
+			: activeTools;
 		this.toolsHash = toolProtocolHash(declaredTools);
 		this.staticPrefixTokenEstimate =
 			estimateProviderTokensUpperBound(
@@ -451,6 +488,7 @@ export class BotRuntime {
 				name: tool.name,
 				description: tool.description,
 				parameters: tool.parameters,
+				outputSchema: "outputSchema" in tool ? tool.outputSchema : undefined,
 			})),
 		};
 		this.contextFingerprint = buildContextFingerprint(this.contextFingerprintInput);
@@ -538,7 +576,7 @@ export class BotRuntime {
 				resourceLoader: loader,
 				noTools: "builtin",
 				...(this.bot.tools.codemode ? { tools: ["+codemode"] } : {}),
-				customTools: activeTools,
+				customTools: [...activeTools, ...scriptTools],
 			});
 			const streamFunction = session.agent.streamFunction;
 			session.agent.streamFunction = (requestModel, context, options) => {

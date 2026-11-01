@@ -33,6 +33,7 @@ bun run scripts/e2e-compaction.ts --bot <id>   # 通过公开 control 入口压�
 | `telegram.test.ts` | mention 优先于 reply；bot 消息只在目标 bot 开启 `/fire` 时按正常路由触发，不改投、不触发自己、额度耗尽即停、人类发言补满；同部署 bot 的 agent send 写库后本地路由，poller 回声不二次 dispatch，控制回复与写库失败的发送不路由；路由交接在 handler 失败并重启后仍送达；manual send 结果未知不重发；未配置 bot 的 cursor 不阻塞保留期清理。 |
 | `provider-guard.test.ts` | 请求创建/消费 deadline 中止且不重试；HTTP 413 进入 Pi overflow 恢复。 |
 | `codemode.test.ts` | codemode 脚本没有 host 能力、调不到 `send`、只能调用可调用工具；结果有宿主上限，脚本图片不进 session。 |
+| `messages.test.ts` | `tg_messages` 只读本群：不返回控制消息与其他 chat，分页无缝，LIKE 通配符被转义。 |
 | `search.test.ts` | search 只访问公网 HTTP(S)，遥测不含 query/URL/正文/key；长页分页可完整读完且不重复抓取。 |
 | `daemon-control.test.ts` | 进程归属识别（含空格路径）、拒绝其他部署与无法验证的 pid。 |
 | `network-isolation.test.ts` | `network-guard.ts` preload 机械拒绝外网，即使存在真实 `.env`。 |
