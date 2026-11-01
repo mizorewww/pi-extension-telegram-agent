@@ -134,14 +134,8 @@ function fittingLength(points: string[], start: number, maxTokens: number): numb
 function capPrefixTokens(value: string, maxTokens: number, marker = "\n[TRUNCATED BY TOKEN BUDGET]"): string {
 	if (estimatedTokens(value) <= maxTokens) return value;
 	const points = [...value];
-	let low = 0;
-	let high = points.length;
-	while (low < high) {
-		const mid = Math.ceil((low + high) / 2);
-		if (estimatedTokens(`${points.slice(0, mid).join("")}${marker}`) <= maxTokens) low = mid;
-		else high = mid - 1;
-	}
-	return `${points.slice(0, low).join("")}${marker}`;
+	const length = fittingLength(points, 0, Math.max(0, maxTokens - estimatedTokens(marker)));
+	return `${points.slice(0, length).join("")}${marker}`;
 }
 
 function classifyHttp(stage: "search" | "fetch", status: number): TinyFishFailureCategory {

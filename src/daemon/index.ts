@@ -25,7 +25,7 @@ import { setMediaReadySink } from "../media/local-cache.ts";
 import type { IngestResult } from "../telegram/ingest.ts";
 import { Poller } from "../telegram/poller.ts";
 import { applyRetention, pruneUnconfiguredBotState } from "../db/retention.ts";
-import { log } from "../observability/log.ts";
+import { errorCategory, log } from "../observability/log.ts";
 import { inspectVideoTranscoder } from "../media/video-frames.ts";
 import { pruneUnreferencedMediaCache } from "../media/lifecycle.ts";
 import { BOX_RESET_CHECK_MS, runWeeklyBoxReset } from "../sandbox/schedule.ts";
@@ -328,8 +328,7 @@ async function shutdown(signal: string, exitCode = 0) {
 			const botId = [...runtimes.keys()][index];
 			log.warn("daemon", "runtime_stop_failed", {
 				bot_id: botId,
-				category: "dispose_failed",
-				error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+				category: errorCategory(result.reason),
 			});
 		}
 	}

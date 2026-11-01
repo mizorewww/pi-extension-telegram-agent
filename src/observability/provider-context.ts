@@ -5,9 +5,10 @@ import { SessionManager, buildSessionContext } from "@earendil-works/pi-coding-a
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AppConfig } from "../config.ts";
 import { getSessionManifest } from "../db/message-events.ts";
+import { CODEMODE_FINGERPRINT_ENTRY } from "../agent/extensions/codemode.ts";
 import { projectTelegramContext } from "../agent/extensions/context.ts";
 import { buildSystemPrompt } from "../agent/prompt.ts";
-import { TOOL_DEFS } from "../agent/tools.ts";
+import { botToolDefinitions } from "../agent/tools.ts";
 import { stickerCatalogPromptBlock } from "../media/sticker-catalog.ts";
 import type { Database } from "bun:sqlite";
 import type { DebugModelReasoning } from "./debug-report.ts";
@@ -107,9 +108,18 @@ export function inspectProviderContext(
 		bot.tools,
 		bot.stickerSets.length > 0 ? stickerCatalogPromptBlock(db, bot.id, bot.stickerSets) : "",
 	);
-	const tools = TOOL_DEFS.filter((tool) =>
-		tool.name === "send" ? bot.tools.send : tool.name === "search" ? bot.tools.search : bot.tools.viewImage,
-	).map(({ name, description, parameters }) => ({ name, description, parameters }));
+	const { active, script } = botToolDefinitions({
+		...bot.tools,
+		box: bot.tools.sandbox && deployment.sandbox != null,
+		taskWorkflows: bot.tools.tasks && deployment.tasks ? Object.keys(deployment.tasks.workflows).sort() : [],
+	});
+	const declared = bot.tools.codemode ? [...active, CODEMODE_FINGERPRINT_ENTRY, ...script] : active;
+	const tools = declared.map((tool) => ({
+		name: tool.name,
+		description: tool.description,
+		parameters: tool.parameters,
+		...("outputSchema" in tool && tool.outputSchema !== undefined ? { outputSchema: tool.outputSchema } : {}),
+	}));
 	return {
 		source: "current_session_pre_adapter_projection",
 		exact_last_request: false,

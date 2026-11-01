@@ -321,8 +321,7 @@ CREATE TABLE IF NOT EXISTS daemon_state (
 );
 
 -- Substring index over message text for tg_messages (trigram: CJK needs no word breaks; queries of
--- 3+ characters). External content: the rows live in messages, these triggers keep it in sync,
--- and openDb rebuilds it once for databases that predate it.
+-- 3+ characters). External content: the rows live in messages and these triggers keep it in sync.
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 	text, caption, content = 'messages', content_rowid = 'rowid', tokenize = 'trigram case_sensitive 0'
 );

@@ -365,11 +365,43 @@ export function taskToolDefinition(workflows: readonly string[]) {
 	};
 }
 
-interface ProviderToolProtocol {
+export interface BotToolCapabilities {
+	send: boolean;
+	search: boolean;
+	viewImage: boolean;
+	codemode: boolean;
+	box: boolean;
+	taskWorkflows: readonly string[];
+}
+
+export interface ProviderToolProtocol {
 	name: string;
 	description: string;
 	parameters: unknown;
 	outputSchema?: unknown;
+}
+
+/** Fixed-order tool definitions enabled for a bot: the single authority for runtime and diagnostics. */
+export function botToolDefinitions(capabilities: BotToolCapabilities) {
+	const sendDef = capabilities.box ? sendToolWithFiles() : TOOL_DEFS[0];
+	const enabled: Record<string, boolean> = {
+		send: capabilities.send,
+		search: capabilities.search,
+		view_image: capabilities.viewImage,
+		task: capabilities.taskWorkflows.length > 0,
+		job: capabilities.codemode && capabilities.send,
+	};
+	const active = [
+		sendDef,
+		TOOL_DEFS[1],
+		TOOL_DEFS[2],
+		taskToolDefinition(capabilities.taskWorkflows),
+		JOB_TOOL_DEF,
+	].filter((tool) => enabled[tool.name]);
+	const script = capabilities.codemode
+		? [CODEMODE_TOOL_DEFS[0], ...(capabilities.box ? CODEMODE_TOOL_DEFS.slice(1) : [])]
+		: [];
+	return { active, script };
 }
 
 /** Hash every provider-visible field in registration order; labels stay local-only. */
