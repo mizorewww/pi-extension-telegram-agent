@@ -392,7 +392,7 @@ export class TelegramControlCommandService {
 			if (!result.ok) {
 				const message =
 					result.code === "image_input_unsupported"
-						? "当前为图片上下文模式，此模型不支持图片输入。"
+						? "hybrid 媒体模式需要支持图片输入的模型。"
 						: result.code === "busy"
 							? "Bot 正忙，请稍后重试。"
 							: result.code === "config_write_failed"
