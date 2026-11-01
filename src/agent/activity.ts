@@ -4,6 +4,7 @@ import type {
 	AgentActivityAssistantSection,
 	AgentActivityEventSection,
 	AgentActivitySection,
+	AgentStreamFrame,
 } from "../ipc.ts";
 
 export const AGENT_ACTIVITY_MAX_SECTIONS = 64;
@@ -102,5 +103,130 @@ export class AgentActivityCollector {
 			return false;
 		}
 		return true;
+	}
+}
+
+/** Raw agent events that belong to the running activity: stored tagged with its id, shown inside it. */
+const ACTIVITY_RAW_EVENT_KINDS = new Set([
+	"assistant_text",
+	"thinking",
+	"tool_call",
+	"tool_result",
+	"tool_search",
+	"tool_fetch",
+	"tool_messages",
+	"tool_view_image",
+	"tool_sh_exec",
+	"file_sent",
+	"tool_tg_download",
+	"box_reset",
+	"task_started",
+	"job_started",
+	"markdown_sent",
+	"plain_fallback",
+	"send",
+	"send_degraded",
+	"error",
+]);
+const ACTIVITY_DETAIL_EVENT_KINDS = new Set(
+	[...ACTIVITY_RAW_EVENT_KINDS].filter((kind) => kind !== "assistant_text" && kind !== "thinking"),
+);
+
+/**
+ * One bot's live activity: the collector for the running agent run plus the ephemeral Pi-feed
+ * stream frames built from it. UI-only; never business or provider state.
+ */
+export class AssistantActivityStream {
+	private streamSequence = 0;
+	private activitySequence = 0;
+	private streamId: string | null = null;
+	private activity: AgentActivityCollector | null = null;
+	private partial: Extract<AgentMessage, { role: "assistant" }> | null = null;
+
+	constructor(
+		private readonly bot: { id: string; name: string },
+		/** Read per frame: the daemon attaches the sink after construction. */
+		private readonly sink: () => ((frame: AgentStreamFrame) => void) | null,
+		private readonly demand: () => boolean,
+		private readonly persist: (snapshot: AgentActivity) => void,
+	) {}
+
+	begin(now: number): void {
+		if (this.activity) return;
+		const streamId = `${this.bot.id}-${++this.streamSequence}`;
+		this.streamId = streamId;
+		this.activity = new AgentActivityCollector(`${this.bot.id}:${now}:${++this.activitySequence}`, now);
+		this.partial = null;
+		if (!this.wants()) return;
+		this.sink()?.({ phase: "start", streamId, botId: this.bot.id, botName: this.bot.name, ts: now });
+	}
+
+	update(message: Extract<AgentMessage, { role: "assistant" }>, now: number): void {
+		if (!this.activity || !this.streamId) this.begin(now);
+		this.partial = message;
+		this.emit(now);
+	}
+
+	capture(message: Extract<AgentMessage, { role: "assistant" }>): void {
+		if (!this.activity) this.begin(Date.now());
+		this.activity?.captureAssistant(message);
+		this.partial = null;
+		this.emit(Date.now());
+	}
+
+	/** Tag a raw event with the running activity; returns the payload to store and whether it is grouped. */
+	group(kind: string, payload: unknown): { stored: unknown; grouped: boolean } {
+		const activity = this.activity;
+		if (!activity || !ACTIVITY_RAW_EVENT_KINDS.has(kind)) return { stored: payload, grouped: false };
+		if (ACTIVITY_DETAIL_EVENT_KINDS.has(kind)) activity.captureEvent(kind, payload);
+		const stored =
+			payload && typeof payload === "object" && !Array.isArray(payload)
+				? { ...(payload as Record<string, unknown>), activity_id: activity.activityId }
+				: { value: payload, activity_id: activity.activityId };
+		return { stored, grouped: true };
+	}
+
+	emit(now: number): void {
+		const streamId = this.streamId;
+		const activity = this.activity;
+		if (!streamId || !activity || !this.wants()) return;
+		const snapshot = activity.snapshot(this.partial);
+		if (snapshot.sections.length === 0) return;
+		this.sink()?.({
+			phase: "update",
+			streamId,
+			botId: this.bot.id,
+			botName: this.bot.name,
+			ts: now,
+			activity: snapshot,
+		});
+	}
+
+	finish(now: number): void {
+		const activity = this.activity;
+		if (!activity) {
+			this.end(now);
+			return;
+		}
+		const snapshot = activity.snapshot(this.partial);
+		this.activity = null;
+		this.partial = null;
+		try {
+			if (snapshot.sections.length > 0) this.persist(snapshot);
+		} finally {
+			this.end(now);
+		}
+	}
+
+	end(now = Date.now()): void {
+		const streamId = this.streamId;
+		if (!streamId) return;
+		this.streamId = null;
+		if (!this.wants()) return;
+		this.sink()?.({ phase: "end", streamId, botId: this.bot.id, botName: this.bot.name, ts: now });
+	}
+
+	private wants(): boolean {
+		return this.sink() != null && this.demand();
 	}
 }

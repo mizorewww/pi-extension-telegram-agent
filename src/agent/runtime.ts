@@ -145,7 +145,7 @@ import { parsePiModelReference, type PiRequestThinkingLevel } from "./model-ref.
 import type { VideoTranscoderAvailability } from "../media/video-frames.ts";
 import { errorCategory, log } from "../observability/log.ts";
 import { fitContextBreakdown } from "../observability/usage.ts";
-import { AgentActivityCollector } from "./activity.ts";
+import { AssistantActivityStream } from "./activity.ts";
 
 export type ModelControlSelection = Pick<BotConfig, "provider" | "model" | "reasoningEffort">;
 export type ModelControlResult =
@@ -218,31 +218,6 @@ const delay = (ms: number) =>
 	new Promise<void>((resolve) => {
 		setTimeout(resolve, ms).unref?.();
 	});
-
-const ACTIVITY_RAW_EVENT_KINDS = new Set([
-	"assistant_text",
-	"thinking",
-	"tool_call",
-	"tool_result",
-	"tool_search",
-	"tool_fetch",
-	"tool_messages",
-	"tool_view_image",
-	"tool_sh_exec",
-	"file_sent",
-	"tool_tg_download",
-	"box_reset",
-	"task_started",
-	"job_started",
-	"markdown_sent",
-	"plain_fallback",
-	"send",
-	"send_degraded",
-	"error",
-]);
-const ACTIVITY_DETAIL_EVENT_KINDS = new Set(
-	[...ACTIVITY_RAW_EVENT_KINDS].filter((kind) => kind !== "assistant_text" && kind !== "thinking"),
-);
 
 export type NewSessionResult =
 	| { ok: true; epoch: number }
@@ -348,11 +323,7 @@ export class BotRuntime {
 	private runStartTs = 0;
 	private systemHash = "";
 	private toolsHash = "";
-	private streamSequence = 0;
-	private activeStreamId: string | null = null;
-	private activitySequence = 0;
-	private activity: AgentActivityCollector | null = null;
-	private activeAssistantMessage: Extract<AgentMessage, { role: "assistant" }> | null = null;
+	private readonly activity: AssistantActivityStream;
 	private contextFingerprint = "";
 	private telemetryHmacKey = "";
 	private staticPrefixTokenEstimate = 0;
@@ -417,6 +388,12 @@ export class BotRuntime {
 		this.api = options.api ?? new BotApi(bot.token);
 		this.botApis = options.botApis ?? new Map([[bot.id, this.api]]);
 		this.tasks = bot.tools.tasks ? (options.tasks ?? null) : null;
+		this.activity = new AssistantActivityStream(
+			bot,
+			() => this.streamSink,
+			() => this.streamDemand?.() ?? true,
+			(snapshot) => this.recordEvent("agent_activity", snapshot),
+		);
 		this.box = options.box ?? (bot.tools.sandbox && config.sandbox ? new WorkBox(bot.id, config.sandbox) : null);
 		const chatId = config.groupChatId;
 		this.typingLease = new TelegramTypingLease(
@@ -658,7 +635,7 @@ export class BotRuntime {
 				(text) => {
 					this.recordEvent("assistant_text", { text });
 				},
-				(message) => this.captureAssistantActivity(message),
+				(message) => this.activity.capture(message),
 			),
 		];
 		this.contextFingerprintInput = {
@@ -831,7 +808,7 @@ export class BotRuntime {
 			const now = Date.now();
 			switch (event.type) {
 				case "agent_start":
-					this.beginAssistantActivity(now);
+					this.activity.begin(now);
 					this.running = true;
 					this.runStartTs = now;
 					this.lastTurnFailed = false;
@@ -845,13 +822,13 @@ export class BotRuntime {
 				case "message_start":
 					if (event.message.role === "assistant") {
 						this.observeThinking(event.message, now);
-						this.updateAssistantStream(event.message, now);
+						this.activity.update(event.message, now);
 					}
 					break;
 				case "message_update":
 					if (event.message.role === "assistant") {
 						this.observeThinking(event.message, now);
-						this.updateAssistantStream(event.message, now);
+						this.activity.update(event.message, now);
 					}
 					break;
 				case "message_end": {
@@ -923,7 +900,7 @@ export class BotRuntime {
 					});
 					this.running = false;
 					this.typingLease.stop();
-					this.finishAssistantActivity(now);
+					this.activity.finish(now);
 					// no flush re-trigger here: the flush loop owns pendingTrigger (REQ-AGENT-0001 R1)
 					break;
 				case "compaction_end":
@@ -949,89 +926,6 @@ export class BotRuntime {
 		} else if (ended) {
 			this.thinkingFinished = true;
 		}
-	}
-
-	private beginAssistantActivity(now: number): void {
-		if (this.activity) return;
-		const streamId = `${this.bot.id}-${++this.streamSequence}`;
-		this.activeStreamId = streamId;
-		this.activity = new AgentActivityCollector(`${this.bot.id}:${now}:${++this.activitySequence}`, now);
-		this.activeAssistantMessage = null;
-		if (!this.wantsAssistantStream()) return;
-		this.streamSink?.({
-			phase: "start",
-			streamId,
-			botId: this.bot.id,
-			botName: this.bot.name,
-			ts: now,
-		});
-	}
-
-	private updateAssistantStream(
-		message: Extract<AgentSessionEvent, { type: "message_update" }>["message"],
-		now: number,
-	): void {
-		if (message.role !== "assistant") return;
-		if (!this.activity || !this.activeStreamId) this.beginAssistantActivity(now);
-		this.activeAssistantMessage = message;
-		this.emitAssistantActivity(now);
-	}
-
-	private captureAssistantActivity(message: Extract<AgentMessage, { role: "assistant" }>): void {
-		if (!this.activity) this.beginAssistantActivity(Date.now());
-		this.activity?.captureAssistant(message);
-		this.activeAssistantMessage = null;
-		this.emitAssistantActivity(Date.now());
-	}
-
-	private emitAssistantActivity(now: number): void {
-		const streamId = this.activeStreamId;
-		const activity = this.activity;
-		if (!streamId || !activity || !this.wantsAssistantStream()) return;
-		const snapshot = activity.snapshot(this.activeAssistantMessage);
-		if (snapshot.sections.length === 0) return;
-		this.streamSink?.({
-			phase: "update",
-			streamId,
-			botId: this.bot.id,
-			botName: this.bot.name,
-			ts: now,
-			activity: snapshot,
-		});
-	}
-
-	private finishAssistantActivity(now: number): void {
-		const activity = this.activity;
-		if (!activity) {
-			this.endAssistantStream(now);
-			return;
-		}
-		const snapshot = activity.snapshot(this.activeAssistantMessage);
-		this.activity = null;
-		this.activeAssistantMessage = null;
-		try {
-			if (snapshot.sections.length > 0) this.recordEvent("agent_activity", snapshot);
-		} finally {
-			this.endAssistantStream(now);
-		}
-	}
-
-	private endAssistantStream(now = Date.now()): void {
-		const streamId = this.activeStreamId;
-		if (!streamId) return;
-		this.activeStreamId = null;
-		if (!this.wantsAssistantStream()) return;
-		this.streamSink?.({
-			phase: "end",
-			streamId,
-			botId: this.bot.id,
-			botName: this.bot.name,
-			ts: now,
-		});
-	}
-
-	private wantsAssistantStream(): boolean {
-		return this.streamSink != null && (this.streamDemand?.() ?? true);
 	}
 
 	/** Successful compaction rotates only provider visibility; the business cursor is monotonic. */
@@ -2117,19 +2011,12 @@ export class BotRuntime {
 	}
 
 	private recordEvent(kind: string, payload: unknown): void {
-		const activity = this.activity;
-		const grouped = activity != null && ACTIVITY_RAW_EVENT_KINDS.has(kind);
-		const storedPayload = grouped
-			? payload && typeof payload === "object" && !Array.isArray(payload)
-				? { ...(payload as Record<string, unknown>), activity_id: activity.activityId }
-				: { value: payload, activity_id: activity.activityId }
-			: payload;
-		if (grouped && ACTIVITY_DETAIL_EVENT_KINDS.has(kind)) activity.captureEvent(kind, payload);
+		const { stored, grouped } = this.activity.group(kind, payload);
 		const ts = Date.now();
 		const inserted = this.db
 			.query("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES (?, ?, ?, ?)")
-			.run(this.bot.id, ts, kind, JSON.stringify(storedPayload));
-		if (grouped) this.emitAssistantActivity(ts);
+			.run(this.bot.id, ts, kind, JSON.stringify(stored));
+		if (grouped) this.activity.emit(ts);
 		else this.eventSink?.({ id: Number(inserted.lastInsertRowid), ts, kind, payload });
 	}
 
@@ -2267,7 +2154,7 @@ export class BotRuntime {
 		this.jobs?.stopAll();
 		this.session?.abortCompaction();
 		this.typingLease.stop();
-		this.endAssistantStream();
+		this.activity.end();
 		// Bounded wait for an in-flight flush so the Pi/SQLite context commit can settle;
 		// the timeout only guards a wedged provider run.
 		if (this.flushPromise) {
