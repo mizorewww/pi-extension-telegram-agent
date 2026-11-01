@@ -107,7 +107,12 @@ for (const script of scripts.filter((s) => !arg("only") || s.name === arg("only"
 			: []),
 	].join("\n");
 	// An example that prints nothing would leave the bot with nothing to say: count it as a failure.
-	const ok = result.ok && output.trim().length > 0 && !nested.some((value) => value.startsWith("ERROR"));
+	// Examples report their own failures as text starting with 失败; count those too.
+	const ok =
+		result.ok &&
+		output.trim().length > 0 &&
+		!/^失败/m.test(output) &&
+		!nested.some((value) => value.startsWith("ERROR") || /^失败/m.test(value));
 	if (!ok) failed++;
 	console.log(
 		`\n=== ${script.name} ${ok ? "OK" : "FAIL"} ${((Date.now() - started) / 1000).toFixed(1)}s ${script.title}`,
