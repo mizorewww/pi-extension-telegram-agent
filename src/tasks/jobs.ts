@@ -4,13 +4,26 @@
 // them a reply, exactly like a finished task.
 
 import type { Database } from "bun:sqlite";
-import { CodemodeSandbox, type CodemodeTool } from "@earendil-works/pi-codemode";
+import {
+	CodemodeSandbox,
+	CodemodeSourceError,
+	parseCodemodeSource,
+	type CodemodeTool,
+} from "@earendil-works/pi-codemode";
 import { getDaemonState, setDaemonState } from "../db/db.ts";
 import { appendNoteEvent, type NotePayload } from "../db/message-events.ts";
 import { log } from "../observability/log.ts";
 
 export const JOB_TIMEOUT_MS = 60 * 60_000;
+export const JOB_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024;
+export const JOB_OUTPUT_MAX_CHARS = 16_000;
 export const MAX_RUNNING_JOBS = 4;
+
+function capJobOutput(text: string): string {
+	if (text.length <= JOB_OUTPUT_MAX_CHARS) return text;
+	const suffix = "\n[truncated]";
+	return `${text.slice(0, JOB_OUTPUT_MAX_CHARS - suffix.length)}${suffix}`;
+}
 
 export interface JobDeps {
 	db: Database;
@@ -39,24 +52,37 @@ export class JobRunner {
 	start(originMessageId: number, title: string, code: string): string {
 		if (this.running.size >= MAX_RUNNING_JOBS)
 			throw new JobError(`already running ${this.running.size} jobs; wait for one to finish`);
-		if (!code.trim()) throw new JobError("code is empty");
+		let parsed: ReturnType<typeof parseCodemodeSource>;
+		try {
+			parsed = parseCodemodeSource(code);
+		} catch (error) {
+			if (error instanceof CodemodeSourceError) throw new JobError(error.message);
+			throw error;
+		}
+		const timeoutMs = Math.min(JOB_TIMEOUT_MS, parsed.options.timeoutMs ?? JOB_TIMEOUT_MS);
 		const key = `job_seq:${this.deps.botId}`;
 		const id = `j${Number(getDaemonState(this.deps.db, key) ?? "0") + 1}`;
 		setDaemonState(this.deps.db, key, id.slice(1));
-		const sandbox = new CodemodeSandbox({ tools: this.deps.tools(), timeoutMs: JOB_TIMEOUT_MS });
+		const sandbox = new CodemodeSandbox({
+			tools: this.deps.tools(),
+			timeoutMs,
+			memoryLimitBytes: JOB_MEMORY_LIMIT_BYTES,
+		});
 		this.running.set(id, { sandbox, originMessageId, title });
 		log.info("tasks", "job_started", { bot_id: this.deps.botId, job_id: id });
 		void sandbox
-			.execute(code)
+			.execute(parsed.code)
 			.then((result) => {
-				const output = [
-					...result.output.map((item) => (item.type === "text" ? item.text : "[image omitted]")),
-					...(result.ok && result.value !== undefined
-						? [typeof result.value === "string" ? result.value : JSON.stringify(result.value)]
-						: []),
-				]
-					.join("\n")
-					.trim();
+				const output = capJobOutput(
+					[
+						...result.output.map((item) => (item.type === "text" ? item.text : "[image omitted]")),
+						...(result.ok && result.value !== undefined
+							? [typeof result.value === "string" ? result.value : JSON.stringify(result.value)]
+							: []),
+					]
+						.join("\n")
+						.trim(),
+				);
 				if (result.ok) this.finish(id, "done", `${title}\n${output || "(no output)"}`);
 				else this.finish(id, "failed", `${title}\n${output}\nScript error: ${result.error.message}`.trim());
 			})
