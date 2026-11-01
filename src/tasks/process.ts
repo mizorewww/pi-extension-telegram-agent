@@ -15,7 +15,18 @@ export interface TaskRunConfig extends BoxConfig {
 
 export type ReportKind = "progress" | "need_input" | "done";
 
+export interface TaskUsage {
+	provider: string | null;
+	model: string | null;
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+}
+
 export interface TaskProcessEvents {
+	onUsage(usage: TaskUsage): void;
 	onReport(kind: ReportKind, text: string, files: string[]): void;
 	/** One agent run finished; `lastText` is the final assistant text, if any. */
 	onSettled(lastText: string | null): void;
@@ -182,6 +193,17 @@ export class TaskProcess {
 			return;
 		}
 		if (record.type === "message_end" && record.message?.role === "assistant") {
+			const usage = record.message.usage;
+			if (usage)
+				this.events.onUsage({
+					provider: typeof record.message.provider === "string" ? record.message.provider : null,
+					model: typeof record.message.model === "string" ? record.message.model : null,
+					input: Number(usage.input) || 0,
+					output: Number(usage.output) || 0,
+					cacheRead: Number(usage.cacheRead) || 0,
+					cacheWrite: Number(usage.cacheWrite) || 0,
+					cost: Number(usage.cost?.total) || 0,
+				});
 			const text = (record.message.content ?? [])
 				.filter((block: { type?: string }) => block.type === "text")
 				.map((block: { text?: string }) => block.text ?? "")

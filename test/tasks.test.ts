@@ -35,7 +35,7 @@ function fakeChild() {
 }
 
 test("task containers run isolated and never carry a secret in argv", () => {
-	const args = new TaskProcess("t1", "A", RUN, { onReport() {}, onSettled() {}, onExit() {} }).runArgs();
+	const args = new TaskProcess("t1", "A", RUN, { onUsage() {}, onReport() {}, onSettled() {}, onExit() {} }).runArgs();
 	const joined = args.join(" ");
 	for (const flag of ["--user 1000:1000", "--cap-drop ALL", "--security-opt no-new-privileges", "--read-only", "--rm"])
 		expect(joined).toContain(flag);
@@ -76,6 +76,16 @@ test("task lifecycle notes belong to the bot, throttle progress and owe the requ
 		emit({ type: "tool_execution_start", toolName: "report", args: { kind, text } });
 	report("progress", "刚开始"); // inside the throttle window: kept for later, no wake
 	report("need_input", "要中文还是英文？\u2028（分隔符不能切帧）");
+	emit({
+		type: "message_end",
+		message: {
+			role: "assistant",
+			provider: "devin",
+			model: "swe-2",
+			content: [],
+			usage: { input: 10, output: 5, cacheRead: 2, cacheWrite: 0, cost: { total: 0.01 } },
+		},
+	});
 	report("done", "结果在这里");
 	await new Promise((resolve) => setTimeout(resolve, 10));
 	const notes = listRecentMessageEvents(db, CHAT, 0, 1_000, 100).map((event) => event.payload as NotePayload);
@@ -87,6 +97,10 @@ test("task lifecycle notes belong to the bot, throttle progress and owe the requ
 		["A", 42, true],
 	]);
 	expect(manager.list("A")[0]!.status).toBe("done");
+	expect(db.query("SELECT SUM(output_tokens) o, SUM(cost) c FROM task_usage WHERE task_id = ?").get(id)).toEqual({
+		o: 5,
+		c: 0.01,
+	});
 	expect(renderNote(42, notes[1]!)).toBe(`[task ${id} 完成 ↪ #42] 结果在这里`);
 
 	// A second task whose process dies without a result fails and still owes a reply.

@@ -299,6 +299,23 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_bot_status ON tasks(bot_id, status);
 
+-- Provider usage of a task's main Pi session, one row per assistant message. Subagents run as
+-- separate processes inside the task and are not included.
+CREATE TABLE IF NOT EXISTS task_usage (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	task_id TEXT NOT NULL,
+	bot_id TEXT NOT NULL,
+	ts INTEGER NOT NULL,
+	provider TEXT,
+	model TEXT,
+	input_tokens INTEGER NOT NULL DEFAULT 0,
+	output_tokens INTEGER NOT NULL DEFAULT 0,
+	cache_read INTEGER NOT NULL DEFAULT 0,
+	cache_write INTEGER NOT NULL DEFAULT 0,
+	cost REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_task_usage_task ON task_usage(task_id);
+
 CREATE TABLE IF NOT EXISTS reply_obligations (
 	bot_id TEXT NOT NULL,
 	chat_id INTEGER NOT NULL,

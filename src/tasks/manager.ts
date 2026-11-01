@@ -123,6 +123,24 @@ export class TaskManager {
 			botId,
 			this.deps.run,
 			{
+				onUsage: (usage) =>
+					this.deps.db
+						.query(
+							`INSERT INTO task_usage (task_id, bot_id, ts, provider, model, input_tokens, output_tokens, cache_read, cache_write, cost)
+							 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+						)
+						.run(
+							taskId,
+							botId,
+							Date.now(),
+							usage.provider,
+							usage.model,
+							usage.input,
+							usage.output,
+							usage.cacheRead,
+							usage.cacheWrite,
+							usage.cost,
+						),
 				onReport: (kind, text, files) => this.onReport(taskId, kind, text, files),
 				onSettled: (lastText) => this.onSettled(taskId, lastText),
 				onExit: (code) => this.onExit(taskId, code),
