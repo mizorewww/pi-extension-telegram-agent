@@ -1,8 +1,7 @@
 // Pi-native codemode (QuickJS wasm) for the bot. Scripts reach only the tools registered as
 // callable, send included: a script may acknowledge, work and answer in one go, bounded by the
-// per-turn send cap.
-// Results are bounded here because a script may raise its own `max_output_tokens`, and script
-// images are dropped: session entries hold image references only (docs/architecture.md).
+// per-turn send cap. Script images are dropped: session entries hold image references only
+// (docs/architecture.md).
 
 import { createCodemodeExtension, type InlineExtension } from "@earendil-works/pi-coding-agent";
 

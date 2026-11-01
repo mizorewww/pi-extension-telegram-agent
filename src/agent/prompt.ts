@@ -9,7 +9,7 @@ export const CACHE_SCHEMA_VERSION = 42; // v42: context media mode removed; batc
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
 
-export interface EnabledTools {
+interface EnabledTools {
 	send: boolean;
 	search: boolean;
 	codemode: boolean;
@@ -18,7 +18,7 @@ export interface EnabledTools {
 	viewImage: boolean;
 }
 
-export const SOURCE_REPOSITORY = "https://github.com/mizorewww/pi-extension-telegram-agent";
+const SOURCE_REPOSITORY = "https://github.com/mizorewww/pi-extension-telegram-agent";
 
 const TOOL_SUMMARIES = [
 	["search", "联网搜索，也可读取一个公开网页"],

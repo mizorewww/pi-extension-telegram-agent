@@ -232,8 +232,6 @@ export class MessageRouter {
 		// that new fact actually changes the deterministic outcome into a direct reply.
 		if (result.kind === "enriched" && decision.reason !== "reply") return;
 		if (decision.target === "nobody") return;
-		// TriggerTarget is `string | "nobody"`, which collapses to string; the early return above
-		// documents the nobody guard and claimRoutingDecision already accepts the decision as-is.
 		const routeVersion = result.routeVersion ?? 1;
 		if (!claimRoutingDecision(this.db, decision, routeVersion)) {
 			log.info("routing", "duplicate_claim_suppressed", {
@@ -250,26 +248,14 @@ export class MessageRouter {
 			routeVersion,
 			dispatched.outcome === "nobody" ? "missing_runtime" : dispatched.outcome,
 		);
-		if (decision.reason === "probability") {
-			const metric =
-				dispatched.outcome === "started"
-					? "route_probability_triggered"
-					: dispatched.outcome === "skipped_busy"
-						? "route_probability_skipped_busy"
-						: dispatched.outcome === "skipped_cooldown"
-							? "route_probability_skipped_cooldown"
-							: `route_probability_${dispatched.outcome}`;
-			log.info("routing", "decision", { bot_id: decision.target, message_id: row.message_id, outcome: metric });
-		} else {
-			log.info("routing", "decision", {
-				bot_id: decision.target,
-				message_id: row.message_id,
-				reason: decision.reason,
-				from_bot: decision.fromBot,
-				outcome: dispatched.outcome,
-				route_version: routeVersion,
-			});
-		}
+		log.info("routing", "decision", {
+			bot_id: decision.target,
+			message_id: row.message_id,
+			reason: decision.reason,
+			from_bot: decision.fromBot,
+			outcome: dispatched.outcome,
+			route_version: routeVersion,
+		});
 	}
 
 	/**

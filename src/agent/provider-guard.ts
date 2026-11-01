@@ -12,7 +12,7 @@ export function providerRetryPolicy(maxRetries: number): RetryPolicy {
 	return { enabled: maxRetries > 0, maxRetries, baseDelayMs: 10_000 };
 }
 
-export type GuardedCall = (signal: AbortSignal) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
+type GuardedCall = (signal: AbortSignal) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
 
 /** Pi recognizes request_too_large, but not a proxy's HTML HTTP 413 response. */
 function normalizeRequestSizeError(message: AssistantMessage): AssistantMessage {

@@ -134,16 +134,12 @@ export function replySnapshot(db: Database, row: MessageRow): ReplySnapshot | nu
 	};
 }
 
-export interface SerializeOptions {
-	/** Message ids whose content is already visible in the model's current context. */
-	visibleIds: Set<number>;
-}
-
-function renderReply(db: Database, m: MessageRow, opts: SerializeOptions): string {
+/** `visible`: ids already rendered earlier in the same batch; their replies omit the parent body. */
+function renderReply(db: Database, m: MessageRow, visible: ReadonlySet<number>): string {
 	let line = "";
 	if (m.reply_to_message_id != null) {
 		line += ` ↪ #${m.reply_to_message_id}`;
-		if (!opts.visibleIds.has(m.reply_to_message_id)) {
+		if (!visible.has(m.reply_to_message_id)) {
 			const parent = replySnapshot(db, m);
 			if (parent) {
 				line += ` ${parent.username ? `@${parent.username}` : (parent.display_name ?? "?")}`;
@@ -160,8 +156,8 @@ function renderReply(db: Database, m: MessageRow, opts: SerializeOptions): strin
 }
 
 /** Render one message row (no date separator). */
-export function renderMessageLine(db: Database, m: MessageRow, opts: SerializeOptions): string {
-	let line = `[${fmtTime(m.date)}] #${m.message_id} ${senderLabel(db, m)}${renderReply(db, m, opts)}`;
+export function renderMessageLine(db: Database, m: MessageRow, visible: ReadonlySet<number> = new Set()): string {
+	let line = `[${fmtTime(m.date)}] #${m.message_id} ${senderLabel(db, m)}${renderReply(db, m, visible)}`;
 	line += ":";
 	const body = m.text ?? m.caption ?? (m.media ? mediaPlaceholder(m.media) : "");
 	if (body) line += ` ${body}`;
@@ -175,12 +171,9 @@ export function renderMessageLine(db: Database, m: MessageRow, opts: SerializeOp
  * description that arrives later is appended as its own media_update line, never rewritten into
  * a message.
  */
-function serializeSegments(
-	db: Database,
-	events: MessageEvent[],
-	opts: SerializeOptions,
-): { event: MessageEvent; text: string }[] {
+function serializeSegments(db: Database, events: MessageEvent[]): { event: MessageEvent; text: string }[] {
 	const segments: { event: MessageEvent; text: string }[] = [];
+	const visible = new Set<number>();
 	let lastDate: string | null = null;
 	for (const event of events) {
 		if (event.kind === "message") {
@@ -188,8 +181,8 @@ function serializeSegments(
 			const day = fmtDate(row.date);
 			const separator = day !== lastDate ? `--- ${day} ---\n` : "";
 			lastDate = day;
-			segments.push({ event, text: `${separator}${renderMessageLine(db, row, opts)}` });
-			opts.visibleIds.add(row.message_id);
+			segments.push({ event, text: `${separator}${renderMessageLine(db, row, visible)}` });
+			visible.add(row.message_id);
 			continue;
 		}
 		if (event.kind === "note") {
@@ -206,13 +199,13 @@ function serializeSegments(
 		const row = event.payload as MessageRow;
 		if (event.kind === "edit") {
 			const body = row.text ?? row.caption ?? "";
-			const reply = renderReply(db, row, opts);
+			const reply = renderReply(db, row, visible);
 			segments.push({
 				event,
 				text: `[message_edit #${event.messageId}]${reply ? `${reply}:` : ""}${body ? ` ${body}` : " [empty]"}`,
 			});
 		} else {
-			const reply = renderReply(db, row, opts).trim() || "reply metadata updated";
+			const reply = renderReply(db, row, visible).trim() || "reply metadata updated";
 			segments.push({ event, text: `[message_metadata #${event.messageId}] ${reply}` });
 		}
 	}
@@ -220,8 +213,8 @@ function serializeSegments(
 }
 
 /** Delta events are always appended; no existing serialized message is rewritten. */
-export function serializeMessageEvents(db: Database, events: MessageEvent[], opts: SerializeOptions): string {
-	return serializeSegments(db, events, opts)
+export function serializeMessageEvents(db: Database, events: MessageEvent[]): string {
+	return serializeSegments(db, events)
 		.map((segment) => segment.text)
 		.filter(Boolean)
 		.join("\n");

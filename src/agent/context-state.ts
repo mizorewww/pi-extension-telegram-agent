@@ -11,7 +11,7 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { isTelegramContextDetails, viewImageRefs } from "./extensions/index.ts";
 
-export interface ContextState {
+interface ContextState {
 	consumedSeq: number;
 	visible: Set<number>;
 }

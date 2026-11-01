@@ -1,5 +1,5 @@
 // BotRuntime: one persona bot = one Pi AgentSession + immutable event consumption + visible refs.
-// See docs/architecture.md and docs/research.md.
+// See docs/architecture.md.
 
 import type { Database } from "bun:sqlite";
 import { readFileSync, mkdirSync, readdirSync, existsSync } from "node:fs";
@@ -8,6 +8,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	clampThinkingLevel,
 	contentText,
+	isContextOverflow,
 	retryAssistantCall,
 	type Api,
 	type JsonValue,
@@ -166,7 +167,6 @@ const MAX_EVENT_SCAN = 256;
 const MAX_OBLIGATION_SCAN = 64;
 const TELEGRAM_CONTEXT_COMMIT_TYPE = "telegram_context_commit_v2";
 const EPOCH_KEY = "context_epoch";
-const VISION_BATCH_CONCURRENCY = 2;
 
 /** A codemode tool result whose script-facing value is the same object the model sees as JSON. */
 function structured<T extends object>(value: T) {
@@ -235,7 +235,7 @@ export type ManualCompactResult =
 	| { ok: false; code: "busy" | "stopping" | "unavailable" | "nothing_to_compact" | "failed" };
 
 /** Latest compaction outcome for /status: restored from agent_events so it survives restarts. */
-export function restoreLastCompaction(db: Database, botId: string): RuntimeControlSnapshot["lastCompact"] {
+function restoreLastCompaction(db: Database, botId: string): RuntimeControlSnapshot["lastCompact"] {
 	const row = db
 		.query(
 			`SELECT ts, kind FROM agent_events
@@ -267,8 +267,6 @@ function pendingMediaIds(
 	obligationIds: ReadonlySet<number>,
 	limit: number,
 	prepared: (fileUniqueId: string) => boolean,
-	/** Vision mode also describes media carried by edit/metadata revisions. */
-	includeRevisions = false,
 ): string[] {
 	const pending: string[] = [];
 	const seen = new Set<string>();
@@ -279,7 +277,7 @@ function pendingMediaIds(
 	);
 	for (const event of prioritized) {
 		if (pending.length >= limit) break;
-		if (event.kind === "media_update" || (!includeRevisions && event.kind !== "message")) continue;
+		if (event.kind === "media_update" || event.kind === "note") continue;
 		const row = event.payload as MessageRow;
 		if (!row.media) continue;
 		const media = JSON.parse(row.media) as { kind: string; mime?: string; file_unique_id?: string };
@@ -288,16 +286,6 @@ function pendingMediaIds(
 		if (!prepared(media.file_unique_id)) pending.push(media.file_unique_id);
 	}
 	return pending;
-}
-
-/** Run `work` over `items` with at most `concurrency` in flight. */
-async function forEachConcurrent<T>(items: readonly T[], concurrency: number, work: (item: T) => Promise<void>) {
-	let next = 0;
-	await Promise.all(
-		Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-			while (next < items.length) await work(items[next++]!);
-		}),
-	);
 }
 
 export class BotRuntime {
@@ -431,14 +419,6 @@ export class BotRuntime {
 		this.epoch = Number(getBotState(db, bot.id, EPOCH_KEY) ?? "1");
 		this.visibleMessageIds = new Set(listVisibleMessageIds(db, bot.id, chatId, this.epoch));
 		this.lastControlCompact = restoreLastCompaction(db, bot.id);
-	}
-
-	get botUserId(): number {
-		return Number(getBotState(this.db, this.bot.id, "bot_user_id") ?? "0");
-	}
-
-	get botUsername(): string {
-		return getBotState(this.db, this.bot.id, "bot_username") ?? "";
 	}
 
 	async init(): Promise<void> {
@@ -866,7 +846,9 @@ export class BotRuntime {
 							log.warn("agent_runtime", "provider_attempt_failed", {
 								bot_id: this.bot.id,
 								trigger_message_id: this.currentTriggerMessageId,
-								category: classifyPiProviderFailure(msg.errorMessage ?? "provider failed"),
+								category: isContextOverflow(msg)
+									? "provider_request_too_large"
+									: classifyPiProviderFailure(msg.errorMessage ?? "provider failed"),
 							});
 						this.observeThinking(msg, now, true);
 						const thinking = msg.content
@@ -1306,10 +1288,6 @@ export class BotRuntime {
 		return "idle";
 	}
 
-	isAvailableForSampling(now = this.monotonicNow()): boolean {
-		return this.samplingState(now) === "idle";
-	}
-
 	/** Called by the scheduler when this bot gets a response opportunity. */
 	trigger(source: TriggerSource = "explicit", routingTrigger?: RoutingTrigger): TriggerResult {
 		// SHARED_PROTOCOL: explicit @mention, reply-to-bot, and configured-name keyword are all
@@ -1470,16 +1448,7 @@ export class BotRuntime {
 			reasoningReserve: this.bot.reasoningEffort === "off" ? 0 : DEFAULT_REASONING_RESERVE,
 			toolFollowupReserve: this.bot.tools.search || this.bot.tools.codemode ? DEFAULT_TOOL_FOLLOWUP_RESERVE : 2048,
 		});
-		const packed = packMessageEvents(
-			this.db,
-			mandatory,
-			normal,
-			suffixBudget,
-			// Native prompt preflight may compact the old window after packing. References
-			// can omit their body only when the parent is included in this same new batch.
-			{ visibleIds: new Set() },
-			this.bot.maxMessageTokens,
-		);
+		const packed = packMessageEvents(this.db, mandatory, normal, suffixBudget, this.bot.maxMessageTokens);
 		log.info("agent_runtime", "context_packed", {
 			bot_id: this.bot.id,
 			trigger_message_id: this.currentTriggerMessageId,
@@ -1671,7 +1640,6 @@ export class BotRuntime {
 
 	/** Keep a control command/reply out of the current epoch; durable exclusion is audit-backed. */
 	consumeControlMessage(messageId: number): void {
-		if (!Number.isSafeInteger(messageId) || messageId <= 0) return;
 		const chatId = this.config.groupChatId;
 		removeReplyObligations(this.db, this.bot.id, [{ chatId, messageId }]);
 	}
@@ -1935,24 +1903,15 @@ export class BotRuntime {
 		}
 	}
 
-	/**
-	 * Prepare context images for the batch: download + convert/sample only, never a provider
-	 * call. Bounded per turn, with direct-reply events ordered before ordinary catch-up.
-	 * Preparation failures are transient (retried on a later turn); packing falls back to the
-	 * text placeholder when no prepared refs exist.
-	 */
 	/** Lazy vision: bounded per turn, with direct-reply events ordered before ordinary catch-up. */
 	private async ensureBatchVision(batch: readonly MessageEvent[], obligationIds: ReadonlySet<number>): Promise<void> {
 		if (this.config.media.mode !== "hybrid" || this.config.media.maxPerTurn <= 0) return;
 		const described = this.db.query("SELECT vision FROM media WHERE file_unique_id = ?");
-		const pending = pendingMediaIds(
-			batch,
-			obligationIds,
-			this.config.media.maxPerTurn,
-			(id) => Boolean((described.get(id) as { vision: string | null } | null)?.vision),
-			true,
+		const pending = pendingMediaIds(batch, obligationIds, this.config.media.maxPerTurn, (id) =>
+			Boolean((described.get(id) as { vision: string | null } | null)?.vision),
 		);
-		await forEachConcurrent(pending, VISION_BATCH_CONCURRENCY, (fileUniqueId) => this.ensureOneVision(fileUniqueId));
+		// The shared VisionScheduler bounds provider concurrency across bots.
+		await Promise.all(pending.map((fileUniqueId) => this.ensureOneVision(fileUniqueId)));
 	}
 
 	private async ensureOneVision(fileUniqueId: string): Promise<void> {
@@ -2005,7 +1964,7 @@ export class BotRuntime {
 		this.markVisible([row.message_id]);
 		this.pendingInputMetrics.imagesAttached += prepared.images.length;
 		this.recordEvent("tool_view_image", { ok: true, images: prepared.images.length });
-		const line = renderMessageLine(this.db, row, { visibleIds: new Set() });
+		const line = renderMessageLine(this.db, row);
 		const details: ViewImageDetails = { messageId: row.message_id, images: prepared.images };
 		return {
 			content: [
@@ -2046,7 +2005,6 @@ export class BotRuntime {
 				events.filter((event) => owed.has(event.messageId)),
 				events.filter((event) => !owed.has(event.messageId)),
 				STEER_TOKEN_BUDGET,
-				{ visibleIds: new Set() },
 				this.bot.maxMessageTokens,
 			);
 			if (!packed.text.trim()) return;

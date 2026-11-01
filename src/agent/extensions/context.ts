@@ -64,7 +64,7 @@ export function isTelegramContextDetails(value: unknown): value is TelegramConte
 	);
 }
 
-export const VIEW_IMAGE_TOOL = "view_image";
+const VIEW_IMAGE_TOOL = "view_image";
 
 /** Persisted view_image result details: image references only, never bytes. */
 export interface ViewImageDetails {
@@ -106,7 +106,7 @@ export function contextImageBytes(entries: readonly SessionEntry[], mediaDir: st
 export type TelegramContextImageResolver = (ref: { name: string; mime: string }) => ImageContent | null;
 
 /** Projection-only message carrying the sticker candidate block; never persisted. */
-export const TELEGRAM_STICKER_CANDIDATES_TYPE = "telegram_sticker_candidates";
+const TELEGRAM_STICKER_CANDIDATES_TYPE = "telegram_sticker_candidates";
 
 /**
  * Keep the provider projection derived from extension-owned structured details. The same bytes

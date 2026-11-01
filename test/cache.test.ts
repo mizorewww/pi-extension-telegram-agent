@@ -140,28 +140,24 @@ test("immutable event serialization grammar is stable", () => {
 	};
 	const event = (ingestSeq: number, kind: string, revision: number, eventDate: number, payload: unknown) =>
 		({ ingestSeq, chatId: CHAT_ID, messageId: 200, revision, kind, eventDate, payload }) as never;
-	const out = serializeMessageEvents(
-		schemaDb(),
-		[
-			event(1, "message", 0, row.date, row),
-			event(2, "edit", 1754612400, 1754612400, { ...row, text: "edited", edit_date: 1754612400 }),
-			event(3, "metadata", 1, 1754612401, {
-				...row,
-				reply_to_message_id: 199,
-				reply_to_sender_id: 222,
-				reply_snapshot: JSON.stringify({
-					display_name: "Bob",
-					username: "bob",
-					text: "An archived parent whose full text exceeds forty characters: keep this ending.",
-					media: null,
-				}),
-				quote: JSON.stringify({
-					text: "A selected quote exceeding the former sixty-character limit: retain the final words.",
-				}),
+	const out = serializeMessageEvents(schemaDb(), [
+		event(1, "message", 0, row.date, row),
+		event(2, "edit", 1754612400, 1754612400, { ...row, text: "edited", edit_date: 1754612400 }),
+		event(3, "metadata", 1, 1754612401, {
+			...row,
+			reply_to_message_id: 199,
+			reply_to_sender_id: 222,
+			reply_snapshot: JSON.stringify({
+				display_name: "Bob",
+				username: "bob",
+				text: "An archived parent whose full text exceeds forty characters: keep this ending.",
+				media: null,
 			}),
-			event(4, "media_update", 2, 1754612402, { file_unique_id: "u", media_kind: "photo", text: "a cat" }),
-		],
-		{ visibleIds: new Set() },
-	);
+			quote: JSON.stringify({
+				text: "A selected quote exceeding the former sixty-character limit: retain the final words.",
+			}),
+		}),
+		event(4, "media_update", 2, 1754612402, { file_unique_id: "u", media_kind: "photo", text: "a cat" }),
+	]);
 	expect(sha256Short(out)).toBe(GOLDEN.eventSerialize);
 });
