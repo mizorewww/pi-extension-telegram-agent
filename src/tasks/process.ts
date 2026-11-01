@@ -4,7 +4,7 @@
 // the bot, `agent_settled` ends a run. Threat model: docs/architecture.md "任务威胁模型".
 
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
-import type { BoxConfig } from "../sandbox/box.ts";
+import { type BoxConfig, isolationArgs, runDocker } from "../sandbox/box.ts";
 
 export interface TaskRunConfig extends BoxConfig {
 	taskMemory: string;
@@ -70,13 +70,7 @@ export class TaskProcess {
 			this.container,
 			"--label",
 			`tg-task=${this.botId}`,
-			"--user",
-			"1000:1000",
-			"--cap-drop",
-			"ALL",
-			"--security-opt",
-			"no-new-privileges",
-			"--read-only",
+			...isolationArgs(this.botId, this.config.network),
 			"--tmpfs",
 			"/tmp:rw,nosuid,nodev,size=1g",
 			"--shm-size",
@@ -87,16 +81,10 @@ export class TaskProcess {
 			String(this.config.taskCpus),
 			"--pids-limit",
 			"1024",
-			"--network",
-			this.config.network ? "bridge" : "none",
-			"--env",
-			"HOME=/work/.home",
 			"--env",
 			"PI_CODING_AGENT_DIR=/pi-agent",
 			"--env",
 			"TINYFISH_API_KEY",
-			"--volume",
-			`tg-work-${this.botId}:/work`,
 			"--volume",
 			`tg-pihome-${this.botId}:/pi-agent`,
 			"--workdir",
@@ -158,10 +146,10 @@ export class TaskProcess {
 		this.child.stdin.end();
 		const child = this.child;
 		this.killTimer = setTimeout(() => {
-			spawn("docker", ["rm", "--force", this.container], {
-				env: { PATH: process.env.PATH ?? "/usr/bin:/bin", DOCKER_HOST: this.config.dockerHost },
-				stdio: "ignore",
-			});
+			void runDocker(["rm", "--force", this.container], {
+				dockerHost: this.config.dockerHost,
+				timeoutMs: 60_000,
+			}).catch(() => {});
 			child.kill("SIGKILL");
 		}, 10_000);
 	}

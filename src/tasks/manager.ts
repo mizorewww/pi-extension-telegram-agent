@@ -7,7 +7,7 @@ import type { Database } from "bun:sqlite";
 import { spawn } from "node:child_process";
 import { appendNoteEvent, type NotePayload } from "../db/message-events.ts";
 import { log } from "../observability/log.ts";
-import type { WorkBox } from "../sandbox/box.ts";
+import { runDocker, type WorkBox } from "../sandbox/box.ts";
 import { type ReportKind, type Spawner, TaskProcess, type TaskRunConfig, type TaskUsage } from "./process.ts";
 
 export const PROGRESS_INTERVAL_MS = 5 * 60_000;
@@ -76,19 +76,16 @@ const packWorkflowDir = (dir: string) =>
 		);
 	});
 
-const removeTaskContainers = (dockerHost: string) =>
-	new Promise<void>((resolve) => {
-		const child = spawn(
-			"sh",
-			["-c", 'ids=$(docker ps -aq --filter label=tg-task); [ -z "$ids" ] || docker rm -f $ids'],
-			{
-				env: { PATH: process.env.PATH ?? "/usr/bin:/bin", DOCKER_HOST: dockerHost },
-				stdio: "ignore",
-			},
-		);
-		child.on("close", () => resolve());
-		child.on("error", () => resolve());
-	});
+async function removeTaskContainers(dockerHost: string): Promise<void> {
+	const options = { dockerHost, timeoutMs: 60_000 };
+	try {
+		const listed = await runDocker(["ps", "-aq", "--filter", "label=tg-task"], options);
+		const ids = new TextDecoder().decode(listed.stdout).split(/\s+/).filter(Boolean);
+		if (ids.length > 0) await runDocker(["rm", "--force", ...ids], options);
+	} catch {
+		// Best effort: startup recovery must not fail because the docker daemon is unreachable.
+	}
+}
 
 export class TaskManager {
 	private readonly live = new Map<string, Live>();
