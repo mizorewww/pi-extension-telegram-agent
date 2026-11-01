@@ -77,7 +77,7 @@
 - Bun `socket.write` 返回字节数且可能部分写入：必须编码成 Uint8Array 后按字节偏移排队写（参考 `src/daemon/ipc-server.ts`）。
 - 本机 `telegram.config.ts`/`.env` 可能与生产共用 bot token：不要在开发机启动 daemon 或跑 e2e，两个 poller 会抢同一 token（409）并造成线上停摆。需要真实验证时在服务器上做。
 - `.env` 是 `key: value` 冒号格式，由 `src/config.ts` 自解析，不是 dotenv 的 `KEY=value`。
-- Pi 四包精确锁定 registry `1.4.0`；升级必须同一原子提交更新 manifest、lock 并做兼容性验证。交互式 `bun run pi` 使用本机 PATH 中的 Pi。
+- Pi 四包（另有仅供 `scripts/e2e-examples.ts` 用的 devDependency `pi-codemode`）精确锁定 registry `1.4.0`；升级必须同一原子提交一起更新 manifest、lock 并做兼容性验证。交互式 `bun run pi` 使用本机 PATH 中的 Pi。
 - sticker / alias 的 short_id 用 rowid 分配，不用 COUNT+1（并发 / 删除下撞号）。
 - `streamFunction` 包装（`src/agent/runtime.ts`）是 Pi 的官方注入形态（`Agent.streamFunction` 是公开可变字段，函数包函数注入 `cacheRetention`）；`createAgentSession()` 不接受 streamFn 选项，只能事后覆盖。升级 Pi 时仍必须验证该包装（见 `docs/engineering/decisions.md`）。
 

@@ -20,6 +20,7 @@ bun run docs:check        # 5. 文档站构建 + 链接检查
 bun run scripts/smoke-pi.ts --bot <id>         # 单次真实 provider 请求
 bun run scripts/e2e-agent.ts --bot <id>        # 真实链路
 bun run scripts/e2e-compaction.ts --bot <id>   # 通过公开 control 入口压缩
+bun run scripts/e2e-examples.ts --photo <id> --pdf <id> --thread <id> --sender @user   # 提示词里每个【脚本】示例对真实工具跑一遍；改 tool-examples.md 后必跑
 ```
 
 ## 守卫清单
