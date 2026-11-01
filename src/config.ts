@@ -257,24 +257,11 @@ const BOT_KEYS = new Set([
 	"tools",
 	"sticker_sets",
 ]);
-/** Removed or renamed fields fail loudly with their replacement instead of being ignored. */
-const REPLACED_KEYS: Record<string, string> = {
-	sampling_cooldown_ms: "renamed to cooldown_ms",
-	auxiliary_visual_model: "moved to media.vision_model",
-	vision: 'merged into media: use media.mode "hybrid" with media.max_per_turn / media.concurrency',
-	db_path: "removed; the database is always data/agent.db",
-	router_secret_env: "removed; the .env key is always router_secret",
-	tinyfish_key_env: "removed; the .env key is always tiny_fish_api_key",
-	max_images_per_turn: "renamed to max_per_turn",
-	download_concurrency: "renamed to concurrency",
-};
-
 /** Reject keys a section does not define; a typo must never silently fall back to a default. */
 function checkKeys(errors: string[], at: string, source: Raw, known: ReadonlySet<string>): void {
 	for (const key of Object.keys(source)) {
 		if (known.has(key)) continue;
-		const hint = REPLACED_KEYS[key];
-		errors.push(`[config] ${at}${key}: ${hint ?? "unknown field"}`);
+		errors.push(`[config] ${at}${key}: unknown field`);
 	}
 }
 
@@ -353,11 +340,7 @@ function validate(rootDir: string, raw: Raw, env: Record<string, string>, identi
 	if (raw.media !== undefined) {
 		if (isObject(raw.media)) {
 			checkKeys(errors, "media.", raw.media, new Set(Object.keys(MEDIA_RULES)));
-			if (raw.media.mode === "describe")
-				errors.push(
-					'[config] media.mode: "describe" was removed; use "hybrid" (needs an image-capable main model) or "off"',
-				);
-			else checkFields(errors, "media.", raw.media, MEDIA_RULES);
+			checkFields(errors, "media.", raw.media, MEDIA_RULES);
 		} else errors.push("[config] media: expected object");
 	}
 	if (raw.tasks !== undefined) {
