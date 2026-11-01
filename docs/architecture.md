@@ -42,6 +42,10 @@ Telegram ── poller × N ──┐
 - 任务只通过 `report(progress | need_input | done)` 与 bot 通信；daemon 读 RPC 事件流，把报告写成该 bot 的 `note` 事件。进展同一任务至少间隔 5 分钟才唤醒 bot；完成、失败、需要输入时在发起消息上重新创建回复义务并唤醒，复用补答与不重发语义。run 结束却没报 done 时取最后的 assistant 文本当结果。
 - 群友的补充经 `task message` 转给任务（运行中 steer，等待输入时开始下一 run）；`task cancel` 停止；每个 bot 最多 `tasks.max_running` 个，超过 `tasks.timeout_minutes` 判失败。任务的 Pi session 存在 `/work/tasks/<id>/.pi-sessions`：daemon 停止时只停容器、不判失败；重启后先按 label 删除残留容器，running 的任务用同一 session 重新起容器并提示它从中断处继续，need_input 的任务等收到回答再启动；超时按创建时间计算。工作区不可用时才标记 interrupted 并通知发起人。有任务时每周清空顺延。
 
+### 后台脚本（job）
+
+- model-only `job({ title, code, for_message? })`（codemode 与 send 都开时注册）：把一段 codemode 脚本放到回合之外运行（`src/tasks/jobs.ts`，Pi `CodemodeSandbox`，与 codemode 同一组脚本工具，但没有 `tg_post`），立刻返回 `jN`。结果（输出 ≤16,000 字符）写成 `source: "job"` 的 note（`[job jN 完成 ↪ #id]` / `[job jN 失败]`），在发起消息上产生回复义务并唤醒 bot，复用任务的投递路径。每 bot 同时 ≤2 个、每个 ≤15 分钟；daemon 停止时正在跑的 job 写 interrupted note 并产生义务，重启后 bot 会告诉发起人。job 不跨重启续跑（脚本没有可恢复的状态）。
+
 ## 任务威胁模型
 
 - **威胁**：任务会抓取网页，网页里的 prompt injection 可以驱动任务里的 agent 执行命令、读写 `/work`、调用凭证卷里的 provider。

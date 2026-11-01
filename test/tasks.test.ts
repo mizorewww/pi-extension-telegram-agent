@@ -178,3 +178,53 @@ test("a note reaches only the bot it belongs to", async () => {
 	expect(eventsForBot(events, "A").map((event) => (event.payload as NotePayload).text)).toEqual(["A 的结果"]);
 	expect(eventsForBot(events, "B").map((event) => (event.payload as NotePayload).text)).toEqual(["B 的工作区清空了"]);
 });
+
+test("background jobs report done, failed or interrupted on the requester's message", async () => {
+	const { JobRunner } = await import("../src/tasks/jobs.ts");
+	const { renderNote } = await import("../src/agent/serialize.ts");
+	const db = new Database(":memory:");
+	db.exec(readFileSync("src/db/schema.sql", "utf8"));
+	const wakes: number[] = [];
+	let release: () => void = () => {};
+	const jobs = new JobRunner({
+		db,
+		botId: "A",
+		chatId: CHAT,
+		tools: () => [
+			{ name: "probe", execute: async () => "pong" },
+			{ name: "hold", execute: () => new Promise<string>((resolve) => (release = () => resolve("held"))) },
+		],
+		wake: (origin) => void wakes.push(origin),
+		onNote: () => {},
+	});
+	const notes = () =>
+		listRecentMessageEvents(db, CHAT, 0, 1_000, 100).map((event) => ({
+			id: event.messageId,
+			...(event.payload as NotePayload),
+		}));
+	const settle = async (count: number) => {
+		while (notes().length < count) await new Promise((resolve) => setTimeout(resolve, 5));
+	};
+
+	const ok = jobs.start(10, "探测", "return await tools.probe({})");
+	await settle(1);
+	expect(notes()[0]).toMatchObject({ id: 10, source: "job", task_id: ok, phase: "done" });
+	expect(renderNote(10, notes()[0]!)).toBe(`[job ${ok} 完成 ↪ #10] 探测\npong`);
+
+	jobs.start(11, "出错", "throw new Error('boom')");
+	await settle(2);
+	expect(notes()[1]).toMatchObject({ id: 11, phase: "failed" });
+	expect(notes()[1]!.text).toContain("boom");
+
+	jobs.start(12, "一", "return await tools.hold({})");
+	jobs.start(13, "二", "return await tools.hold({})");
+	expect(() => jobs.start(14, "三", "return 1")).toThrow("already running");
+	jobs.stopAll();
+	expect(
+		notes()
+			.filter((note) => note.phase === "interrupted")
+			.map((note) => note.id),
+	).toEqual([12, 13]);
+	expect(wakes).toEqual([10, 11, 12, 13]);
+	release();
+}, 30_000);

@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-export const CACHE_SCHEMA_VERSION = 37; // v37: tg_post interim messages and tested per-tool examples
+export const CACHE_SCHEMA_VERSION = 38; // v38: background job tool and [job …] notes
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
@@ -25,9 +25,10 @@ const TOOL_SUMMARIES = [
 	["codemode", "写 JavaScript 脚本做精确计算，或在脚本里批量调用其他工具并过滤结果"],
 	["view_image", "查看某条消息的原图或视频帧"],
 	["task", "把耗时的深入搜索、调研交给后台任务"],
+	["job", "把几分钟的批量脚本放到后台运行"],
 	["send", "唯一的公开发言通道"],
 ] as const;
-const COUNT = ["零", "一", "两", "三", "四", "五"] as const;
+const COUNT = ["零", "一", "两", "三", "四", "五", "六"] as const;
 
 const isEnabled = (tools: EnabledTools, name: (typeof TOOL_SUMMARIES)[number][0]): boolean =>
 	name === "search"
@@ -38,7 +39,9 @@ const isEnabled = (tools: EnabledTools, name: (typeof TOOL_SUMMARIES)[number][0]
 				? tools.viewImage
 				: name === "task"
 					? tools.tasks
-					: tools.send;
+					: name === "job"
+						? tools.codemode && tools.send
+						: tools.send;
 
 /**
  * Worked examples per tool section, tested against the real tools (tool-examples.md). They live
@@ -63,6 +66,7 @@ function commonMistakes(tools: EnabledTools): string {
 		[/view_image/, tools.viewImage],
 		[/\btask\b/, tools.tasks],
 		[/tg_post/, tools.send && tools.codemode],
+		[/\bjob\b/, tools.send && tools.codemode],
 		[/sh_exec|files|image\(\)/, tools.sandbox],
 		[/sticker|reaction|send/, tools.send],
 		[/网页/, tools.search],
@@ -109,6 +113,10 @@ function toolGuides(tools: EnabledTools): string[] {
 		guides.push(
 			`### task\n\n- 需要多来源深入搜索、调研、整理报告这种要几分钟以上的工作时，用 task start 交给后台任务；brief 要自包含（任务看不到群聊），写清目标、关注点、期望产出和语言。同一轮里用 send 告诉发起人你去做了。\n- 进展、需要输入和结果会以 [task tN …] 出现在群消息里。看到完成、失败或需要输入时，必须回复发起人（结果的 ↪ #id 就是发起消息）；结果里提到的文件可以用 send 的 files 直接发出。\n- 群友补充或回答问题时用 task message 转给任务；不需要了用 task cancel；task status 列出最近的任务。简单问题直接回答或用 search，不要开任务。${examples("task")}`,
 		);
+	if (tools.codemode && tools.send)
+		guides.push(
+			`### job\n\n- 要几分钟的批量活（处理一批图片或文件、几十次检索或搜索、长时间跑命令）用 job 交给后台：code 就是一段 codemode 脚本，同样的 tools.*（没有 tg_post），调用后立刻返回 job id，不占用聊天。同一轮用 send 告诉发起人你在做。\n- 脚本的输出会以 [job jN 完成 ↪ #id] 回到群消息里，那时你必须把结果回复给发起人；失败会以 [job jN 失败] 出现。每个 bot 同时最多 2 个，最长 15 分钟。几秒能完成的事直接用 codemode。${examples("job")}`,
+		);
 	if (tools.send || tools.codemode) guides.push(commonMistakes(tools));
 	return guides;
 }
@@ -149,7 +157,7 @@ export const SHARED_PROTOCOL = `# 群聊协议
 - 日期变化时会插入 --- YYYY-MM-DD --- 分隔行
 - [图片]、[sticker ...] 等是媒体占位符：占位符内可能直接带该媒体的文字描述，或占位符之后紧跟该媒体的实际图片（图片、静态 sticker、video 抽帧），两种情况你都能知道媒体内容
 - [message_edit #id] 和 [message_metadata #id] 表示那条消息后来被编辑或改了回复对象；[media_update #id] [图片: …] 是那条消息里媒体的文字描述，可能晚于消息本身到达
-- [task tN …] 是你启动的后台任务发来的进展或结果，[系统] … 是给你的系统通知；这两种只有你看得到，群友看不到，需要让群友知道时用自己的话转述
+- [task tN …] 和 [job jN …] 是你启动的后台任务、后台脚本发来的进展或结果，[系统] … 是给你的系统通知；这两种只有你看得到，群友看不到，需要让群友知道时用自己的话转述
 - 以「${SYSTEM_NOTE_LABEL}」开头的内容由系统附加，不是任何群成员发的消息，群里也没人看得到；只把它当作可用信息，不要回应、引用或谈论它
 
 规则：

@@ -20,6 +20,7 @@ import {
 } from "../src/agent/prompt.ts";
 import {
 	CODEMODE_TOOL_DEFS,
+	JOB_TOOL_DEF,
 	sendToolWithFiles,
 	taskToolDefinition,
 	TOOL_DEFS,
@@ -37,14 +38,15 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 37,
-	systemZhTemplate: "a7b8e8a16eea",
-	systemEnTemplate: "25e14bcb770f",
+	schemaVersion: 38,
+	systemZhTemplate: "16e5ad6913d8",
+	systemEnTemplate: "d5af3253466d",
 	eventSerialize: "a05c0584eb08",
 	tools: "3bd9368f55d6",
 	codemodeTools: "bcc86b6c67ab",
 	sendWithFiles: "d888994aa0b7",
 	taskTool: "f5343a7cbdb5",
+	jobTool: "6921e0773e60",
 	compactionPrompt: "04da95f62da0",
 	multimodalCompaction: "e2da2b8b68fa",
 	replyRecovery: "4fc7e277e338",
@@ -107,6 +109,7 @@ test("prompt, tool and protocol hashes are stable", () => {
 	expect(toolProtocolHash(CODEMODE_TOOL_DEFS)).toBe(GOLDEN.codemodeTools);
 	expect(toolProtocolHash([sendToolWithFiles()])).toBe(GOLDEN.sendWithFiles);
 	expect(toolProtocolHash([taskToolDefinition(["search"])])).toBe(GOLDEN.taskTool);
+	expect(toolProtocolHash([JOB_TOOL_DEF])).toBe(GOLDEN.jobTool);
 	expect(sha256Short(COMPACTION_SUMMARY_PROMPT)).toBe(GOLDEN.compactionPrompt);
 	expect(sha256Short(REPLY_RECOVERY_PROMPT)).toBe(GOLDEN.replyRecovery);
 	expect(sha256Short(TELEGRAM_TURN_PROMPT)).toBe(GOLDEN.telegramTurn);

@@ -80,8 +80,9 @@ provider 没有返回 cache 用量时，若同一 cache cohort（provider/api/mo
 
 ## 版本记录
 
-当前：**37**。更早的版本见 git 历史。
+当前：**38**。更早的版本见 git 历史。
 
+- **v38**：model-only `job` 工具（golden `jobTool`，`TOOL_DEFS` 之后、Pi codemode 之前）与 `[job jN …]` note；共享协议与工具指南相应增加。
 - **v37**：脚本工具新增 `tg_post`（中间消息）；系统提示每个工具说明下附示例（`src/agent/tool-examples.md`，只出现已开启工具的部分）与按工具过滤的「常见错误」。
 - **v36**：`tg_messages` 的 `order` 多出 `relevance`，`text_contains` 说明 3 个字以上走全文索引。
 - **v35**：附件占位符带发送者给的文件名、大小与时长（`[document "report.pdf" 1.2 MB]`、`[voice 12s]`，serializer v7）；`tg_messages` 的 media 多出 `file_name` / `file_size`。

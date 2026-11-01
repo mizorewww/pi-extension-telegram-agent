@@ -63,6 +63,7 @@ export const TOOL_EXPOSURE = {
 	search: "direct",
 	view_image: "model-only",
 	task: "model-only",
+	job: "model-only",
 } as const;
 
 /** Fixed tool order — never reorder (cache-visible). */
@@ -280,6 +281,30 @@ export const CODEMODE_TOOL_DEFS = [
 		outputSchema: Type.Object({ sent: Type.Array(Type.Integer(), { description: "Sent message ids" }) }),
 	},
 ] as const;
+
+/** Background script: a codemode script run outside the turn; the result returns as a note. */
+export const JOB_TOOL_DEF = {
+	name: "job",
+	label: "Job",
+	description:
+		"在后台运行一段 codemode 脚本（同样的 JavaScript、同样的 tools.*，没有 tools.tg_post），立刻返回 job id，不占用聊天。适合几分钟的批量活：处理一批图片或文件、几十次检索或搜索、长时间跑命令。脚本的 return / text() 输出（最多约 16000 字符）会以 [job jN 完成 ↪ #id] 出现在群消息里，到时你必须把结果回复给发起人；失败会以 [job jN 失败] 出现。启动后同一轮用 send 告诉发起人你在做。几秒能完成的事直接用 codemode。",
+	parameters: Type.Object(
+		{
+			title: Type.String({ minLength: 1, maxLength: 80, description: "简短标题，结果里会带上" }),
+			code: Type.String({ minLength: 1, description: "原样 JavaScript，和 codemode 的输入一样" }),
+			for_message: Type.Optional(
+				Type.Integer({ description: "发起人的消息 #id；省略时为触发本轮的消息。结果会回复这条消息" }),
+			),
+		},
+		{ additionalProperties: false },
+	),
+} as const;
+
+export interface JobParams {
+	title: string;
+	code: string;
+	for_message?: number;
+}
 
 /** The send declaration for a bot with a work box: the same tool plus `files`. */
 export function sendToolWithFiles() {

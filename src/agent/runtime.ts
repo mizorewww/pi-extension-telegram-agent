@@ -52,8 +52,10 @@ import {
 	CODEMODE_TOOL_DEFS,
 	TOOL_DEFS,
 	TOOL_EXPOSURE,
+	JOB_TOOL_DEF,
 	sendToolWithFiles,
 	taskToolDefinition,
+	type JobParams,
 	toolProtocolHash,
 	type TaskParams,
 	type SendParams,
@@ -66,6 +68,8 @@ import { contextMediaRefs, createContextImageResolver, ensureContextMedia } from
 import { downloadSource, MEDIA_DOWNLOAD_MAX_BYTES } from "../media/local-cache.ts";
 import { WorkBox } from "../sandbox/box.ts";
 import { TaskError, type TaskManager } from "../tasks/manager.ts";
+import { JobError, JobRunner } from "../tasks/jobs.ts";
+import type { CodemodeJsonSchema } from "@earendil-works/pi-codemode";
 import { isVisionMedia, type MediaDownloadApi } from "../media/local-cache.ts";
 import { ensureVision, type VisionExecutor, type VisionUpdateSink } from "../media/vision.ts";
 import type { VisionScheduler } from "../media/vision-scheduler.ts";
@@ -224,6 +228,7 @@ const ACTIVITY_RAW_EVENT_KINDS = new Set([
 	"tool_tg_post",
 	"box_reset",
 	"task_started",
+	"job_started",
 	"markdown_sent",
 	"plain_fallback",
 	"send",
@@ -364,6 +369,7 @@ export class BotRuntime {
 	private activeTurn: { steeredThrough: number; steering: Promise<void> } | null = null;
 	private readonly box: WorkBox | null;
 	private readonly tasks: TaskManager | null;
+	private jobs: JobRunner | null = null;
 	private pendingPayloadObservation: ProviderPayloadObservation | null = null;
 	private allowedReactions: ReadonlySet<string> | null = null;
 	private previousRequest: (PreviousProviderPayloadFingerprint & { cohort: string }) | null = null;
@@ -569,6 +575,57 @@ export class BotRuntime {
 		const scriptTools = this.bot.tools.codemode
 			? [messagesTool, ...boxTools, ...(this.bot.tools.send ? [postTool] : [])]
 			: [];
+		// A background job reaches the same script tools as codemode, except tg_post: it runs
+		// outside the turn and answers through its result note.
+		const jobScriptTools = [...(this.bot.tools.search ? [searchTool] : []), messagesTool, ...boxTools];
+		this.jobs =
+			this.bot.tools.codemode && this.bot.tools.send
+				? new JobRunner({
+						db: this.db,
+						botId: this.bot.id,
+						chatId: this.config.groupChatId,
+						tools: () =>
+							jobScriptTools.map((tool) => ({
+								name: tool.name,
+								description: tool.description,
+								inputSchema: tool.parameters as unknown as CodemodeJsonSchema,
+								...("outputSchema" in tool ? { outputSchema: tool.outputSchema as unknown as CodemodeJsonSchema } : {}),
+								execute: async (args: unknown) => {
+									const result = await (tool.execute as (id: string, params: unknown) => Promise<any>)("job", args);
+									return (
+										result.structuredContent ??
+										result.content.map((block: { text?: string }) => block.text ?? "").join("\n")
+									);
+								},
+							})),
+						wake: (originMessageId) => this.wakeForTask(originMessageId, true),
+						onNote: (note) => this.recordNote(note),
+					})
+				: null;
+		const jobTool = {
+			...JOB_TOOL_DEF,
+			exposure: TOOL_EXPOSURE.job,
+			execute: async (_toolCallId: string, params: JobParams) => {
+				const origin = params.for_message ?? this.currentTriggerMessageId;
+				if (origin == null) throw new Error("job failed: needs for_message, the requester's message #id");
+				try {
+					const id = this.jobs!.start(origin, params.title.trim(), params.code);
+					this.recordEvent("job_started", { job_id: id });
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `started ${id}; tell the requester now, the result will arrive as [job ${id} …]`,
+							},
+						],
+						details: {},
+					};
+				} catch (error) {
+					if (error instanceof JobError) throw new Error(`job failed: ${error.message}`);
+					throw error;
+				}
+			},
+		};
 		const catalogModel = this.modelRuntime.getModel(this.bot.provider, this.bot.model);
 		if (!catalogModel) throw new Error(`model not found: ${this.bot.provider}/${this.bot.model}`);
 		const model = { ...catalogModel, contextWindow: Math.min(catalogModel.contextWindow, this.config.contextWindow) };
@@ -592,8 +649,9 @@ export class BotRuntime {
 			search: this.bot.tools.search,
 			view_image: this.bot.tools.viewImage,
 			task: this.tasks != null,
+			job: this.jobs != null,
 		};
-		const activeTools = [sendTool, searchTool, viewImageTool, taskTool].filter((tool) => enabled[tool.name]);
+		const activeTools = [sendTool, searchTool, viewImageTool, taskTool, jobTool].filter((tool) => enabled[tool.name]);
 		// Pi renders the codemode declaration from the callable tools; it is pinned by the Pi
 		// version and these tools, both already in the fingerprint.
 		const declaredTools = this.bot.tools.codemode
@@ -2400,6 +2458,7 @@ export class BotRuntime {
 
 	async stop(): Promise<void> {
 		this.stopping = true;
+		this.jobs?.stopAll();
 		this.session?.abortCompaction();
 		this.typingLease.stop();
 		this.endAssistantStream();

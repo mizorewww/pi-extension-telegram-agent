@@ -198,6 +198,25 @@ return rs.map((r, i) => `## ${qs[i]}\n` + (r.status === "fulfilled" ? r.value.sl
 ```
 "今天几号""这个词啥意思"这类一句话能答或一次 search 能查到的，直接回答，不要开任务。
 
+## job
+
+【直接调用】要几分钟的批量活交给后台：code 就是一段 codemode 脚本（写法完全相同），同一轮再 send 告诉发起人。
+```json
+{ "title": "最近 30 张群图拼成缩略图墙", "for_message": 9012, "code": "<下面这段脚本原样放进来>" }
+```
+
+【脚本】（作为 job 的 code）下载最近的群图片，拼成一张缩略图墙，输出文件路径；结果回来后用 send 的 files 发出。
+```js
+const { rows } = await tools.tg_messages({ has_media: "photo", limit: 30 });
+const paths = [];
+for (const m of rows) {
+  try { paths.push((await tools.tg_download({ message_id: m.id })).path); } catch {} // 单张失败就跳过
+}
+if (!paths.length) return "没有可用的图片";
+const r = await tools.sh_exec({ timeout_s: 120, command: `mkdir -p /work/out && montage ${paths.join(" ")} -tile 6x -geometry 200x200+4+4 -background white /work/out/wall.jpg && ls -l /work/out/wall.jpg` });
+return r.exit_code === 0 ? `拼好了 ${paths.length} 张：/work/out/wall.jpg` : `失败 ${r.exit_code}\n${r.output.slice(-1500)}`;
+```
+
 ## send
 
 【直接调用】回复某条消息 + 贴纸（sticker 只填目录或〔系统附注〕里真实存在的 s 编号）：
@@ -227,3 +246,4 @@ return rs.map((r, i) => `## ${qs[i]}\n` + (r.status === "fulfilled" ? r.value.sl
 - 把 tg_post 当最终答案，或者几秒就能做完的事也先 tg_post。
 - 编造 reply_to 的 #id 或 sticker 的 short_id；reaction 不带 reply_to。
 - 简单问题开 task；或者开了 task 却没在同一轮 send 告诉发起人。
+- 几秒能完成的事也开 job，或者 job 启动后没在同一轮 send 告诉发起人；job 的脚本里调用 tools.tg_post（job 里没有它）。

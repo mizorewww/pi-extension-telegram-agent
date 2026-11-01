@@ -10,7 +10,7 @@ export type MessageEventKind = "message" | "edit" | "metadata" | "media_update" 
  */
 export interface NotePayload {
 	bot_id: string;
-	source: "task" | "system";
+	source: "task" | "job" | "system";
 	task_id?: string;
 	phase?: "progress" | "need_input" | "done" | "failed" | "cancelled" | "interrupted";
 	text: string;

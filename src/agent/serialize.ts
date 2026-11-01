@@ -28,7 +28,7 @@ export function renderNote(messageId: number, note: NotePayload): string {
 	if (note.source === "system") return `[系统] ${note.text}${files}`;
 	const label = TASK_PHASE_LABEL[note.phase ?? "progress"];
 	const origin = messageId > 0 && note.phase !== "progress" ? ` ↪ #${messageId}` : "";
-	return `[task ${note.task_id} ${label}${origin}] ${note.text}${files}`;
+	return `[${note.source} ${note.task_id} ${label}${origin}] ${note.text}${files}`;
 }
 
 export interface MessageRow {
