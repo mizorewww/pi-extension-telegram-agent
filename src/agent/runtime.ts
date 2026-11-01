@@ -2,17 +2,9 @@
 // See docs/architecture.md.
 
 import type { Database } from "bun:sqlite";
-import { readFileSync, mkdirSync, readdirSync, existsSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import {
-	clampThinkingLevel,
-	isContextOverflow,
-	validateToolArguments,
-	type Api,
-	type JsonValue,
-	type Model,
-} from "@earendil-works/pi-ai";
+import { clampThinkingLevel, isContextOverflow, type Api, type Model } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
@@ -23,124 +15,105 @@ import {
 	type AgentSessionEvent,
 	type CompactionResult,
 	type ModelRuntime,
-	type SessionEntry,
 	type SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import { MIN_COMPACTION_RESERVE, type AppConfig, type BotConfig } from "../config.ts";
 import { getBotState, setBotState } from "../db/db.ts";
-import { BotApi, groupReactionAllowlist, TelegramApiError } from "../telegram/api.ts";
-import { TelegramTypingLease } from "../telegram/activity.ts";
-import { executeAgentSend } from "./send.ts";
-import { type MessageRow, renderMessageLine, TELEGRAM_SERIALIZER_VERSION } from "./serialize.ts";
 import {
-	buildSystemPrompt,
-	sha256Short,
-	CACHE_SCHEMA_VERSION,
-	COMPACTION_SUMMARY_PROMPT,
-	REPLY_RECOVERY_PROMPT,
-	SHARED_PROTOCOL,
-} from "./prompt.ts";
-import {
-	CODEMODE_TOOL_DEFS,
-	TOOL_DEFS,
-	TOOL_EXPOSURE,
-	JOB_TOOL_DEF,
-	MAX_SENDS_PER_TURN,
-	sendToolWithFiles,
-	taskToolDefinition,
-	type JobParams,
-	toolProtocolHash,
-	type TaskParams,
-	type SendParams,
-	type SearchParams,
-	type ViewImageParams,
-} from "./tools.ts";
-import { MessageQueryError, queryMessages, type MessageQuery } from "../tools/messages.ts";
-import { runTinyFishTool } from "../tools/search.ts";
-import { createImageRefResolver, ensureViewImages } from "../media/prepare-images.ts";
-import { downloadSource, MEDIA_DOWNLOAD_MAX_BYTES } from "../media/local-cache.ts";
-import { WorkBox } from "../sandbox/box.ts";
-import { TaskError, type TaskManager } from "../tasks/manager.ts";
-import { JobError, JobRunner } from "../tasks/jobs.ts";
-import type { CodemodeJsonSchema } from "@earendil-works/pi-codemode";
-import { isVisionMedia, type MediaDownloadApi } from "../media/local-cache.ts";
-import { ensureVision, type VisionExecutor, type VisionUpdateSink } from "../media/vision.ts";
-import type { VisionScheduler } from "../media/vision-scheduler.ts";
-import {
-	ensureStickerCatalog,
-	batchStickerCandidates,
-	stickerCatalogPromptBlock,
-	stickerCatalogSnapshotHash,
-} from "../media/sticker-catalog.ts";
+	addVisibleMessageIds,
+	appendNoteEvent,
+	commitConsumedContext,
+	eventsForBot,
+	getConsumedSeq,
+	getSessionManifest,
+	listRecentMessageEvents,
+	listVisibleMessageIds,
+	messageEventHighWater,
+	replaceVisibleMessageIds,
+	setConsumedSeq,
+	setSessionManifest,
+	type MessageEvent,
+	type NotePayload,
+} from "../db/message-events.ts";
 import {
 	createReplyObligation,
 	listReplyObligations,
 	removeReplyObligations,
 	replyObligationCount,
 } from "../db/reply-obligations.ts";
-import type { RoutingTrigger, TriggerResult, TriggerSource } from "./router.ts";
 import type { AgentStreamFrame, RuntimeControlSnapshot } from "../ipc.ts";
+import type { MediaDownloadApi } from "../media/local-cache.ts";
+import { createImageRefResolver } from "../media/prepare-images.ts";
+import {
+	batchStickerCandidates,
+	ensureStickerCatalog,
+	stickerCatalogPromptBlock,
+	stickerCatalogSnapshotHash,
+} from "../media/sticker-catalog.ts";
+import { ensureVision, type VisionExecutor, type VisionUpdateSink } from "../media/vision.ts";
+import type { VisionScheduler } from "../media/vision-scheduler.ts";
+import { errorCategory, log } from "../observability/log.ts";
+import { WorkBox } from "../sandbox/box.ts";
+import type { JobRunner } from "../tasks/jobs.ts";
+import { TaskError, type TaskManager } from "../tasks/manager.ts";
+import { TelegramTypingLease } from "../telegram/activity.ts";
+import { BotApi, groupReactionAllowlist, TelegramApiError } from "../telegram/api.ts";
 import { consumedControlMessageIds } from "../telegram/control-command.ts";
-import { classifyPiProviderFailure } from "./model-runtime.ts";
-import { providerRetryPolicy, guardProviderCall } from "./provider-guard.ts";
-import {
-	commitConsumedContext,
-	addVisibleMessageIds,
-	getConsumedSeq,
-	getSessionManifest,
-	listRecentMessageEvents,
-	listReplyObligationEvents,
-	listVisibleMessageIds,
-	messageEventHighWater,
-	replaceVisibleMessageIds,
-	setConsumedSeq,
-	setSessionManifest,
-	appendNoteEvent,
-	eventsForBot,
-	groupMessage,
-	type MessageEvent,
-	type NotePayload,
-} from "../db/message-events.ts";
-import {
-	availableSuffixBudget,
-	DEFAULT_REASONING_RESERVE,
-	DEFAULT_TOOL_FOLLOWUP_RESERVE,
-	estimateProviderTokensUpperBound,
-	packMessageEvents,
-	type PackedMessageEvents,
-} from "./token-packer.ts";
-import {
-	estimateCacheReadFromPrefix,
-	compactionTextBudget,
-	generateCompactionSummary,
-	isTelegramContextDetails,
-	makeAssistantPersistencePolicyExtension,
-	makeCodemodeExtension,
-	CODEMODE_DECLARATION_TOKENS,
-	CODEMODE_FINGERPRINT_ENTRY,
-	type ViewImageDetails,
-	makeCachePayloadObserverExtension,
-	makeTelegramCompactionExtension,
-	makeTelegramContextExtension,
-	TELEGRAM_CONTEXT_TYPE,
-	TELEGRAM_CONTEXT_VERSION,
-	contextImageBytes,
-	type PreviousProviderPayloadFingerprint,
-	type ProviderPayloadObservation,
-	type TelegramContextDetails,
-} from "./extensions/index.ts";
+import { AssistantActivityStream } from "./activity.ts";
 import {
 	buildContextFingerprint,
 	canResumeContextSession,
 	sha256,
 	type ContextFingerprintInput,
 } from "./context-fingerprint.ts";
-import { contextStateFromEntries } from "./context-state.ts";
-import { trimSessionBeforeCompaction } from "./session-trim.ts";
+import {
+	batchMessage,
+	contextStateFromEntries,
+	reconcileContextStateFromSession,
+	steeredVisibleIds,
+	TELEGRAM_CONTEXT_COMMIT_TYPE,
+} from "./context-state.ts";
+import {
+	CODEMODE_DECLARATION_TOKENS,
+	compactionTextBudget,
+	contextImageBytes,
+	generateCompactionSummary,
+	makeAssistantPersistencePolicyExtension,
+	makeCachePayloadObserverExtension,
+	makeCodemodeExtension,
+	makeTelegramCompactionExtension,
+	makeTelegramContextExtension,
+	TELEGRAM_CONTEXT_VERSION,
+} from "./extensions/index.ts";
 import { parsePiModelReference, type PiRequestThinkingLevel } from "./model-ref.ts";
-import { errorCategory, log } from "../observability/log.ts";
-import { fitContextBreakdown } from "../observability/usage.ts";
-import { AssistantActivityStream } from "./activity.ts";
+import { classifyPiProviderFailure } from "./model-runtime.ts";
+import {
+	buildSystemPrompt,
+	CACHE_SCHEMA_VERSION,
+	COMPACTION_SUMMARY_PROMPT,
+	REPLY_RECOVERY_PROMPT,
+	SHARED_PROTOCOL,
+	sha256Short,
+} from "./prompt.ts";
+import { guardProviderCall, providerRetryPolicy } from "./provider-guard.ts";
+import type { RoutingTrigger, TriggerResult, TriggerSource } from "./router.ts";
+import { BotRuntimeTelemetry, emptyInputMetrics, restoreLastCompaction } from "./runtime-telemetry.ts";
+import { buildBotRuntimeTools } from "./runtime-tools.ts";
+import { TELEGRAM_SERIALIZER_VERSION } from "./serialize.ts";
+import { trimSessionBeforeCompaction } from "./session-trim.ts";
+import {
+	availableSuffixBudget,
+	DEFAULT_REASONING_RESERVE,
+	DEFAULT_TOOL_FOLLOWUP_RESERVE,
+	estimateProviderTokensUpperBound,
+	MAX_EVENT_SCAN,
+	MAX_OBLIGATION_SCAN,
+	packMessageEvents,
+	pendingMediaIds,
+	scanTurnEventWindow,
+	unseenEvents,
+} from "./token-packer.ts";
+import { toolProtocolHash } from "./tools.ts";
 
 export type ModelControlSelection = Pick<BotConfig, "provider" | "model" | "reasoningEffort">;
 export type ModelControlResult =
@@ -158,62 +131,6 @@ export type ModelControlResult =
 				| "failed";
 	  };
 
-const MAX_EVENT_SCAN = 256;
-const MAX_OBLIGATION_SCAN = 64;
-const TELEGRAM_CONTEXT_COMMIT_TYPE = "telegram_context_commit_v2";
-const EPOCH_KEY = "context_epoch";
-
-/** A codemode tool result whose script-facing value is the same object the model sees as JSON. */
-function structured<T extends object>(value: T) {
-	return {
-		content: [{ type: "text" as const, text: JSON.stringify(value) }],
-		details: {},
-		structuredContent: value as unknown as JsonValue,
-	};
-}
-
-/** Suffix budget for one batch steered into a running turn. */
-const STEER_TOKEN_BUDGET = 4_000;
-
-/** Message ids made visible by batches steered into the turn that started at `turnHighWater`. */
-function steeredVisibleIds(entries: readonly SessionEntry[], turnHighWater: number): Set<number> {
-	const ids = new Set<number>();
-	for (const entry of entries)
-		if (
-			entry.type === "custom_message" &&
-			isTelegramContextDetails(entry.details) &&
-			entry.details.consumedSeq > turnHighWater
-		)
-			for (const id of entry.details.visibleMessageIds) ids.add(id);
-	return ids;
-}
-
-/**
- * One packed batch as a Telegram context message. Its content is the rendered text; the sticker
- * note stays in details and is projected after the batch, so compaction never reads it.
- */
-function batchMessage(
-	packed: Pick<PackedMessageEvents, "text" | "visibleMessageIds">,
-	consumedSeq: number,
-	stickerCandidates: string,
-) {
-	const details: TelegramContextDetails = {
-		version: TELEGRAM_CONTEXT_VERSION,
-		consumedSeq,
-		stickerCandidates,
-		visibleMessageIds: packed.visibleMessageIds,
-	};
-	return { customType: TELEGRAM_CONTEXT_TYPE, content: packed.text, display: false, details };
-}
-
-/** How long a turn waits for new media descriptions before replying without them. */
-const VISION_WAIT_MS = 2_500;
-
-const delay = (ms: number) =>
-	new Promise<void>((resolve) => {
-		setTimeout(resolve, ms).unref?.();
-	});
-
 export type NewSessionResult =
 	| { ok: true; epoch: number }
 	| { ok: false; code: "busy" | "stopping" | "unavailable" | "failed" };
@@ -222,59 +139,16 @@ export type ManualCompactResult =
 	| { ok: true; epoch: number; tokensBefore: number }
 	| { ok: false; code: "busy" | "stopping" | "unavailable" | "nothing_to_compact" | "failed" };
 
-/** Latest compaction outcome for /status: restored from agent_events so it survives restarts. */
-function restoreLastCompaction(db: Database, botId: string): RuntimeControlSnapshot["lastCompact"] {
-	const row = db
-		.query(
-			`SELECT ts, kind FROM agent_events
-			 WHERE bot_id = ? AND (kind = 'compaction' OR (kind = 'error' AND json_extract(payload, '$.stage') = 'compaction'))
-			 ORDER BY ts DESC LIMIT 1`,
-		)
-		.get(botId) as { ts: number; kind: string } | null;
-	if (!row) return null;
-	return { at: row.ts, outcome: row.kind === "compaction" ? "ok" : "failed" };
-}
+const EPOCH_KEY = "context_epoch";
+/** Suffix budget for one batch steered into a running turn. */
+const STEER_TOKEN_BUDGET = 4_000;
+/** How long a turn waits for new media descriptions before replying without them. */
+const VISION_WAIT_MS = 2_500;
 
-/** Insert one row from column names; returns its rowid. */
-function insertRow(db: Database, table: string, row: Record<string, string | number | null>): number {
-	const columns = Object.keys(row);
-	return Number(
-		db
-			.query(`INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`)
-			.run(...Object.values(row)).lastInsertRowid,
-	);
-}
-
-function emptyInputMetrics() {
-	return { inputEvents: 0, estimatedTokens: 0, rowsScanned: 0, visionCalls: 0, imagesAttached: 0 };
-}
-
-/** Distinct preparable media identities in a batch, direct-reply events first, newest first. */
-function pendingMediaIds(
-	batch: readonly MessageEvent[],
-	obligationIds: ReadonlySet<number>,
-	limit: number,
-	prepared: (fileUniqueId: string) => boolean,
-): string[] {
-	const pending: string[] = [];
-	const seen = new Set<string>();
-	const prioritized = [...batch].sort(
-		(left, right) =>
-			Number(obligationIds.has(right.messageId)) - Number(obligationIds.has(left.messageId)) ||
-			right.ingestSeq - left.ingestSeq,
-	);
-	for (const event of prioritized) {
-		if (pending.length >= limit) break;
-		if (event.kind === "media_update" || event.kind === "note") continue;
-		const row = event.payload as MessageRow;
-		if (!row.media) continue;
-		const media = JSON.parse(row.media) as { kind: string; mime?: string; file_unique_id?: string };
-		if (!media.file_unique_id || !isVisionMedia(media.kind, media.mime) || seen.has(media.file_unique_id)) continue;
-		seen.add(media.file_unique_id);
-		if (!prepared(media.file_unique_id)) pending.push(media.file_unique_id);
-	}
-	return pending;
-}
+const delay = (ms: number) =>
+	new Promise<void>((resolve) => {
+		setTimeout(resolve, ms).unref?.();
+	});
 
 export class BotRuntime {
 	private db: Database;
@@ -315,12 +189,9 @@ export class BotRuntime {
 	private readonly monotonicNow = () => performance.now();
 	private visibleMessageIds = new Set<number>();
 	private epoch = 1;
-	private runStartTs = 0;
-	private systemHash = "";
-	private toolsHash = "";
 	private readonly activity: AssistantActivityStream;
+	private readonly telemetry: BotRuntimeTelemetry;
 	private contextFingerprint = "";
-	private telemetryHmacKey = "";
 	private staticPrefixTokenEstimate = 0;
 	private sendsThisTurn = 0;
 	/** The provider turn in flight: new direct addresses are steered into it (steerDirectAddress). */
@@ -328,16 +199,8 @@ export class BotRuntime {
 	private readonly box: WorkBox | null;
 	private readonly tasks: TaskManager | null;
 	private jobs: JobRunner | null = null;
-	private pendingPayloadObservation: ProviderPayloadObservation | null = null;
 	private allowedReactions: ReadonlySet<string> | null = null;
-	private previousRequest: (PreviousProviderPayloadFingerprint & { cohort: string }) | null = null;
 	private currentTriggerMessageId: number | null = null;
-	private pendingInputMetrics = emptyInputMetrics();
-	private providerCallsInRun = 0;
-	private lastLlmRunId: number | null = null;
-	private thinkingStartedAt = 0;
-	private thinkingMs = 0;
-	private thinkingFinished = false;
 	private readonly visionScheduler: VisionScheduler | null;
 	private readonly typingLease: TelegramTypingLease;
 	private readonly videoTranscoder: boolean;
@@ -387,7 +250,14 @@ export class BotRuntime {
 			bot,
 			() => this.streamSink,
 			() => this.streamDemand?.() ?? true,
-			(snapshot) => this.recordEvent("agent_activity", snapshot),
+			(snapshot) => this.telemetry.recordEvent("agent_activity", snapshot),
+		);
+		this.telemetry = new BotRuntimeTelemetry(
+			db,
+			bot,
+			this.activity,
+			() => this.eventSink,
+			() => this.usageSink,
 		);
 		this.box = options.box ?? (bot.tools.sandbox && config.sandbox ? new WorkBox(bot.id, config.sandbox) : null);
 		const chatId = config.groupChatId;
@@ -426,161 +296,8 @@ export class BotRuntime {
 		const stickerCatalog =
 			this.bot.stickerSets.length > 0 ? stickerCatalogPromptBlock(this.db, this.bot.id, this.bot.stickerSets) : "";
 		const systemPrompt = buildSystemPrompt(persona, this.bot.tools, stickerCatalog);
-		this.systemHash = sha256Short(systemPrompt);
+		this.telemetry.systemHash = sha256Short(systemPrompt);
 
-		const sendDef = this.box ? sendToolWithFiles() : TOOL_DEFS[0];
-		const sendTool = {
-			name: "send",
-			label: "Send",
-			description: sendDef.description,
-			parameters: sendDef.parameters,
-			exposure: TOOL_EXPOSURE.send,
-			// A script's send (nested id "<parent>/<n>") keeps typing on: the script is still working.
-			execute: async (toolCallId: string, params: SendParams) => {
-				return await this.executeSend(params, !toolCallId.includes("/"));
-			},
-		};
-		const searchTool = {
-			name: "search",
-			label: "Search",
-			description: TOOL_DEFS[1].description,
-			parameters: TOOL_DEFS[1].parameters,
-			exposure: TOOL_EXPOSURE.search,
-			execute: async (_toolCallId: string, params: SearchParams) => {
-				const result = await runTinyFishTool(this.config.tinyfishApiKey, params);
-				this.recordEvent(result.event.kind, result.event.payload);
-				return {
-					content: [{ type: "text" as const, text: result.content }],
-					details: result.details,
-				};
-			},
-		};
-		const viewImageTool = {
-			name: TOOL_DEFS[2].name,
-			label: TOOL_DEFS[2].label,
-			description: TOOL_DEFS[2].description,
-			parameters: TOOL_DEFS[2].parameters,
-			exposure: TOOL_EXPOSURE.view_image,
-			execute: async (_toolCallId: string, params: ViewImageParams) => await this.executeViewImage(params),
-		};
-		const taskTool = {
-			...taskToolDefinition(this.tasks?.workflows ?? []),
-			exposure: TOOL_EXPOSURE.task,
-			execute: async (_toolCallId: string, params: TaskParams) => ({
-				content: [{ type: "text" as const, text: await this.executeTask(params) }],
-				details: {},
-			}),
-		};
-		const messagesTool = {
-			...CODEMODE_TOOL_DEFS[0],
-			exposure: "codemode" as const,
-			execute: async (_toolCallId: string, params: MessageQuery) => {
-				try {
-					const result = queryMessages(this.db, chatId, params);
-					this.recordEvent("tool_messages", { rows: result.rows.length });
-					return {
-						content: [{ type: "text" as const, text: JSON.stringify(result) }],
-						details: { rows: result.rows.length },
-						structuredContent: result as unknown as JsonValue,
-					};
-				} catch (error) {
-					if (error instanceof MessageQueryError) throw new Error(error.message);
-					throw error;
-				}
-			},
-		};
-		const [, downloadDef, execDef, resetDef] = CODEMODE_TOOL_DEFS;
-		const boxTools = this.box
-			? [
-					{
-						...downloadDef,
-						exposure: "codemode" as const,
-						execute: async (_toolCallId: string, params: { message_id: number }) =>
-							structured(await this.downloadToBox(params.message_id)),
-					},
-					{
-						...execDef,
-						exposure: "codemode" as const,
-						execute: async (_toolCallId: string, params: { command: string; timeout_s?: number }) => {
-							const result = await this.box!.exec(params.command, params.timeout_s);
-							this.recordEvent("tool_sh_exec", {
-								exit_code: result.exit_code,
-								timed_out: result.timed_out,
-								bytes: result.output.length,
-								wall_ms: result.wall_ms,
-							});
-							return structured(result);
-						},
-					},
-					{
-						...resetDef,
-						exposure: "codemode" as const,
-						execute: async () => {
-							await this.resetBox("tool");
-							return structured({ reset: true });
-						},
-					},
-				]
-			: [];
-		const scriptTools = this.bot.tools.codemode ? [messagesTool, ...boxTools] : [];
-		// A background job reaches the script tools but never send, task or job: it runs outside
-		// the turn and answers through its result note.
-		const jobScriptTools = [...(this.bot.tools.search ? [searchTool] : []), messagesTool, ...boxTools];
-		this.jobs =
-			this.bot.tools.codemode && this.bot.tools.send
-				? new JobRunner({
-						db: this.db,
-						botId: this.bot.id,
-						chatId: this.config.groupChatId,
-						tools: () =>
-							jobScriptTools.map((tool) => ({
-								name: tool.name,
-								description: tool.description,
-								inputSchema: tool.parameters as unknown as CodemodeJsonSchema,
-								...("outputSchema" in tool ? { outputSchema: tool.outputSchema as unknown as CodemodeJsonSchema } : {}),
-								execute: async (args: unknown) => {
-									// A job's sandbox calls tools directly, outside Pi's tool pipeline: validate like a turn does.
-									const params = validateToolArguments(tool as never, {
-										type: "toolCall",
-										id: "job",
-										name: tool.name,
-										arguments: args as never,
-									});
-									const result = await (tool.execute as (id: string, params: unknown) => Promise<any>)("job", params);
-									return (
-										result.structuredContent ??
-										result.content.map((block: { text?: string }) => block.text ?? "").join("\n")
-									);
-								},
-							})),
-						wake: (originMessageId) => this.wakeForTask(originMessageId, true),
-						onNote: (note) => this.recordNote(note),
-					})
-				: null;
-		const jobTool = {
-			...JOB_TOOL_DEF,
-			exposure: TOOL_EXPOSURE.job,
-			execute: async (_toolCallId: string, params: JobParams) => {
-				const origin = params.for_message ?? this.currentTriggerMessageId;
-				if (origin == null) throw new Error("job failed: needs for_message, the requester's message #id");
-				try {
-					const id = this.jobs!.start(origin, params.title.trim(), params.code);
-					this.recordEvent("job_started", { job_id: id });
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text: `started ${id}; tell the requester now, the result will arrive as [job ${id} …]`,
-							},
-						],
-						details: {},
-					};
-				} catch (error) {
-					if (error instanceof JobError) throw new Error(`job failed: ${error.message}`);
-					throw error;
-				}
-			},
-		};
 		const catalogModel = this.modelRuntime.getModel(this.bot.provider, this.bot.model);
 		if (!catalogModel) throw new Error(`model not found: ${this.bot.provider}/${this.bot.model}`);
 		const model = { ...catalogModel, contextWindow: Math.min(catalogModel.contextWindow, this.config.contextWindow) };
@@ -594,25 +311,39 @@ export class BotRuntime {
 		this.compactionModel = compactionModel;
 		this.compactionReasoning = compactionSelection.thinkingLevel;
 
-		// Custom compaction: chat-oriented summary (state, not replay), threshold from config.
-		// Pi's trigger formula is contextTokens > contextWindow - reserveTokens, so reserve = window - threshold.
-		// Tool order is cache-visible protocol: never reorder (docs/cache.md, REQ-TEST-0001 R2).
-		// Per-bot tool toggles (REQ-CONF-0001): filter the fixed-order tool list. send off
-		// means the bot cannot speak in-group (observer-only); search/codemode off saves tokens.
-		const enabled: Record<string, boolean> = {
-			send: this.bot.tools.send,
-			search: this.bot.tools.search,
-			view_image: this.bot.tools.viewImage,
-			task: this.tasks != null,
-			job: this.jobs != null,
-		};
-		const activeTools = [sendTool, searchTool, viewImageTool, taskTool, jobTool].filter((tool) => enabled[tool.name]);
-		// Pi renders the codemode declaration from the callable tools; it is pinned by the Pi
-		// version and these tools, both already in the fingerprint.
-		const declaredTools = this.bot.tools.codemode
-			? [...activeTools, CODEMODE_FINGERPRINT_ENTRY, ...scriptTools]
-			: activeTools;
-		this.toolsHash = toolProtocolHash(declaredTools);
+		const { activeTools, scriptTools, declaredTools, jobs } = buildBotRuntimeTools({
+			db: this.db,
+			bot: this.bot,
+			config: this.config,
+			api: this.api,
+			botApis: this.botApis,
+			videoTranscoder: this.videoTranscoder,
+			box: this.box,
+			tasks: this.tasks,
+			allowedReactions: () => this.allowedReactions,
+			triggerMessageId: () => this.currentTriggerMessageId,
+			sendsThisTurn: () => this.sendsThisTurn,
+			onSendPosted: () => {
+				this.sendsThisTurn++;
+			},
+			onSendOutcome: (outcome) => {
+				this.turnSendOutcome = outcome;
+			},
+			onPublicSend: () => this.telemetry.recordPublicSend(),
+			onSendDuration: (durationMs) => this.telemetry.recordSendDuration(durationMs),
+			onSent: (raw) => this.sentMessageSink?.(raw),
+			stopTyping: () => this.typingLease.stop(),
+			resetBox: (reason) => this.resetBox(reason),
+			markVisible: (ids) => this.markVisible(ids),
+			onImageAttached: (count) => {
+				this.telemetry.pendingInputMetrics.imagesAttached += count;
+			},
+			recordEvent: (kind, payload) => this.telemetry.recordEvent(kind, payload),
+			recordNote: (note) => this.recordNote(note),
+			wakeForTask: (originMessageId, owe) => this.wakeForTask(originMessageId, owe),
+		});
+		this.jobs = jobs;
+		this.telemetry.toolsHash = toolProtocolHash(declaredTools);
 		this.staticPrefixTokenEstimate =
 			estimateProviderTokensUpperBound(
 				`${systemPrompt}\n${JSON.stringify(activeTools.map(({ name, description, parameters }) => ({ name, description, parameters })))}`,
@@ -620,7 +351,7 @@ export class BotRuntime {
 		const payloadKey = sha256(
 			`telegram-payload-observer:${this.config.routerSecret ?? this.config.dataDir}:${this.bot.id}`,
 		);
-		this.telemetryHmacKey = payloadKey;
+		this.telemetry.hmacKey = payloadKey;
 		const extensions = [
 			// Only hybrid mode has images in context: view_image results, resolved at projection.
 			makeTelegramContextExtension(
@@ -628,12 +359,12 @@ export class BotRuntime {
 			),
 			makeTelegramCompactionExtension((event) => this.handleBeforeCompact(event)),
 			makeCachePayloadObserverExtension(payloadKey, (observation) => {
-				this.pendingPayloadObservation = observation;
+				this.telemetry.pendingObservation = observation;
 			}),
 			...(this.bot.tools.codemode ? [makeCodemodeExtension()] : []),
 			makeAssistantPersistencePolicyExtension(
 				(text) => {
-					this.recordEvent("assistant_text", { text });
+					this.telemetry.recordEvent("assistant_text", { text });
 				},
 				(message) => this.activity.capture(message),
 			),
@@ -726,7 +457,7 @@ export class BotRuntime {
 			});
 			const streamFunction = session.agent.streamFunction;
 			session.agent.streamFunction = (requestModel, context, options) => {
-				this.pendingPayloadObservation = null;
+				this.telemetry.pendingObservation = null;
 				return guardProviderCall(
 					(signal) =>
 						streamFunction(requestModel, context, {
@@ -755,51 +486,29 @@ export class BotRuntime {
 			contextFingerprint: this.contextFingerprint,
 			createdAt: canResume ? manifest!.createdAt : Date.now(),
 		});
-		this.reconcileContextStateFromSession();
+		this.reconcileContextState();
 		this.subscribeEvents();
 		log.info("agent_runtime", "session_ready", {
 			bot_id: this.bot.id,
 			state: canResume ? "resumed" : "new",
 			epoch: this.epoch,
 			fingerprint: this.contextFingerprint.slice(0, 12),
-			system_hash: this.systemHash,
-			tools_hash: this.toolsHash,
+			system_hash: this.telemetry.systemHash,
+			tools_hash: this.telemetry.toolsHash,
 			tools: session.getActiveToolNames().join(","),
 			cache_schema: CACHE_SCHEMA_VERSION,
 		});
 	}
 
-	/** Recover the SQLite half of prior custom-message commits without parsing rendered text. */
-	private reconcileContextStateFromSession(): void {
+	private reconcileContextState(): void {
 		if (!this.session) return;
-		const chatId = this.config.groupChatId;
-		const state = contextStateFromEntries(
-			this.session.sessionManager.buildContextEntries(),
-			getConsumedSeq(this.db, this.bot.id, chatId),
-		);
-		setConsumedSeq(this.db, this.bot.id, chatId, state.consumedSeq);
-		replaceVisibleMessageIds(this.db, this.bot.id, chatId, this.epoch, [...state.visible]);
-		const delivered = this.deliveredCommitIdsFromEntries(this.session.sessionManager.getBranch());
-		removeReplyObligations(
+		this.visibleMessageIds = reconcileContextStateFromSession(
 			this.db,
+			this.session.sessionManager,
 			this.bot.id,
-			[...delivered].map((messageId) => ({ chatId, messageId })),
+			this.config.groupChatId,
+			this.epoch,
 		);
-		this.visibleMessageIds = state.visible;
-	}
-
-	/** Structured context ownership; provider-rendered strings are never parsed for identities. */
-	private deliveredCommitIdsFromEntries(entries: readonly SessionEntry[]): Set<number> {
-		const delivered = new Set<number>();
-		for (const entry of entries) {
-			if (entry.type !== "custom" || entry.customType !== TELEGRAM_CONTEXT_COMMIT_TYPE) continue;
-			const ids = (entry.data as { deliveredObligationIds?: unknown } | undefined)?.deliveredObligationIds;
-			if (!Array.isArray(ids)) continue;
-			for (const messageId of ids) {
-				if (Number.isSafeInteger(messageId) && (messageId as number) > 0) delivered.add(messageId as number);
-			}
-		}
-		return delivered;
 	}
 
 	private subscribeEvents(): void {
@@ -810,24 +519,13 @@ export class BotRuntime {
 				case "agent_start":
 					this.activity.begin(now);
 					this.running = true;
-					this.runStartTs = now;
 					this.lastTurnFailed = false;
-					this.providerCallsInRun = 0;
-					this.lastLlmRunId = null;
-					this.thinkingStartedAt = 0;
-					this.thinkingMs = 0;
-					this.thinkingFinished = false;
-					this.pendingPayloadObservation = null;
+					this.telemetry.beginRun(now);
 					break;
 				case "message_start":
-					if (event.message.role === "assistant") {
-						this.observeThinking(event.message, now);
-						this.activity.update(event.message, now);
-					}
-					break;
 				case "message_update":
 					if (event.message.role === "assistant") {
-						this.observeThinking(event.message, now);
+						this.telemetry.observeThinking(event.message, now);
 						this.activity.update(event.message, now);
 					}
 					break;
@@ -843,16 +541,22 @@ export class BotRuntime {
 									? "provider_request_too_large"
 									: classifyPiProviderFailure(msg.errorMessage ?? "provider failed"),
 							});
-						this.observeThinking(msg, now, true);
+						this.telemetry.observeThinking(msg, now, true);
 						const thinking = msg.content
 							.filter((c) => c.type === "thinking")
 							.map((c) => (c as { thinking: string }).thinking)
 							.join("\n");
-						if (thinking.trim()) this.recordEvent("thinking", { text: thinking });
+						if (thinking.trim()) this.telemetry.recordEvent("thinking", { text: thinking });
 						// Failed attempts carry zero usage; recording them would create empty llm_runs
 						// rows, consume this turn's input metrics, and mark the eventual success as a
 						// tool follow-up round.
-						if (msg.usage && !this.lastTurnFailed) this.recordUsage(msg.usage, now);
+						if (msg.usage && !this.lastTurnFailed)
+							this.telemetry.recordUsage(msg.usage, now, {
+								model: this.model,
+								epoch: this.epoch,
+								sessionId: this.session?.sessionId,
+								triggerMessageId: this.currentTriggerMessageId,
+							});
 					}
 					break;
 				}
@@ -865,7 +569,7 @@ export class BotRuntime {
 					});
 					break;
 				case "tool_execution_start":
-					this.recordEvent("tool_call", { tool: event.toolName, args: event.args });
+					this.telemetry.recordEvent("tool_call", { tool: event.toolName, args: event.args });
 					log.info("agent_tool", "execution_started", {
 						bot_id: this.bot.id,
 						tool: event.toolName,
@@ -874,7 +578,7 @@ export class BotRuntime {
 					break;
 				case "tool_execution_end":
 					try {
-						this.recordEvent("tool_result", { tool: event.toolName, isError: event.isError });
+						this.telemetry.recordEvent("tool_result", { tool: event.toolName, isError: event.isError });
 					} catch {
 						// A committed send must stay terminal even when its local record fails.
 						log.warn("agent_tool", "result_persist_failed", {
@@ -901,31 +605,12 @@ export class BotRuntime {
 					this.running = false;
 					this.typingLease.stop();
 					this.activity.finish(now);
-					// no flush re-trigger here: the flush loop owns pendingTrigger (REQ-AGENT-0001 R1)
 					break;
 				case "compaction_end":
 					this.onCompactionEnd(event);
 					break;
 			}
 		});
-	}
-
-	private observeThinking(message: Extract<AgentMessage, { role: "assistant" }>, now: number, ended = false): void {
-		if (this.thinkingFinished) return;
-		const hasThinking = message.content.some(
-			(content) => content.type === "thinking" && Boolean((content as { thinking?: string }).thinking),
-		);
-		const hasAnswer = message.content.some((content) =>
-			content.type !== "thinking" && content.type !== "text" ? true : content.type === "text" && Boolean(content.text),
-		);
-		if (hasThinking && this.thinkingStartedAt === 0) this.thinkingStartedAt = now;
-		if (this.thinkingStartedAt > 0 && (hasAnswer || ended)) {
-			this.thinkingMs += Math.max(0, now - this.thinkingStartedAt);
-			this.thinkingStartedAt = 0;
-			this.thinkingFinished = true;
-		} else if (ended) {
-			this.thinkingFinished = true;
-		}
 	}
 
 	/** Successful compaction rotates only provider visibility; the business cursor is monotonic. */
@@ -940,7 +625,12 @@ export class BotRuntime {
 		}
 		if (event.aborted || !event.result) {
 			const category = classifyPiProviderFailure(event.errorMessage ?? "compaction failed");
-			this.recordEvent("error", { stage: "compaction", reason: event.reason, aborted: event.aborted, category });
+			this.telemetry.recordEvent("error", {
+				stage: "compaction",
+				reason: event.reason,
+				aborted: event.aborted,
+				category,
+			});
 			this.lastControlCompact = { at: Date.now(), outcome: "failed" };
 			log.error("agent_runtime", "compaction_failed", {
 				bot_id: this.bot.id,
@@ -961,7 +651,7 @@ export class BotRuntime {
 		this.visibleMessageIds = new Set(kept);
 		const chatId = this.config.groupChatId;
 		replaceVisibleMessageIds(this.db, this.bot.id, chatId, this.epoch, kept);
-		this.recordEvent("compaction", { epoch: this.epoch, kept: kept.length });
+		this.telemetry.recordEvent("compaction", { epoch: this.epoch, kept: kept.length });
 		this.lastControlCompact = { at: Date.now(), outcome: "ok" };
 		log.info("agent_runtime", "compaction_committed", { bot_id: this.bot.id, epoch: this.epoch, kept: kept.length });
 		try {
@@ -1000,12 +690,12 @@ export class BotRuntime {
 				imageBudgetBytes: this.bot.contextImageBudgetBytes,
 				timeoutMs: this.bot.providerTimeoutMs,
 				retries: this.bot.providerRetries,
-				onUsage: (usage) => this.recordCompactionUsage(usage, Date.now(), this.compactionModel),
+				onUsage: (usage) => this.telemetry.recordCompactionUsage(usage, Date.now(), this.compactionModel, this.epoch),
 			});
 			if (!("summary" in gen)) {
 				// NOTE: the SDK swallows extension handler exceptions and would silently fall back
 				// to the default summarizer, so refusal goes through cancel -> compaction_end { aborted: true }.
-				this.recordEvent("error", { stage: "compaction", error: gen.failure });
+				this.telemetry.recordEvent("error", { stage: "compaction", error: gen.failure });
 				return { cancel: true };
 			}
 			const keptIndex = branchEntries.findIndex((entry) => entry.id === prep.firstKeptEntryId);
@@ -1035,47 +725,6 @@ export class BotRuntime {
 		}
 	}
 
-	private sendContext(stopTyping: boolean): Parameters<typeof executeAgentSend>[1] {
-		return {
-			db: this.db,
-			api: this.api,
-			botId: this.bot.id,
-			chatId: this.config.groupChatId,
-			allowedReactions: this.allowedReactions,
-			box: this.box,
-			triggerMessageId: this.currentTriggerMessageId,
-			recordPublicSend: () => this.recordPublicSend(),
-			markVisible: (ids) => this.markVisible(ids),
-			onSent: (raw) => this.sentMessageSink?.(raw),
-			recordEvent: (kind, payload) => this.recordEvent(kind, payload),
-			stopTyping: () => {
-				if (stopTyping) this.typingLease.stop();
-			},
-			recordDuration: (durationMs) => this.recordSendDuration(durationMs),
-		};
-	}
-
-	private async executeSend(params: SendParams, endsTurn = true) {
-		// Scripts may send several times in one turn (an acknowledgement, then the result). The cap
-		// only guards a looping script against flooding the group with messages; reactions post
-		// nothing and are not counted.
-		const posts = Boolean(params.message || params.sticker || params.files?.length);
-		if (posts && this.sendsThisTurn >= MAX_SENDS_PER_TURN)
-			throw new Error(
-				`send failed: ${MAX_SENDS_PER_TURN} messages already this turn, which looks like a runaway loop; stop and tell the group what happened`,
-			);
-		const result = await executeAgentSend(params, this.sendContext(endsTurn));
-		if (posts && result.details.sent.length > 0) this.sendsThisTurn++;
-		// Both successful sends and degraded terminal outcomes forbid an automatic resend.
-		// A reaction-only turn created no message, so a direct address is still owed a reply.
-		if ("outcome" in result.details) {
-			this.turnSendOutcome = result.details.outcome === "unknown" ? "unknown" : "sent";
-		} else if (result.details.sent.length > 0) {
-			this.turnSendOutcome = "sent";
-		}
-		return result;
-	}
-
 	/** Lifecycle state used by deterministic scheduling and the Telegram control plane. */
 	samplingState(now = this.monotonicNow()): "idle" | "busy" | "cooldown" | "stopping" {
 		if (this.stopping) return "stopping";
@@ -1099,7 +748,7 @@ export class BotRuntime {
 			const created = createReplyObligation(this.db, this.bot.id, routingTrigger.chatId, routingTrigger.messageId);
 			directReplyPending = true;
 			directReplyMessageId = routingTrigger.messageId;
-			if (created) this.recordEvent("reply_obligation_created", { message_id: routingTrigger.messageId });
+			if (created) this.telemetry.recordEvent("reply_obligation_created", { message_id: routingTrigger.messageId });
 		}
 		const state = this.samplingState();
 		if (state === "stopping") return "skipped_stopping";
@@ -1119,7 +768,7 @@ export class BotRuntime {
 			this.pendingTrigger = true;
 			this.pendingTriggerMessageId = routingTrigger?.messageId ?? this.pendingTriggerMessageId;
 			if (directReplyPending && directReplyMessageId != null) {
-				this.recordEvent("reply_obligation_coalesced", { message_id: directReplyMessageId });
+				this.telemetry.recordEvent("reply_obligation_coalesced", { message_id: directReplyMessageId });
 			}
 			return "coalesced";
 		}
@@ -1141,7 +790,7 @@ export class BotRuntime {
 				// R3: a failed flush only produces an error event; nothing escapes as an
 				// unhandled rejection. Uncommitted events are retried by later triggers.
 				try {
-					this.recordEvent("error", { stage: "flush", category });
+					this.telemetry.recordEvent("error", { stage: "flush", category });
 				} catch {
 					// shutdown may have closed the db under a wedged flush; nothing more to do
 				}
@@ -1187,47 +836,44 @@ export class BotRuntime {
 		this.lastTurnFailed = false;
 		const chatId = this.config.groupChatId;
 		const obligations = listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN);
-
 		const consumedSeq = getConsumedSeq(this.db, this.bot.id, chatId);
-		let highWater = messageEventHighWater(this.db, chatId);
-		const ownEvents = (events: MessageEvent[]) => eventsForBot(events, this.bot.id);
-		let recent = ownEvents(listRecentMessageEvents(this.db, chatId, consumedSeq, highWater, MAX_EVENT_SCAN));
-		let obligationEvents = ownEvents(listReplyObligationEvents(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN));
-		let rowsScanned = recent.length + obligationEvents.length;
 		const consumedControl = consumedControlMessageIds(this.db, chatId);
 		const obligationIds = new Set(obligations.map((obligation) => obligation.messageId));
-		const ordinaryEvents = (): MessageEvent[] =>
-			this.unseenEvents(recent, consumedControl).filter((event) => !obligationIds.has(event.messageId));
-		const requiredEvents = (): MessageEvent[] => {
-			const seen = new Set<number>();
-			const result: MessageEvent[] = [];
-			const candidates = [...obligationEvents, ...recent.filter((event) => obligationIds.has(event.messageId))];
-			for (const event of candidates) {
-				if (consumedControl.has(event.messageId) || seen.has(event.ingestSeq)) continue;
-				seen.add(event.ingestSeq);
-				result.push(event);
-			}
-			return result;
-		};
-		let mandatory = requiredEvents();
-		let normal = ordinaryEvents();
+		let highWater = messageEventHighWater(this.db, chatId);
+		let scanned = scanTurnEventWindow(
+			this.db,
+			this.bot.id,
+			chatId,
+			consumedSeq,
+			highWater,
+			obligationIds,
+			consumedControl,
+			this.visibleMessageIds,
+		);
+		let rowsScanned = scanned.rowsScanned;
 
-		this.pendingInputMetrics = emptyInputMetrics();
+		this.telemetry.pendingInputMetrics = emptyInputMetrics();
 		this.sendsThisTurn = 0;
 		// Descriptions get a short head start, then finish in the background and arrive later as
 		// media_update events; the reply never waits on a slow vision call (view_image covers it).
-		const vision = this.ensureBatchVision([...mandatory, ...normal], obligationIds).catch(() => {});
+		const vision = this.ensureBatchVision([...scanned.mandatory, ...scanned.normal], obligationIds).catch(() => {});
 		await Promise.race([vision, delay(VISION_WAIT_MS)]);
 		// Vision descriptions land as media_update events mid-scan: pick them up so the
 		// same flush already sees the fresh descriptions.
 		const postVisionHighWater = messageEventHighWater(this.db, chatId);
 		if (postVisionHighWater > highWater) {
 			highWater = postVisionHighWater;
-			recent = ownEvents(listRecentMessageEvents(this.db, chatId, consumedSeq, highWater, MAX_EVENT_SCAN));
-			obligationEvents = ownEvents(listReplyObligationEvents(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN));
-			rowsScanned += recent.length + obligationEvents.length;
-			mandatory = requiredEvents();
-			normal = ordinaryEvents();
+			scanned = scanTurnEventWindow(
+				this.db,
+				this.bot.id,
+				chatId,
+				consumedSeq,
+				highWater,
+				obligationIds,
+				consumedControl,
+				this.visibleMessageIds,
+			);
+			rowsScanned += scanned.rowsScanned;
 		}
 		const usage = this.session.getContextUsage();
 		const suffixBudget = availableSuffixBudget({
@@ -1239,7 +885,13 @@ export class BotRuntime {
 			reasoningReserve: this.bot.reasoningEffort === "off" ? 0 : DEFAULT_REASONING_RESERVE,
 			toolFollowupReserve: this.bot.tools.search || this.bot.tools.codemode ? DEFAULT_TOOL_FOLLOWUP_RESERVE : 2048,
 		});
-		const packed = packMessageEvents(this.db, mandatory, normal, suffixBudget, this.bot.maxMessageTokens);
+		const packed = packMessageEvents(
+			this.db,
+			scanned.mandatory,
+			scanned.normal,
+			suffixBudget,
+			this.bot.maxMessageTokens,
+		);
 		log.info("agent_runtime", "context_packed", {
 			bot_id: this.bot.id,
 			trigger_message_id: this.currentTriggerMessageId,
@@ -1283,11 +935,11 @@ export class BotRuntime {
 		const selectedIds = new Set(packed.visibleMessageIds);
 		const delivered = obligations.filter((obligation) => selectedIds.has(obligation.messageId));
 		this.currentTriggerMessageId ??= delivered[0]?.messageId ?? packed.events.at(-1)?.messageId ?? null;
-		this.pendingInputMetrics = {
+		this.telemetry.pendingInputMetrics = {
 			inputEvents: packed.events.length,
 			estimatedTokens: packed.estimatedTokens + boundedStickerCandidateTokens,
 			rowsScanned,
-			visionCalls: this.pendingInputMetrics.visionCalls,
+			visionCalls: this.telemetry.pendingInputMetrics.visionCalls,
 			imagesAttached: 0, // counted by view_image during the turn
 		};
 		// The batch itself starts the turn: Pi runs the same pre-run threshold compaction check as
@@ -1304,7 +956,7 @@ export class BotRuntime {
 			});
 		} catch (error) {
 			await this.endSteering();
-			this.reconcileContextStateFromSession();
+			this.reconcileContextState();
 			throw error;
 		}
 		if (
@@ -1330,7 +982,7 @@ export class BotRuntime {
 			bot_id: this.bot.id,
 			trigger_message_id: this.currentTriggerMessageId,
 			input_events: packed.events.length,
-			provider_calls: this.providerCallsInRun,
+			provider_calls: this.telemetry.providerCallsInRun,
 			send_outcome: this.turnSendOutcome,
 		});
 		const turnEntries = this.session.sessionManager.buildContextEntries();
@@ -1366,13 +1018,13 @@ export class BotRuntime {
 					obligation_count: delivered.length,
 				});
 			for (const obligation of delivered) {
-				this.recordEvent("reply_obligation_retained", { message_id: obligation.messageId });
+				this.telemetry.recordEvent("reply_obligation_retained", { message_id: obligation.messageId });
 			}
 			// Retry exhaustion or a second silent turn must not loop straight back into the provider.
 			return false;
 		}
 		for (const obligation of delivered) {
-			this.recordEvent("reply_obligation_delivered", {
+			this.telemetry.recordEvent("reply_obligation_delivered", {
 				message_id: obligation.messageId,
 				outcome: this.turnSendOutcome,
 			});
@@ -1386,7 +1038,7 @@ export class BotRuntime {
 		const obligations = listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN);
 		if (obligations.length === 0) return null;
 		for (const obligation of obligations) {
-			this.recordEvent("reply_obligation_recovered", { message_id: obligation.messageId });
+			this.telemetry.recordEvent("reply_obligation_recovered", { message_id: obligation.messageId });
 		}
 		return this.trigger("explicit");
 	}
@@ -1608,7 +1260,7 @@ export class BotRuntime {
 			this.epoch = epoch;
 			this.visibleMessageIds.clear();
 			this.lastTurnFailed = false;
-			this.pendingPayloadObservation = null;
+			this.telemetry.pendingObservation = null;
 			this.subscribeEvents();
 			// Disposal cannot undo an already committed session.
 			try {
@@ -1661,47 +1313,17 @@ export class BotRuntime {
 				onPersist: (fileUniqueId, text) => this.visionSink?.(fileUniqueId, text),
 				onTelemetry: (telemetry) => {
 					if (telemetry.providerCalled) {
-						this.pendingInputMetrics.visionCalls++;
+						this.telemetry.pendingInputMetrics.visionCalls++;
 					}
-					this.recordEvent("vision", telemetry);
+					this.telemetry.recordEvent("vision", telemetry);
 				},
 				scheduler: this.visionScheduler ?? undefined,
 				botApis: this.botApis,
 				videoTranscoder: this.videoTranscoder,
 			});
 		} catch {
-			this.recordEvent("error", { stage: "vision", category: "request_failed" });
+			this.telemetry.recordEvent("error", { stage: "vision", category: "request_failed" });
 		}
-	}
-
-	/** view_image: prepare one message's image files and return refs; bytes join at projection. */
-	private async executeViewImage(params: ViewImageParams) {
-		const chatId = this.config.groupChatId;
-		const fail = (category: string): never => {
-			this.recordEvent("tool_view_image", { ok: false, category });
-			throw new Error(`view_image failed: ${category}`);
-		};
-		const row = groupMessage(this.db, chatId, params.message_id);
-		if (!row) return fail("message_not_found");
-		const media = row.media ? (JSON.parse(row.media) as { file_unique_id?: unknown }) : null;
-		if (typeof media?.file_unique_id !== "string") return fail("no_image");
-		const prepared = await ensureViewImages(this.db, this.api, this.bot.id, media.file_unique_id, {
-			cacheDir: join(this.config.dataDir, "media"),
-			botApis: this.botApis,
-			videoTranscoder: this.videoTranscoder,
-		});
-		if (!prepared.ok) return fail(prepared.outcome);
-		this.markVisible([row.message_id]);
-		this.pendingInputMetrics.imagesAttached += prepared.images.length;
-		this.recordEvent("tool_view_image", { ok: true, images: prepared.images.length });
-		const line = renderMessageLine(this.db, row);
-		const details: ViewImageDetails = { messageId: row.message_id, images: prepared.images };
-		return {
-			content: [
-				{ type: "text" as const, text: `${line}\n[attached ${prepared.images.length} image(s) of #${row.message_id}]` },
-			],
-			details,
-		};
 	}
 
 	/**
@@ -1720,12 +1342,13 @@ export class BotRuntime {
 			const owed = new Set(
 				listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN).map((o) => o.messageId),
 			);
-			const events = this.unseenEvents(
+			const events = unseenEvents(
 				eventsForBot(
 					listRecentMessageEvents(this.db, chatId, turn.steeredThrough, through, MAX_EVENT_SCAN),
 					this.bot.id,
 				),
 				consumedControlMessageIds(this.db, chatId),
+				this.visibleMessageIds,
 			);
 			if (!events.some((event) => owed.has(event.messageId))) return;
 			const packed = packMessageEvents(
@@ -1744,15 +1367,6 @@ export class BotRuntime {
 		});
 	}
 
-	/** Events not yet in this context: control commands and already-visible messages drop out. */
-	private unseenEvents(events: readonly MessageEvent[], consumedControl: ReadonlySet<number>): MessageEvent[] {
-		return events.filter(
-			(event) =>
-				!consumedControl.has(event.messageId) &&
-				!(event.kind === "message" && this.visibleMessageIds.has(event.messageId)),
-		);
-	}
-
 	/** Close steering for the turn and drop batches Pi never delivered; the next flush reads them. */
 	private async endSteering(): Promise<void> {
 		const turn = this.activeTurn;
@@ -1760,38 +1374,6 @@ export class BotRuntime {
 		await turn.steering.catch(() => {});
 		this.activeTurn = null;
 		this.session?.clearQueue();
-	}
-
-	/** The task tool: start, steer, cancel or list this bot's background tasks. */
-	private async executeTask(params: TaskParams): Promise<string> {
-		const tasks = this.tasks!;
-		try {
-			switch (params.action) {
-				case "start": {
-					const origin = params.for_message ?? this.currentTriggerMessageId;
-					if (!params.workflow || !params.title?.trim() || !params.brief?.trim())
-						throw new TaskError("start needs workflow, title and brief");
-					if (origin == null) throw new TaskError("start needs for_message: the requester's message #id");
-					const id = await tasks.start(this.bot.id, origin, params.workflow, params.title.trim(), params.brief.trim());
-					this.recordEvent("task_started", { task_id: id, workflow: params.workflow });
-					return `started ${id}; tell the requester now, the result will arrive as [task ${id} …]`;
-				}
-				case "message":
-					if (!params.task_id || !params.text?.trim()) throw new TaskError("message needs task_id and text");
-					tasks.message(this.bot.id, params.task_id, params.text.trim());
-					return `forwarded to ${params.task_id}`;
-				case "cancel":
-					if (!params.task_id) throw new TaskError("cancel needs task_id");
-					tasks.cancel(this.bot.id, params.task_id);
-					return `cancelled ${params.task_id}`;
-				case "status":
-					return tasks.describe(this.bot.id);
-			}
-		} catch (error) {
-			if (error instanceof TaskError) throw new Error(`task failed: ${error.message}`);
-			throw error;
-		}
-		throw new Error("task failed: unknown action");
 	}
 
 	taskStatusForControl(): string | null {
@@ -1811,7 +1393,7 @@ export class BotRuntime {
 
 	/** Show a note in the local timeline; the provider sees it through the event stream instead. */
 	recordNote(note: NotePayload): void {
-		this.recordEvent("note", {
+		this.telemetry.recordEvent("note", {
 			source: note.source,
 			task_id: note.task_id ?? null,
 			phase: note.phase ?? null,
@@ -1846,7 +1428,7 @@ export class BotRuntime {
 	async resetBox(reason: "tool" | "weekly" | "admin"): Promise<void> {
 		if (!this.box) return;
 		await this.box.reset();
-		this.recordEvent("box_reset", { reason });
+		this.telemetry.recordEvent("box_reset", { reason });
 		if (reason !== "tool") {
 			const note: NotePayload = {
 				bot_id: this.bot.id,
@@ -1859,181 +1441,10 @@ export class BotRuntime {
 		log.info("sandbox", "box_reset", { bot_id: this.bot.id, reason });
 	}
 
-	/** tg_download: any attachment, by this bot's (or a sibling bot's) file_id, into /work/inbox. */
-	private async downloadToBox(messageId: number): Promise<{ path: string; size: number; kind: string }> {
-		const chatId = this.config.groupChatId;
-		const row = groupMessage(this.db, chatId, messageId);
-		const media = row?.media
-			? (JSON.parse(row.media) as { kind: string; file_unique_id: string; file_id: string; file_size?: number })
-			: null;
-		if (!row || !media) throw new Error("tg_download failed: no attachment on that message");
-		const tooBig =
-			"tg_download failed: the file is larger than the 20 MB Telegram lets bots download; ask for a smaller file or a link";
-		if ((media.file_size ?? 0) > MEDIA_DOWNLOAD_MAX_BYTES) throw new Error(tooBig);
-		// Ingest records a file_id mapping for every bot that saw the media, so a stored message
-		// with an attachment always resolves; only a removed sibling bot leaves it dangling.
-		const source = downloadSource(this.db, this.api, this.bot.id, media.file_unique_id, this.botApis);
-		if (!source) throw new Error("tg_download failed: file_id_unavailable");
-		const file = await source.api.getFile(source.fileId).catch((error: unknown) => {
-			if (error instanceof Error && /file is too big/i.test(error.message)) throw new Error(tooBig);
-			throw error;
-		});
-		if (!file.file_path) throw new Error("tg_download failed: telegram_file_unavailable");
-		const bytes = await source.api.downloadFile(file.file_path);
-		const extension = /\.[A-Za-z0-9]{1,8}$/.exec(file.file_path)?.[0] ?? "";
-		const path = await this.box!.writeFile(`inbox/${messageId}${extension}`, bytes);
-		this.recordEvent("tool_tg_download", { kind: media.kind, bytes: bytes.byteLength });
-		return { path, size: bytes.byteLength, kind: media.kind };
-	}
-
 	private markVisible(ids: readonly number[]): void {
 		for (const id of ids) this.visibleMessageIds.add(id);
 		const chatId = this.config.groupChatId;
 		addVisibleMessageIds(this.db, this.bot.id, chatId, this.epoch, ids);
-	}
-
-	private recordPublicSend(): void {
-		if (this.lastLlmRunId == null) return;
-		this.db.query("UPDATE llm_runs SET public_send_count = public_send_count + 1 WHERE id = ?").run(this.lastLlmRunId);
-	}
-
-	private recordEvent(kind: string, payload: unknown): void {
-		const { stored, grouped } = this.activity.group(kind, payload);
-		const ts = Date.now();
-		const inserted = this.db
-			.query("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES (?, ?, ?, ?)")
-			.run(this.bot.id, ts, kind, JSON.stringify(stored));
-		if (grouped) this.activity.emit(ts);
-		else this.eventSink?.({ id: Number(inserted.lastInsertRowid), ts, kind, payload });
-	}
-
-	private recordUsage(
-		usage: {
-			input: number;
-			output: number;
-			cacheRead: number;
-			cacheWrite: number;
-			reasoning?: number;
-			cost: { total: number };
-		},
-		now: number,
-	): void {
-		this.providerCallsInRun++;
-		const contextTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-		const reasoningTokens = usage.reasoning ?? 0;
-		const latencyMs = this.runStartTs ? now - this.runStartTs : null;
-		const observation = this.pendingPayloadObservation;
-		const contextBreakdown = fitContextBreakdown(
-			observation?.tokenEstimate ?? { system: 0, tools: 0, compactedHistory: 0, messages: contextTokens },
-			contextTokens,
-		);
-		const metrics = this.pendingInputMetrics;
-		const sessionIdHash = this.session ? sha256(`${this.telemetryHmacKey}:${this.session.sessionId}`) : null;
-		// The previous main request of the same cache cohort lives in memory only; after a restart
-		// the first request simply has no estimate.
-		const cohort = `${this.bot.provider}|${this.model.api}|${this.bot.model}|${this.epoch}|${sessionIdHash}|${this.bot.cacheRetention}`;
-		const previous = this.previousRequest?.cohort === cohort ? this.previousRequest : null;
-		const cacheReadEstimated =
-			observation && previous && usage.cacheRead === 0 && usage.cacheWrite === 0 && this.bot.cacheRetention !== "none"
-				? estimateCacheReadFromPrefix(observation, previous, contextTokens)
-				: null;
-		this.previousRequest = observation
-			? {
-					cohort,
-					systemHash: observation.systemHash,
-					toolsHash: observation.toolsHash,
-					messageHashes: observation.messageHashes,
-					contextTokens,
-				}
-			: null;
-		this.lastLlmRunId = insertRow(this.db, "llm_runs", {
-			bot_id: this.bot.id,
-			ts: now,
-			model: this.bot.model,
-			epoch: this.epoch,
-			context_tokens: contextTokens,
-			cache_read: usage.cacheRead,
-			cache_write: usage.cacheWrite,
-			cache_read_estimated: cacheReadEstimated,
-			cache_miss: usage.input,
-			output_tokens: usage.output,
-			reasoning_tokens: reasoningTokens,
-			latency_ms: latencyMs,
-			cost: usage.cost.total,
-			compaction: 0,
-			system_hash: observation?.systemHash ?? this.systemHash,
-			tools_hash: observation?.toolsHash ?? this.toolsHash,
-			provider: this.bot.provider,
-			api: this.model.api,
-			session_id_hash: sessionIdHash,
-			cache_retention: this.bot.cacheRetention,
-			full_payload_hash: observation?.fullPayloadHash ?? null,
-			first_divergent_segment: observation?.firstDivergentSegment ?? null,
-			first_divergent_message_index: observation?.firstDivergentMessageIndex ?? null,
-			first_divergent_byte_offset: observation?.firstDivergentByteOffset ?? null,
-			trigger_message_id: this.currentTriggerMessageId,
-			public_send_count: 0,
-			vision_calls: metrics.visionCalls,
-			images_attached: metrics.imagesAttached,
-			tool_followup_rounds: this.providerCallsInRun > 1 ? 1 : 0,
-			input_events: metrics.inputEvents,
-			input_tokens_estimated: metrics.estimatedTokens,
-			rows_scanned: metrics.rowsScanned,
-			system_tokens: contextBreakdown.system,
-			tools_tokens: contextBreakdown.tools,
-			compacted_history_tokens: contextBreakdown.compactedHistory,
-			message_tokens: contextBreakdown.messages,
-			thinking_ms: this.thinkingMs,
-		});
-		this.pendingInputMetrics = emptyInputMetrics();
-		this.usageSink?.();
-		this.thinkingMs = 0;
-		this.thinkingFinished = false;
-	}
-
-	private recordSendDuration(durationMs: number): void {
-		if (this.lastLlmRunId == null || !Number.isFinite(durationMs)) return;
-		this.db
-			.query("UPDATE llm_runs SET send_ms = send_ms + ?, send_samples = send_samples + 1 WHERE id = ?")
-			.run(Math.max(0, Math.round(durationMs)), this.lastLlmRunId);
-		this.usageSink?.();
-	}
-
-	private recordCompactionUsage(
-		usage: {
-			input: number;
-			output: number;
-			cacheRead: number;
-			cacheWrite: number;
-			reasoning?: number;
-			cost: { total: number };
-		},
-		now: number,
-		model: NonNullable<ReturnType<ModelRuntime["getModel"]>>,
-	): void {
-		const contextTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-		if (contextTokens + usage.output + (usage.reasoning ?? 0) === 0 && usage.cost.total === 0) return;
-		insertRow(this.db, "llm_runs", {
-			bot_id: this.bot.id,
-			ts: now,
-			model: model.id,
-			epoch: this.epoch,
-			context_tokens: contextTokens,
-			cache_read: usage.cacheRead,
-			cache_write: usage.cacheWrite,
-			cache_miss: usage.input,
-			output_tokens: usage.output,
-			reasoning_tokens: usage.reasoning ?? 0,
-			latency_ms: null,
-			cost: usage.cost.total,
-			compaction: 1,
-			system_hash: sha256Short(COMPACTION_SUMMARY_PROMPT),
-			tools_hash: sha256Short("[]"),
-			provider: model.provider,
-			api: model.api,
-			cache_retention: "none",
-		});
-		this.usageSink?.();
 	}
 
 	async stop(): Promise<void> {

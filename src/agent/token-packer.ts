@@ -1,13 +1,87 @@
 import type { Database } from "bun:sqlite";
-import type { MediaUpdatePayload, MessageEvent, NotePayload } from "../db/message-events.ts";
+import {
+	eventsForBot,
+	listRecentMessageEvents,
+	listReplyObligationEvents,
+	type MediaUpdatePayload,
+	type MessageEvent,
+	type NotePayload,
+} from "../db/message-events.ts";
+import { isVisionMedia } from "../media/local-cache.ts";
+import type { ReplySnapshot } from "../telegram/normalize.ts";
 import type { MessageRow } from "./serialize.ts";
 import { replySnapshot, serializeMessageEvents } from "./serialize.ts";
-import type { ReplySnapshot } from "../telegram/normalize.ts";
 
 export const DEFAULT_MESSAGE_TOKEN_CAP = 4_096;
 export const DEFAULT_TOOL_FOLLOWUP_RESERVE = 6_144;
 export const DEFAULT_REASONING_RESERVE = 4_096;
+export const MAX_EVENT_SCAN = 256;
+export const MAX_OBLIGATION_SCAN = 64;
 const SAFETY_MARGIN = 2_048;
+
+/** Events not yet in this context: control commands and already-visible messages drop out. */
+export function unseenEvents(
+	events: readonly MessageEvent[],
+	consumedControl: ReadonlySet<number>,
+	visibleMessageIds: ReadonlySet<number>,
+): MessageEvent[] {
+	return events.filter(
+		(event) =>
+			!consumedControl.has(event.messageId) && !(event.kind === "message" && visibleMessageIds.has(event.messageId)),
+	);
+}
+
+export function scanTurnEventWindow(
+	db: Database,
+	botId: string,
+	chatId: number,
+	consumedSeq: number,
+	highWater: number,
+	obligationIds: ReadonlySet<number>,
+	consumedControl: ReadonlySet<number>,
+	visibleMessageIds: ReadonlySet<number>,
+): { mandatory: MessageEvent[]; normal: MessageEvent[]; rowsScanned: number } {
+	const recent = eventsForBot(listRecentMessageEvents(db, chatId, consumedSeq, highWater, MAX_EVENT_SCAN), botId);
+	const obligationEvents = eventsForBot(listReplyObligationEvents(db, botId, chatId, MAX_OBLIGATION_SCAN), botId);
+	const seen = new Set<number>();
+	const mandatory: MessageEvent[] = [];
+	for (const event of [...obligationEvents, ...recent.filter((event) => obligationIds.has(event.messageId))]) {
+		if (consumedControl.has(event.messageId) || seen.has(event.ingestSeq)) continue;
+		seen.add(event.ingestSeq);
+		mandatory.push(event);
+	}
+	const normal = unseenEvents(recent, consumedControl, visibleMessageIds).filter(
+		(event) => !obligationIds.has(event.messageId),
+	);
+	return { mandatory, normal, rowsScanned: recent.length + obligationEvents.length };
+}
+
+/** Distinct preparable media identities in a batch, direct-reply events first, newest first. */
+export function pendingMediaIds(
+	batch: readonly MessageEvent[],
+	obligationIds: ReadonlySet<number>,
+	limit: number,
+	prepared: (fileUniqueId: string) => boolean,
+): string[] {
+	const pending: string[] = [];
+	const seen = new Set<string>();
+	const prioritized = [...batch].sort(
+		(left, right) =>
+			Number(obligationIds.has(right.messageId)) - Number(obligationIds.has(left.messageId)) ||
+			right.ingestSeq - left.ingestSeq,
+	);
+	for (const event of prioritized) {
+		if (pending.length >= limit) break;
+		if (event.kind === "media_update" || event.kind === "note") continue;
+		const row = event.payload as MessageRow;
+		if (!row.media) continue;
+		const media = JSON.parse(row.media) as { kind: string; mime?: string; file_unique_id?: string };
+		if (!media.file_unique_id || !isVisionMedia(media.kind, media.mime) || seen.has(media.file_unique_id)) continue;
+		seen.add(media.file_unique_id);
+		if (!prepared(media.file_unique_id)) pending.push(media.file_unique_id);
+	}
+	return pending;
+}
 
 /**
  * Fixed per-image budget charge for viewed images. Measured against the production endpoint
