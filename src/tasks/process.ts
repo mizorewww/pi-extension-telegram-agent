@@ -63,7 +63,7 @@ export class TaskProcess {
 		return `/work/tasks/${this.taskId}`;
 	}
 
-	/** The container arguments are the task boundary; test/tasks.test.ts pins them. */
+	/** The container arguments are the task boundary. */
 	runArgs(): string[] {
 		return [
 			"run",

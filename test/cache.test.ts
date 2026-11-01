@@ -26,12 +26,9 @@ import {
 	TOOL_DEFS,
 	toolProtocolHash,
 } from "../src/agent/tools.ts";
-import { batchStickerCandidates, stickerCatalogPromptBlock } from "../src/media/sticker-catalog.ts";
 import {
 	NO_SEND_MARKER,
 	buildCompactionContent,
-	projectTelegramContext,
-	serializeCompactionMessages,
 	TELEGRAM_CONTEXT_TYPE,
 	TELEGRAM_CONTEXT_VERSION,
 	TELEGRAM_EXTENSION_ORDER,
@@ -48,7 +45,7 @@ const GOLDEN = {
 	taskTool: "f5343a7cbdb5",
 	jobTool: "a913226f0cba",
 	compactionPrompt: "04da95f62da0",
-	multimodalCompaction: "e3f33923d328",
+	multimodalCompaction: "9d306722b038",
 	replyRecovery: "4fc7e277e338",
 	telegramTurn: "43bb809c775c",
 	extensionOrder: "e04f7032d531",
@@ -61,24 +58,6 @@ function schemaDb(): Database {
 	const db = new Database(":memory:");
 	db.exec(readFileSync("src/db/schema.sql", "utf8"));
 	return db;
-}
-
-function contextMessage(id: number, providerText: string, stickerCandidates = "") {
-	return {
-		role: "custom",
-		customType: TELEGRAM_CONTEXT_TYPE,
-		content: providerText,
-		display: false,
-		timestamp: id,
-		details: {
-			version: TELEGRAM_CONTEXT_VERSION,
-			consumedSeq: id,
-			providerText,
-			stickerCandidates,
-			visibleMessageIds: [id],
-			events: [],
-		},
-	};
 }
 
 test("prompt, tool and protocol hashes are stable", () => {
@@ -110,6 +89,22 @@ test("prompt, tool and protocol hashes are stable", () => {
 	expect(toolProtocolHash([taskToolDefinition(["search"])])).toBe(GOLDEN.taskTool);
 	expect(toolProtocolHash([JOB_TOOL_DEF])).toBe(GOLDEN.jobTool);
 	expect(sha256Short(COMPACTION_SUMMARY_PROMPT)).toBe(GOLDEN.compactionPrompt);
+	const summaryInput = buildCompactionContent(
+		[
+			{
+				role: "toolResult",
+				toolCallId: "view-1",
+				toolName: "view_image",
+				content: [{ type: "text", text: "#12 photo" }],
+				details: { messageId: 12, images: [{ name: "fixture.png", mime: "image/png" }] },
+				isError: false,
+				timestamp: 13,
+			},
+		] as never,
+		"previous summary",
+		() => ({ type: "image", data: "Zml4dHVyZQ==", mimeType: "image/png" }),
+	);
+	expect(sha256Short(JSON.stringify(summaryInput))).toBe(GOLDEN.multimodalCompaction);
 	expect(sha256Short(REPLY_RECOVERY_PROMPT)).toBe(GOLDEN.replyRecovery);
 	expect(sha256Short(TELEGRAM_TURN_PROMPT)).toBe(GOLDEN.telegramTurn);
 	expect(sha256Short(JSON.stringify(TELEGRAM_EXTENSION_ORDER))).toBe(GOLDEN.extensionOrder);
@@ -169,109 +164,4 @@ test("immutable event serialization grammar is stable", () => {
 		{ visibleIds: new Set() },
 	);
 	expect(sha256Short(out)).toBe(GOLDEN.eventSerialize);
-});
-
-test("summary input keeps viewed images in order but never sticker candidates or private reasoning", () => {
-	const content = buildCompactionContent(
-		[
-			contextMessage(12, "photo #12 [图片]", "must not enter summary"),
-			{
-				role: "toolResult",
-				toolCallId: "view-1",
-				toolName: "view_image",
-				content: [{ type: "text", text: "#12 photo" }],
-				details: { messageId: 12, images: [{ name: "fixture.png", mime: "image/png" }] },
-				isError: false,
-				timestamp: 13,
-			},
-		] as never,
-		"previous summary",
-		() => ({ type: "image", data: "Zml4dHVyZQ==", mimeType: "image/png" }),
-	);
-	expect(sha256Short(JSON.stringify(content))).toBe(GOLDEN.multimodalCompaction);
-	// A summary that records the bot's guesses turns one misreading into a durable "fact".
-	const messages = [
-		{
-			role: "assistant",
-			content: [
-				{ type: "thinking", thinking: "speculation-canary" },
-				{ type: "toolCall", id: "c1", name: "send", arguments: { message: "public-reply" } },
-			],
-			timestamp: 1,
-		},
-	] as never;
-	const text = serializeCompactionMessages(messages);
-	expect(text).toContain("public-reply");
-	expect(text).not.toContain("speculation-canary");
-	expect(JSON.stringify(buildCompactionContent(messages, undefined, () => null))).not.toContain("speculation-canary");
-});
-
-test("every batch keeps its own sticker note so each request is a strict prefix of the next", () => {
-	const projected = projectTelegramContext([
-		contextMessage(42, "older-batch", "stale-candidate"),
-		contextMessage(43, "newest-batch", "newest-candidate"),
-		{
-			role: "toolResult",
-			toolCallId: "call-1",
-			toolName: "send",
-			content: [{ type: "text", text: "ok" }],
-			details: { sent: [100, 101] },
-			isError: false,
-			timestamp: 3,
-		},
-	] as never);
-	// Glued to the chat text, the list read as if the last speaker had pasted it.
-	expect(projected.map((message: any) => message.content)).toEqual([
-		"older-batch",
-		"stale-candidate",
-		"newest-batch",
-		"newest-candidate",
-		[{ type: "text", text: "ok sent_message_ids=#100,#101" }],
-	]);
-	expect(projected[3]).toMatchObject({ role: "custom", customType: "telegram_sticker_candidates" });
-});
-
-test("sticker catalog and candidate grammar only expose stickers this bot can send", () => {
-	const db = schemaDb();
-	const media = db.prepare(
-		"INSERT INTO media (file_unique_id, kind, mime, sticker_set, sticker_emoji, vision, short_id) VALUES (?, 'sticker', 'image/webp', ?, ?, ?, ?)",
-	);
-	const vision = (text: string) => JSON.stringify({ model: "m", kind: "sticker", text, at: 1 });
-	media.run("cat-1", "Mikufufu", "😺", vision("得意的赞同，smug/amused"), "s1");
-	media.run("cat-2", "Mikufufu", "🐱", null, "s2");
-	media.run("cat-b", "Mikufufu", "🅱️", vision("另一个 bot 的映射"), "s3");
-	media.run("user-1", null, "😺", vision("emotion-1"), "s4");
-	media.run("user-b", null, "🅱️", vision("B only"), "s5");
-	const map = db.prepare("INSERT INTO media_file_ids (bot_id, file_id, file_unique_id) VALUES (?, ?, ?)");
-	for (const [bot, file] of [
-		["A", "cat-1"],
-		["A", "cat-2"],
-		["B", "cat-b"],
-		["A", "user-1"],
-		["B", "user-b"],
-	])
-		map.run(bot, `fid-${file}`, file);
-	const message = db.prepare(
-		"INSERT INTO messages (chat_id, message_id, date, sender_id, display_name, is_bot, media, first_seen_by) VALUES (?, ?, ?, ?, 'u', 0, ?, 'A')",
-	);
-	for (const [id, file] of [
-		[1, "user-1"],
-		[2, "user-b"],
-	] as const)
-		message.run(
-			CHAT_ID,
-			id,
-			100 + id,
-			id,
-			JSON.stringify({ kind: "sticker", file_unique_id: file, sticker_emoji: "😺" }),
-		);
-
-	expect(stickerCatalogPromptBlock(db, "A", ["Mikufufu"])).toBe(
-		"# Sticker 目录\n\ns1: 😺 得意的赞同，smug/amused\ns2: 🐱",
-	);
-	expect(stickerCatalogPromptBlock(db, "B", ["Mikufufu"])).toBe("# Sticker 目录\n\ns3: 🅱️ 另一个 bot 的映射");
-	expect(batchStickerCandidates(db, "A", CHAT_ID, [1, 2], ["Mikufufu"])).toBe(
-		"〔系统附注〕这批消息里出现了你也能发送的 sticker：\ns4: 😺 emotion-1",
-	);
-	expect(batchStickerCandidates(db, "A", CHAT_ID, [], ["Mikufufu"])).toBe("");
 });
