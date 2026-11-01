@@ -167,6 +167,8 @@ export const TELEGRAM_CONTROL_MENU = [
 	{ command: "new", description: "丢弃上下文开启新会话（管理员）" },
 	{ command: "set", description: "用按钮调整插话概率与冷却（管理员）" },
 	{ command: "fire", description: "允许其他 bot 的消息触发本 bot：on/off/status" },
+	{ command: "task", description: "后台任务与用量；cancel tN 停止（管理员）" },
+	{ command: "box", description: "reset 清空 bot 的工作区（管理员）" },
 ] as const;
 
 /** Startup capability only: every bot attempts the same menu, failures never block polling. */

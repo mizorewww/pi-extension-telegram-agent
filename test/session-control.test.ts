@@ -85,6 +85,7 @@ test("mutating control commands require a human admin and never reach the provid
 	const { root, config } = fixture();
 	const db = openDb(":memory:");
 	let resets = 0;
+	const cancelled: string[] = [];
 	const runtime = {
 		controlSnapshot: () => {
 			throw new Error("unused");
@@ -103,6 +104,11 @@ test("mutating control commands require a human admin and never reach the provid
 		resetBoxForControl: async () => {
 			throw new Error("unused");
 		},
+		taskStatusForControl: () => "t1 [running] search: 调研",
+		cancelTaskForControl: (taskId: string) => {
+			cancelled.push(taskId);
+			return { ok: true as const };
+		},
 	};
 	const service = new TelegramControlCommandService(db, config.bots, root, new Map([["A", runtime]]), [42]);
 	const command = (messageId: number, from: Record<string, unknown>, text = "/new") =>
@@ -113,7 +119,7 @@ test("mutating control commands require a human admin and never reach the provid
 					chat: { id: CHAT },
 					from,
 					text,
-					entities: [{ type: "bot_command", offset: 0, length: text.length }],
+					entities: [{ type: "bot_command", offset: 0, length: text.split(" ")[0]!.length }],
 				},
 			},
 			"A",
@@ -125,8 +131,14 @@ test("mutating control commands require a human admin and never reach the provid
 		expect(resets).toBe(0);
 		expect((await service.handle(command(3, { id: 42 }))).text).toContain("epoch=7");
 		expect(resets).toBe(1);
+		// /task is public; cancelling one is an admin mutation like the others.
+		expect((await service.handle(command(4, { id: 99 }, "/task"))).text).toContain("t1 [running]");
+		expect((await service.handle(command(5, { id: 99 }, "/task cancel t1"))).text).toContain("权限不足");
+		expect(cancelled).toEqual([]);
+		expect((await service.handle(command(6, { id: 42 }, "/task cancel t1"))).text).toContain("已取消 t1");
+		expect(cancelled).toEqual(["t1"]);
 		// Every command message is excluded from provider context, whatever its outcome.
-		expect(consumedControlMessageIds(db, CHAT)).toEqual(new Set([1, 2, 3]));
+		expect(consumedControlMessageIds(db, CHAT)).toEqual(new Set([1, 2, 3, 4, 5, 6]));
 	} finally {
 		db.close();
 	}

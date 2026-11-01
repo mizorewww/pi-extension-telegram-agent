@@ -99,6 +99,23 @@ export class TaskManager {
 		return [...this.live.values()].some((task) => task.process.botId === botId);
 	}
 
+	/** One line per recent task with its main-session usage, for the bot and for /task. */
+	describe(botId: string, limit = 10): string {
+		const rows = this.list(botId, limit);
+		if (rows.length === 0) return "no tasks yet";
+		const usage = this.deps.db.query(
+			"SELECT COALESCE(SUM(input_tokens + cache_read + cache_write), 0) input, COALESCE(SUM(output_tokens), 0) output, COALESCE(SUM(cost), 0) cost FROM task_usage WHERE task_id = ?",
+		);
+		return rows
+			.map((row) => {
+				const used = usage.get(row.task_id) as { input: number; output: number; cost: number };
+				const tokens = `${Math.round(used.input / 1000)}k in / ${Math.round(used.output / 1000)}k out`;
+				const cost = used.cost > 0 ? ` $${used.cost.toFixed(2)}` : "";
+				return `${row.task_id} [${row.status}] ${row.workflow}: ${row.title} (↪ #${row.origin_message_id}; ${tokens}${cost})`;
+			})
+			.join("\n");
+	}
+
 	list(botId: string, limit = 10): TaskRow[] {
 		return this.deps.db
 			.query("SELECT * FROM tasks WHERE bot_id = ? ORDER BY created_at DESC LIMIT ?")

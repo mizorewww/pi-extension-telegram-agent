@@ -49,12 +49,23 @@ export type TelegramControlAction =
 	| { kind: "set"; data?: string }
 	| { kind: "fire"; mode: FireMode }
 	| { kind: "box_reset" }
+	| { kind: "task_status" }
+	| { kind: "task_cancel"; taskId: string }
 	| { kind: "usage" };
 
 /** Bare `/fire` toggles. */
 export type FireMode = "on" | "off" | "status" | "toggle";
 
-export type TelegramControlCommandToken = "help" | "status" | "compact" | "new" | "set" | "model" | "fire" | "box";
+export type TelegramControlCommandToken =
+	| "help"
+	| "status"
+	| "compact"
+	| "new"
+	| "set"
+	| "model"
+	| "fire"
+	| "box"
+	| "task";
 
 const COMMAND_TOKENS: ReadonlySet<string> = new Set([
 	"help",
@@ -65,6 +76,7 @@ const COMMAND_TOKENS: ReadonlySet<string> = new Set([
 	"model",
 	"fire",
 	"box",
+	"task",
 ]);
 
 export interface ParsedTelegramControlCommand {
@@ -82,6 +94,8 @@ export interface TelegramControlRuntime {
 	controlSnapshot(): RuntimeControlSnapshot;
 	compactForControl(): Promise<ManualCompactResult>;
 	resetBoxForControl(): Promise<{ ok: true } | { ok: false; code: "unavailable" | "failed" }>;
+	taskStatusForControl(): string | null;
+	cancelTaskForControl(taskId: string): { ok: true } | { ok: false; code: "unavailable" | "unknown_task" };
 	newSessionForControl(): Promise<NewSessionResult>;
 	consumeControlMessage(messageId: number): void;
 	changeModelForControl(
@@ -226,6 +240,13 @@ function parseControlArguments(command: TelegramControlCommandToken, input: stri
 			? { kind: "fire", mode }
 			: { kind: "usage" };
 	}
+	if (command === "task") {
+		if (tokens.length === 0 || (tokens.length === 1 && tokens[0]!.toLowerCase() === "status"))
+			return { kind: "task_status" };
+		return tokens.length === 2 && tokens[0]!.toLowerCase() === "cancel" && /^t\d+$/.test(tokens[1]!)
+			? { kind: "task_cancel", taskId: tokens[1]! }
+			: { kind: "usage" };
+	}
 	if (command === "box")
 		return tokens.length === 1 && tokens[0]!.toLowerCase() === "reset" ? { kind: "box_reset" } : { kind: "usage" };
 	return tokens.length === 0 ? { kind: command } : { kind: "usage" };
@@ -345,6 +366,10 @@ export class TelegramControlCommandService {
 				return this.fireControl(command.replyBotId, command.chatId, command.action.mode);
 			case "box_reset":
 				return await this.resetBox(command.replyBotId);
+			case "task_status":
+				return this.taskStatus(command.replyBotId);
+			case "task_cancel":
+				return this.cancelTask(command.replyBotId, command.action.taskId);
 			case "usage":
 				return { text: USAGE_TEXT, outcome: "usage" };
 		}
@@ -449,6 +474,22 @@ export class TelegramControlCommandService {
 		return { text: `${bounded(botId)}: /fire 已关闭，其他 bot 的消息不再触发本 bot。`, outcome: "off" };
 	}
 
+	private taskStatus(botId: string): { text: string; outcome: string } {
+		const text = this.runtimes.get(botId)?.taskStatusForControl() ?? null;
+		if (text == null) return { text: `${bounded(botId)}: 这个 bot 没有开启后台任务。`, outcome: "unavailable" };
+		return { text: boundedReply(`${bounded(botId)} 的任务：\n${text}`), outcome: "ok" };
+	}
+
+	private cancelTask(botId: string, taskId: string): { text: string; outcome: string } {
+		const result =
+			this.runtimes.get(botId)?.cancelTaskForControl(taskId) ?? ({ ok: false, code: "unavailable" } as const);
+		if (result.ok) return { text: `${bounded(botId)}: 已取消 ${taskId}。`, outcome: "ok" };
+		return {
+			text: `${bounded(botId)}: ${result.code === "unavailable" ? "这个 bot 没有开启后台任务。" : `没有正在运行的 ${taskId}。`}`,
+			outcome: result.code,
+		};
+	}
+
 	private async resetBox(botId: string): Promise<{ text: string; outcome: string }> {
 		const runtime = this.runtimes.get(botId);
 		const result = runtime ? await runtime.resetBoxForControl() : ({ ok: false, code: "unavailable" } as const);
@@ -500,7 +541,17 @@ export class TelegramControlCommandService {
 	}
 
 	private audit(command: ParsedTelegramControlCommand, authorized: boolean, outcome: string, startedAt: number): void {
-		const target = ["status", "compact", "new", "set", "model", "fire", "box_reset"].includes(command.action.kind)
+		const target = [
+			"status",
+			"compact",
+			"new",
+			"set",
+			"model",
+			"fire",
+			"box_reset",
+			"task_status",
+			"task_cancel",
+		].includes(command.action.kind)
 			? command.replyBotId
 			: null;
 		const finishedAt = this.now();
@@ -564,6 +615,7 @@ function isMutation(action: TelegramControlAction): boolean {
 		action.kind === "set" ||
 		action.kind === "model" ||
 		action.kind === "box_reset" ||
+		action.kind === "task_cancel" ||
 		(action.kind === "fire" && action.mode !== "status")
 	);
 }
@@ -626,18 +678,21 @@ const USAGE_TEXT = [
 	"/fire status",
 	"/fire [on|off]（管理员）",
 	"/box reset（管理员）",
+	"/task [status]",
+	"/task cancel <tN>（管理员）",
 ].join("\n");
 
 const HELP_TEXT = [
 	"Telegram Agent 控制",
-	"查看：/help、/status、/fire status",
-	"管理员：/model、/compact、/new、/set、/fire [on|off]、/box reset",
+	"查看：/help、/status、/fire status、/task",
+	"管理员：/model、/compact、/new、/set、/fire [on|off]、/box reset、/task cancel",
 	"/model 用按钮选择 Pi 可用模型，保存后立即开启新会话。",
 	"命令默认作用于接收消息的 bot；带 @bot_username 后缀时定向到对应 bot。",
 	"手动 compact 会使用既有摘要模型并产生相应费用。",
 	"/new 丢弃当前上下文开启新会话（旧会话文件保留在本机），之前的群消息不再可见。",
 	"/set 用按钮调整插话概率与冷却，写回 telegram.config.ts，重启后仍然生效。",
 	"/box reset 清空 bot 的工作区（每周一 05:00 也会自动清空）。",
+	"/task 列出 bot 最近的后台任务和用量，/task cancel tN 停止一个任务。",
 	`/fire 让其他 bot 的消息按正常路由触发本 bot（默认关闭、不带参数时切换），人类发言前最多连续 ${FIRE_BOT_TRIGGER_BUDGET} 次；同一部署的 bot 发言在本地路由，部署外的 bot 只在 Telegram 实际投递时生效；重启后关闭。`,
 	USAGE_TEXT,
 ].join("\n");

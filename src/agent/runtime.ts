@@ -1980,19 +1980,29 @@ export class BotRuntime {
 					if (!params.task_id) throw new TaskError("cancel needs task_id");
 					tasks.cancel(this.bot.id, params.task_id);
 					return `cancelled ${params.task_id}`;
-				case "status": {
-					const rows = tasks.list(this.bot.id);
-					if (rows.length === 0) return "no tasks yet";
-					return rows
-						.map((row) => `${row.task_id} [${row.status}] ${row.workflow}: ${row.title} (↪ #${row.origin_message_id})`)
-						.join("\n");
-				}
+				case "status":
+					return tasks.describe(this.bot.id);
 			}
 		} catch (error) {
 			if (error instanceof TaskError) throw new Error(`task failed: ${error.message}`);
 			throw error;
 		}
 		throw new Error("task failed: unknown action");
+	}
+
+	taskStatusForControl(): string | null {
+		return this.tasks?.describe(this.bot.id) ?? null;
+	}
+
+	cancelTaskForControl(taskId: string): { ok: true } | { ok: false; code: "unavailable" | "unknown_task" } {
+		if (!this.tasks) return { ok: false, code: "unavailable" };
+		try {
+			this.tasks.cancel(this.bot.id, taskId);
+			return { ok: true };
+		} catch (error) {
+			if (error instanceof TaskError) return { ok: false, code: "unknown_task" };
+			throw error;
+		}
 	}
 
 	/** A task needs the bot: owe the requester a reply when asked, then wake up. */

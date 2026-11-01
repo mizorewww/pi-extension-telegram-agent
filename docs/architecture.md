@@ -119,7 +119,7 @@ Telegram create 不可回滚，所以：
 
 ## Telegram 控制命令
 
-- 只识别 offset 0 的 `bot_command` entity：`/help`、`/status`、`/fire status` 公开；`/model`、`/compact`、`/new`、`/set`、`/fire [on|off]`（不带参数为切换）、`/box reset` 需要 `telegram_admins` 中的人类账号（只接受数字 user id）。带 `@bot_username` 时定向到该 bot，否则作用于收到命令的 bot。
+- 只识别 offset 0 的 `bot_command` entity：`/help`、`/status`、`/fire status`、`/task [status]` 公开；`/task cancel tN`、`/model`、`/compact`、`/new`、`/set`、`/fire [on|off]`（不带参数为切换）、`/box reset` 需要 `telegram_admins` 中的人类账号（只接受数字 user id）。带 `@bot_username` 时定向到该 bot，否则作用于收到命令的 bot。
 - 命令和回复的 message id 永久记录在 `telegram_control_messages`，**永不进入任何 provider context**。变更类命令串行执行，不 abort 在途回复；bot busy 时返回“请稍后”。
 - `/model`：按钮分页列出 Pi 当前已认证的全部模型；`/new`：用当前模型开新 session。两者共用同一个 session 切换：先建好新 session，再在一个事务里写 epoch、manifest、清空可见集，失败时旧 session 原样保留；旧 session 文件留在磁盘。
 - `/set` 弹出按钮菜单（插话概率、冷却的固定预设，当前值打勾）；回调只接受预设值，校验后写穿 `telegram.config.ts`、更新内存中的同一 `BotConfig`，并原地刷新菜单。
