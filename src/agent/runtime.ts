@@ -100,6 +100,7 @@ import {
 	setSessionManifest,
 	appendNoteEvent,
 	eventsForBot,
+	groupMessage,
 	type MessageEvent,
 	type NotePayload,
 } from "../db/message-events.ts";
@@ -1944,14 +1945,7 @@ export class BotRuntime {
 			this.recordEvent("tool_view_image", { ok: false, category });
 			throw new Error(`view_image failed: ${category}`);
 		};
-		const row = this.db
-			.query(
-				`SELECT m.* FROM messages m
-				  WHERE m.chat_id = ? AND m.message_id = ?
-				    AND NOT EXISTS (SELECT 1 FROM telegram_control_messages c
-				                     WHERE c.chat_id = m.chat_id AND c.message_id = m.message_id)`,
-			)
-			.get(chatId, params.message_id) as MessageRow | null;
+		const row = groupMessage(this.db, chatId, params.message_id);
 		if (!row) return fail("message_not_found");
 		const media = row.media ? (JSON.parse(row.media) as { file_unique_id?: unknown }) : null;
 		if (typeof media?.file_unique_id !== "string") return fail("no_image");
@@ -2142,14 +2136,7 @@ export class BotRuntime {
 	/** tg_download: any attachment, by this bot's (or a sibling bot's) file_id, into /work/inbox. */
 	private async downloadToBox(messageId: number): Promise<{ path: string; size: number; kind: string }> {
 		const chatId = this.config.groupChatId;
-		const row = this.db
-			.query(
-				`SELECT m.media, m.first_seen_by FROM messages m
-				  WHERE m.chat_id = ? AND m.message_id = ?
-				    AND NOT EXISTS (SELECT 1 FROM telegram_control_messages c
-				                     WHERE c.chat_id = m.chat_id AND c.message_id = m.message_id)`,
-			)
-			.get(chatId, messageId) as { media: string | null; first_seen_by: string } | null;
+		const row = groupMessage(this.db, chatId, messageId) as (MessageRow & { first_seen_by: string }) | null;
 		const media = row?.media
 			? (JSON.parse(row.media) as { kind: string; file_unique_id: string; file_id: string; file_size?: number })
 			: null;

@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { BotApi } from "../telegram/api.ts";
 import { isReactionEmoji } from "../telegram/api.ts";
+import { groupMessage } from "../db/message-events.ts";
 import { fileIdForBot } from "../media/local-cache.ts";
 import { log } from "../observability/log.ts";
 import { BoxError, type WorkBox } from "../sandbox/box.ts";
@@ -139,16 +140,7 @@ function preflight(
 	}
 	// Any real message of this group may be replied to or reacted on, including old ones found
 	// with tg_messages; only an id that does not exist (an invented one) is refused.
-	const exists =
-		params.reply_to == null ||
-		context.db
-			.query(
-				`SELECT 1 FROM messages m WHERE m.chat_id = ? AND m.message_id = ?
-				   AND NOT EXISTS (SELECT 1 FROM telegram_control_messages c
-				                    WHERE c.chat_id = m.chat_id AND c.message_id = m.message_id)`,
-			)
-			.get(context.chatId, params.reply_to) != null;
-	if (!exists)
+	if (params.reply_to != null && !groupMessage(context.db, context.chatId, params.reply_to))
 		reject("reply_unknown", `reply_to #${params.reply_to} is not a message of this group; use a real #id`, {
 			reply_to: params.reply_to,
 		});

@@ -251,6 +251,18 @@ export function appendMediaUpdateEvents(db: Database, fileUniqueId: string, text
 	return changes;
 }
 
+/** One real message of the group; control commands and their replies do not count. */
+export function groupMessage(db: Database, chatId: number, messageId: number): MessageRow | null {
+	return db
+		.query(
+			`SELECT m.* FROM messages m
+			  WHERE m.chat_id = ? AND m.message_id = ?
+			    AND NOT EXISTS (SELECT 1 FROM telegram_control_messages c
+			                     WHERE c.chat_id = m.chat_id AND c.message_id = m.message_id)`,
+		)
+		.get(chatId, messageId) as MessageRow | null;
+}
+
 /** Notes belong to one bot; every other bot's cursor just passes over them. */
 export function eventsForBot(events: readonly MessageEvent[], botId: string): MessageEvent[] {
 	return events.filter((event) => event.kind !== "note" || (event.payload as NotePayload).bot_id === botId);
