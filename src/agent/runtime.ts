@@ -2174,12 +2174,12 @@ export class BotRuntime {
 		const chatId = this.config.groupChatId;
 		const row = this.db
 			.query(
-				`SELECT m.media, m.first_seen_by FROM messages m
+				`SELECT m.media FROM messages m
 				  WHERE m.chat_id = ? AND m.message_id = ?
 				    AND NOT EXISTS (SELECT 1 FROM telegram_control_messages c
 				                     WHERE c.chat_id = m.chat_id AND c.message_id = m.message_id)`,
 			)
-			.get(chatId, messageId) as { media: string | null; first_seen_by: string } | null;
+			.get(chatId, messageId) as { media: string | null } | null;
 		const media = row?.media
 			? (JSON.parse(row.media) as { kind: string; file_unique_id: string; file_id: string; file_size?: number })
 			: null;
@@ -2187,9 +2187,10 @@ export class BotRuntime {
 		const tooBig =
 			"tg_download failed: the file is larger than the 20 MB Telegram lets bots download; ask for a smaller file or a link";
 		if ((media.file_size ?? 0) > MEDIA_DOWNLOAD_MAX_BYTES) throw new Error(tooBig);
-		const mapped = downloadSource(this.db, this.api, this.bot.id, media.file_unique_id, this.botApis);
-		const source = mapped ?? { api: this.botApis.get(row.first_seen_by), fileId: media.file_id };
-		if (!source.api) throw new Error("tg_download failed: file_id_unavailable");
+		// Ingest records a file_id mapping for every bot that saw the media, so a stored message
+		// with an attachment always resolves; only a removed sibling bot leaves it dangling.
+		const source = downloadSource(this.db, this.api, this.bot.id, media.file_unique_id, this.botApis);
+		if (!source) throw new Error("tg_download failed: file_id_unavailable");
 		const file = await source.api.getFile(source.fileId).catch((error: unknown) => {
 			if (error instanceof Error && /file is too big/i.test(error.message)) throw new Error(tooBig);
 			throw error;
