@@ -432,10 +432,8 @@ function validate(rootDir: string, raw: Raw, env: Record<string, string>, identi
 }
 
 export interface LoadConfigOptions {
-	/** Explicit trusted local .ts source, primarily for validating an editor draft. */
+	/** Explicit trusted local .ts source; config writes validate a temporary copy through it. */
 	configPath?: string;
-	/** In-memory values used by onboarding validation; values override file/process env. */
-	env?: Record<string, string>;
 	/** Deterministic injection for tests/embedders; production reads merged Pi settings. */
 	piModelDefaults?: PiModelDefaults;
 	/**
@@ -448,7 +446,6 @@ export interface LoadConfigOptions {
 export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): AppConfig {
 	const env = { ...parseEnvFile(join(rootDir, ".env")) };
 	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
-	Object.assign(env, options.env);
 	const identityOnly = options.identityOnly === true;
 	const raw = loadConfigSource(options.configPath ?? defaultConfigPath(rootDir));
 	const errors = validate(rootDir, raw, env, identityOnly);

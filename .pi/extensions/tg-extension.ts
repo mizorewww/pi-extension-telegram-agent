@@ -25,7 +25,6 @@ import type {
 	TimelineCursor,
 	TimelineItem,
 } from "../../src/ipc.ts";
-import { runNativeConfigWizard } from "../../src/onboarding/config-wizard.ts";
 import { buildBotStatusView, formatUsdCost, renderBotStatusPlain } from "../../src/observability/status.ts";
 import { summarizeBotUsage } from "../../src/observability/usage.ts";
 import { sanitize } from "../../src/sanitize.ts";
@@ -88,7 +87,6 @@ type StatusHost = {
 };
 
 type TgCommandDispatch =
-	| "config"
 	| "attach"
 	| "compose"
 	| "more"
@@ -101,7 +99,6 @@ type TgCommandDispatch =
 
 /** Every /tg subcommand; `bot` names its single optional trailing argument. */
 const TG_COMMANDS: Record<TgCommandDispatch, { description: string; bot?: "bot" | "bot|off" }> = {
-	config: { description: "Configure Telegram with Pi dialogs" },
 	attach: { description: "Open all bots or one bot for chat", bot: "bot" },
 	compose: { description: "Use the feed scope, one bot, or Pi", bot: "bot|off" },
 	more: { description: "Load one older history page" },
@@ -1011,7 +1008,7 @@ export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cw
 	let toolHost: ToolPresentationHost | undefined;
 	let composeIndicator: TelegramComposeIndicator | null = null;
 
-	/** Startup-validated config, read from disk once per process (invalidated after `/tg config`). Throws on error. */
+	/** Startup-validated config, read from disk once per process. Throws on error. */
 	const loadBots = (): BotConfig[] => {
 		if (!bots) bots = loadConfig(rootDir).bots;
 		return bots;
@@ -1330,26 +1327,7 @@ export function registerTelegramExtension(pi: ExtensionAPI, rootDir = process.cw
 				ctx.ui.notify("Telegram UI requires interactive mode", "error");
 				return;
 			}
-			if (sub === "config") {
-				ctx.ui.setStatus("telegram-config", "TELEGRAM · CONFIGURING");
-				try {
-					const result = await runNativeConfigWizard(ctx.ui, {
-						rootDir,
-						restartDaemon: async () => {
-							teardownFeed(ctx.ui);
-							ctx.ui.setStatus("telegram-config", "TELEGRAM · RESTARTING");
-							const { ready, output } = await runDaemonCommand(rootDir, "restart");
-							return { ready, ...(ready || !output ? {} : { diagnostic: output }) };
-						},
-					});
-					if (result.outcome === "ready") {
-						bots = undefined;
-						attachFeed(null, ctx);
-					}
-				} finally {
-					ctx.ui.setStatus("telegram-config", undefined);
-				}
-			} else if (sub === "attach") {
+			if (sub === "attach") {
 				const filter = resolveFilter(botArg, ctx.ui);
 				if (filter === undefined) return;
 				attachFeed(filter, ctx);
