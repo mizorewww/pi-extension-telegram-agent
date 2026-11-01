@@ -7,6 +7,7 @@ import { join, resolve, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { createJiti } from "jiti";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { BoxConfig } from "./sandbox/box.ts";
 import { isPiThinkingLevel, loadPiModelDefaults, type PiModelDefaults } from "./agent/model-settings.ts";
 import {
 	canonicalPiModelReference,
@@ -64,7 +65,7 @@ export interface TelegramBotConfigInput extends SharedConfigInput {
 	persona_path: string;
 	/** Probability for unaddressed human messages; all bots together must total <= 1. */
 	routing_p?: number;
-	tools?: { send?: boolean; search?: boolean; codemode?: boolean };
+	tools?: { send?: boolean; search?: boolean; codemode?: boolean; sandbox?: boolean };
 	sticker_sets?: readonly string[];
 }
 
@@ -117,7 +118,7 @@ export interface BotConfig {
 	maxSuffixTokens: number;
 	maxMessageTokens: number;
 	/** viewImage is not a toggle: it follows media.mode "hybrid". */
-	tools: { send: boolean; search: boolean; codemode: boolean; viewImage: boolean };
+	tools: { send: boolean; search: boolean; codemode: boolean; sandbox: boolean; viewImage: boolean };
 	stickerSets: string[];
 }
 
@@ -137,6 +138,8 @@ export interface AppConfig {
 	tinyfishApiKey: string;
 	contextWindow: number;
 	media: { mode: MediaMode; visionModel: string; maxPerTurn: number; concurrency: number };
+	/** Work box settings; null when the deployment has no sandbox section. */
+	sandbox: BoxConfig | null;
 	retention: RetentionConfig;
 	/** Generated and persisted by the daemon when absent. */
 	routerSecret: string | null;
@@ -209,8 +212,16 @@ const MEDIA_RULES: Record<string, Rule> = {
 	max_per_turn: range(0, 16, true),
 	concurrency: range(1, 16, true),
 };
-const TOOL_RULES: Record<string, Rule> = { send: boolean, search: boolean, codemode: boolean };
-const ROOT_KEYS = new Set([...Object.keys(ROOT_RULES), "group_peer_id", "media", "telegram_admins", "bots"]);
+const SANDBOX_RULES: Record<string, Rule> = {
+	image: nonEmpty,
+	docker_host: nonEmpty,
+	memory: nonEmpty,
+	cpus: range(0.1, 64),
+	pids: range(16, 65_536, true),
+	network: boolean,
+};
+const TOOL_RULES: Record<string, Rule> = { send: boolean, search: boolean, codemode: boolean, sandbox: boolean };
+const ROOT_KEYS = new Set([...Object.keys(ROOT_RULES), "group_peer_id", "media", "sandbox", "telegram_admins", "bots"]);
 const BOT_KEYS = new Set([
 	...Object.keys(BOT_RULES),
 	"id",
@@ -319,6 +330,12 @@ function validate(rootDir: string, raw: Raw, env: Record<string, string>, identi
 			checkFields(errors, "media.", raw.media, MEDIA_RULES);
 		} else errors.push("[config] media: expected object");
 	}
+	if (raw.sandbox !== undefined) {
+		if (isObject(raw.sandbox)) {
+			checkKeys(errors, "sandbox.", raw.sandbox, new Set(Object.keys(SANDBOX_RULES)));
+			checkFields(errors, "sandbox.", raw.sandbox, SANDBOX_RULES);
+		} else errors.push("[config] sandbox: expected object");
+	}
 	if (raw.group_peer_id !== undefined && !Number.isFinite(normalizePeerId(String(raw.group_peer_id))))
 		errors.push(
 			`[config] group_peer_id: expected a bare positive peer id (e.g. 4402809405, or -1004402809405), got ${JSON.stringify(raw.group_peer_id)}`,
@@ -372,7 +389,12 @@ function validate(rootDir: string, raw: Raw, env: Record<string, string>, identi
 			if (isObject(bot.tools)) {
 				checkKeys(errors, `${at}.tools.`, bot.tools, new Set(Object.keys(TOOL_RULES)));
 				checkFields(errors, `${at}.tools.`, bot.tools, TOOL_RULES);
-			} else errors.push(`[config] ${at}.tools: expected object {send?, search?, codemode?}`);
+			} else errors.push(`[config] ${at}.tools: expected object {send?, search?, codemode?, sandbox?}`);
+			const tools = isObject(bot.tools) ? bot.tools : {};
+			if (tools.sandbox === true && tools.codemode !== true)
+				errors.push(`[config] ${at}.tools.sandbox: requires tools.codemode (sandbox tools are called from scripts)`);
+			if (tools.sandbox === true && raw.sandbox === undefined)
+				errors.push(`[config] ${at}.tools.sandbox: requires a top-level sandbox section`);
 		}
 		if (
 			bot.sticker_sets !== undefined &&
@@ -474,6 +496,7 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 				send: tools.send !== false,
 				search: tools.search === true,
 				codemode: tools.codemode === true,
+				sandbox: tools.sandbox === true,
 				viewImage: mediaMode === "hybrid",
 			},
 			stickerSets: [...((bot.sticker_sets as string[] | undefined) ?? [])],
@@ -501,6 +524,7 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 			maxPerTurn: (media.max_per_turn as number | undefined) ?? (mediaMode === "context" ? 4 : 2),
 			concurrency: (media.concurrency as number | undefined) ?? 2,
 		},
+		sandbox: raw.sandbox === undefined ? null : sandboxConfig(raw.sandbox as Raw),
 		retention: {
 			telemetryDays: (raw.telemetry_retention_days as number | undefined) ?? 90,
 			rawUpdateDays: (raw.raw_update_retention_days as number | undefined) ?? 30,
@@ -510,5 +534,16 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 		telegramAdmins: ((raw.telegram_admins as unknown[] | undefined) ?? []).map(
 			(value) => normalizeTelegramAdmin(value)!,
 		),
+	};
+}
+
+function sandboxConfig(raw: Raw): BoxConfig {
+	return {
+		image: (raw.image as string | undefined) ?? "tg-box:1",
+		dockerHost: (raw.docker_host as string | undefined) ?? "unix:///run/tgbox/docker.sock",
+		memory: (raw.memory as string | undefined) ?? "1g",
+		cpus: (raw.cpus as number | undefined) ?? 2,
+		pids: (raw.pids as number | undefined) ?? 256,
+		network: (raw.network as boolean | undefined) ?? true,
 	};
 }

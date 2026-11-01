@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 30; // v30: hybrid media mode with view_image
+export const CACHE_SCHEMA_VERSION = 31; // v31: work box tools (sh_exec, sh_reset, tg_download)
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";

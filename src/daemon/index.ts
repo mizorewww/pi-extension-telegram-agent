@@ -29,6 +29,7 @@ import { applyRetention, pruneUnconfiguredBotState } from "../db/retention.ts";
 import { log } from "../observability/log.ts";
 import { inspectVideoTranscoder } from "../media/video-frames.ts";
 import { pruneUnreferencedMediaCache } from "../media/lifecycle.ts";
+import { BOX_RESET_CHECK_MS, runWeeklyBoxReset } from "../sandbox/schedule.ts";
 
 const rootDir = process.cwd();
 const config = loadConfig(rootDir);
@@ -272,6 +273,13 @@ const telegramControlCoordinator = new TelegramControlCoordinator(
 );
 void publishTelegramControlMenus(botApis);
 
+const boxes = [...runtimes].flatMap(([botId, rt]) =>
+	rt.workBox ? [{ botId, resetBox: (reason: "weekly") => rt.resetBox(reason) }] : [],
+);
+const runBoxReset = () => void runWeeklyBoxReset(db, boxes);
+runBoxReset();
+const boxResetTimer = setInterval(runBoxReset, BOX_RESET_CHECK_MS);
+
 // Direct replies are durable response opportunities. Restore them only after each
 // session and observer sink is ready, before fresh polling can add more work.
 for (const [botId, rt] of runtimes) {
@@ -323,6 +331,7 @@ async function shutdown(signal: string, exitCode = 0) {
 	hardTimer.unref?.();
 	for (const p of pollers) p.stop();
 	clearInterval(retentionTimer);
+	clearInterval(boxResetTimer);
 	const mediaCacheStop = mediaCache.stop();
 	const runtimeStops = await Promise.allSettled([...runtimes.values()].map((rt) => rt.stop()));
 	for (const [index, result] of runtimeStops.entries()) {

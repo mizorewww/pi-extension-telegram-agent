@@ -191,6 +191,49 @@ export const CODEMODE_TOOL_DEFS = [
 			next_after_id: Nullable(Type.Integer()),
 		}),
 	},
+	{
+		name: "tg_download",
+		label: "Download",
+		description:
+			"Copy the photo, video, voice, audio or file attached to one message into your work box at /work/inbox, so sh_exec can process it. Telegram limits downloads to 20 MB.",
+		parameters: Type.Object(
+			{ message_id: Type.Integer({ description: "The #id of a message with an attachment" }) },
+			{ additionalProperties: false },
+		),
+		outputSchema: Type.Object({
+			path: Type.String({ description: "Absolute path inside the box" }),
+			size: Type.Integer({ description: "Bytes" }),
+			kind: Type.String({ description: "photo, video, document, voice, ..." }),
+		}),
+	},
+	{
+		name: "sh_exec",
+		label: "Shell",
+		description:
+			"Run a shell command in your own Linux work box (Debian; python3 with Pillow/numpy/requests, node/npm, ffmpeg, imagemagick, poppler-utils, jq, git, curl, CJK fonts; network on). Working directory and $HOME live under /work; files there persist until the weekly reset, and send can post them with files. The root filesystem is read-only, so install extras with pip install --user or npm install -g. Output is stdout+stderr combined.",
+		parameters: Type.Object(
+			{
+				command: Type.String({ minLength: 1, description: "Passed to sh -c in /work" }),
+				timeout_s: Type.Optional(Type.Integer({ minimum: 1, maximum: 120, default: 30 })),
+			},
+			{ additionalProperties: false },
+		),
+		outputSchema: Type.Object({
+			output: Type.String({ description: "At most 1 MiB; filter it before printing" }),
+			exit_code: Type.Integer({ description: "137 when killed by the timeout" }),
+			truncated: Type.Boolean(),
+			timed_out: Type.Boolean(),
+			wall_ms: Type.Integer(),
+		}),
+	},
+	{
+		name: "sh_reset",
+		label: "Reset box",
+		description:
+			"Delete everything in your work box and start again from the clean image. Use only when the box is broken or someone asks you to clean it; it also happens automatically every Monday 05:00.",
+		parameters: Type.Object({}, { additionalProperties: false }),
+		outputSchema: Type.Object({ reset: Type.Boolean() }),
+	},
 ] as const;
 
 interface ProviderToolProtocol {

@@ -100,6 +100,9 @@ test("mutating control commands require a human admin and never reach the provid
 		changeModelForControl: async () => {
 			throw new Error("unused");
 		},
+		resetBoxForControl: async () => {
+			throw new Error("unused");
+		},
 	};
 	const service = new TelegramControlCommandService(db, config.bots, root, new Map([["A", runtime]]), [42]);
 	const command = (messageId: number, from: Record<string, unknown>, text = "/new") =>

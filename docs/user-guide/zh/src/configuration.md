@@ -65,12 +65,14 @@ export default defineConfig({
 ## 工具
 
 ```ts
-tools: { send: true, search: false, codemode: false }
+tools: { send: true, search: false, codemode: false, sandbox: false }
 ```
 
 - `send`：在群里发言、发 sticker、点 reaction。关掉就是只看不说的观察 bot。
 - `search`：联网搜索或读取一个公开网页（TinyFish），需要在 `.env` 加 `tiny_fish_api_key`。不会自动打开群里的每个链接，也不能访问内网地址。
 - `codemode`：让 bot 写 JavaScript 脚本（Pi 原生 QuickJS 沙箱）做精确计算，或在脚本里批量调用其他工具、过滤结果再回答，默认关闭。脚本没有文件系统和网络，也不能替 bot 发言。
+
+- `sandbox`：给 bot 一个自己的 Linux 工作区（Docker 容器），它可以在 codemode 脚本里执行命令、处理群友发来的文件。需要 `codemode: true` 和顶层 `sandbox` 段；主机准备见仓库的 `docs/runbooks/sandbox.md`。工作区每周一 05:00 自动清空，管理员可以随时 `/box reset`。
 
 ## 图片和视频
 

@@ -131,7 +131,7 @@ export function fileIdForBot(db: Database, botId: string, fileUniqueId: string):
 	return row?.file_id ?? null;
 }
 
-function downloadSource(
+export function downloadSource(
 	db: Database,
 	preferredApi: MediaDownloadApi,
 	preferredBotId: string,

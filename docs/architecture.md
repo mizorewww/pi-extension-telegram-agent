@@ -88,6 +88,7 @@ Telegram create 不可回滚，所以：
 - `search(query | url [, offset])`：TinyFish；query 最多 5 条短结果；url 只接受公网 HTTP(S)（本地预检 userinfo、localhost、私网、link-local），整页（≤200k 字符）在内存缓存 15 分钟，每次返回从 `offset` 起约 4k token 的一页并给出下一页 offset，包在“不可信网页内容”边界里。日志不记录 query、URL 路径或正文。脚本里也可调用。
 - `codemode`：Pi 原生（`createCodemodeExtension`，`mode: "on"`、`models: false`），见下节威胁模型。声明文本由 Pi 按可调用工具渲染，fingerprint 以 Pi 版本 + 工具列表锁定。
 - `tg_messages`（`exposure: "codemode"`，只有脚本能调）：只读检索本群 canonical 历史（`src/tools/messages.ts`），按 id / 时间 / 发送者 / 回复 / 媒体类型 / 子串过滤，每次 ≤500 行、正文 ≤4000 字，带 `next_before_id`/`next_after_id` 分页；返回固定 DTO（声明为 `outputSchema`），不暴露 SQL 与表结构；排除 `telegram_control_messages` 与其他 chat。bot 收不到 Telegram 删除事件，已删除的消息仍可能被检索到。
+- `tg_download` / `sh_exec` / `sh_reset`（`exposure: "codemode"`，`tools.sandbox` 开启时注册）：在 bot 的工作区容器里拷入 Telegram 附件、执行命令、清空工作区，见下节威胁模型与 [runbooks/sandbox.md](runbooks/sandbox.md)。
 - 没有调用 send 的 assistant 文本只写本地事件和 TUI，session 里用固定 `[no_send]` 代替。
 
 ## codemode 威胁模型
@@ -97,9 +98,16 @@ Telegram create 不可回滚，所以：
 - **宿主侧约束**（`src/agent/extensions/codemode.ts`）：单次结果最多 16,000 字符（脚本的 `// @options` 不能调高）；脚本 `image()` 产生的图片替换为固定文本，session 里永远不存 base64。
 - **残余风险**：wasm 引擎漏洞；VM 每次最多 256 MB，同进程最多 2 个 worker（`PI_CODEMODE_MAX_WORKERS`）。默认关闭。
 
+## 沙箱威胁模型
+
+- **威胁**：群成员（被信任）或网页内容通过 prompt injection 让 bot 在工作区执行任意命令。
+- **边界**：每个 bot 一个常驻容器 `tg-box-<bot>`（`src/sandbox/box.ts`），由独立用户 `tgbox` 的 rootless Docker 运行；daemon 用户只在 `tgbox` 组里能访问其 socket，不在 `docker` 组。容器以 uid 1000、`--cap-drop ALL`、`no-new-privileges`、只读根文件系统、`/tmp` tmpfs、内存/CPU/pids 上限运行；唯一挂载是命名卷 `tg-work-<bot>:/work`，不挂宿主机目录，不传任何 env（只有 `HOME=/work/.home`），容器里没有凭证。默认开网（rootless slirp4netns，`--disable-host-loopback`，访问不到宿主机 loopback 上的服务）。
+- **出入**：只经 docker exec 的 stdin/stdout 传字节。拷出前在容器内 `realpath`，结果必须仍在 `/work` 下且是普通文件；输出 ≤1 MiB，单条命令 ≤120 s（容器内 `timeout -s KILL` + 宿主侧 deadline）。
+- **残余风险**：容器逃逸得到的是 `tgbox` 的 subuid 映射身份，读不到 daemon 用户的 `.env`；出网可以被用来访问公网服务。工作区每周一 05:00 清空，也可以 `/box reset` 或 `sh_reset`。
+
 ## Telegram 控制命令
 
-- 只识别 offset 0 的 `bot_command` entity：`/help`、`/status`、`/fire status` 公开；`/model`、`/compact`、`/new`、`/set`、`/fire [on|off]`（不带参数为切换）需要 `telegram_admins` 中的人类账号（只接受数字 user id）。带 `@bot_username` 时定向到该 bot，否则作用于收到命令的 bot。
+- 只识别 offset 0 的 `bot_command` entity：`/help`、`/status`、`/fire status` 公开；`/model`、`/compact`、`/new`、`/set`、`/fire [on|off]`（不带参数为切换）、`/box reset` 需要 `telegram_admins` 中的人类账号（只接受数字 user id）。带 `@bot_username` 时定向到该 bot，否则作用于收到命令的 bot。
 - 命令和回复的 message id 永久记录在 `telegram_control_messages`，**永不进入任何 provider context**。变更类命令串行执行，不 abort 在途回复；bot busy 时返回“请稍后”。
 - `/model`：按钮分页列出 Pi 当前已认证的全部模型；`/new`：用当前模型开新 session。两者共用同一个 session 切换：先建好新 session，再在一个事务里写 epoch、manifest、清空可见集，失败时旧 session 原样保留；旧 session 文件留在磁盘。
 - `/set` 弹出按钮菜单（插话概率、冷却的固定预设，当前值打勾）；回调只接受预设值，校验后写穿 `telegram.config.ts`、更新内存中的同一 `BotConfig`，并原地刷新菜单。

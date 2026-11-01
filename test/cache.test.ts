@@ -31,12 +31,12 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 30,
+	schemaVersion: 31,
 	systemZhTemplate: "2e5bf4023481",
 	systemEnTemplate: "692c40e98b9c",
 	eventSerialize: "a05c0584eb08",
 	tools: "3bd9368f55d6",
-	codemodeTools: "c3b0015642dc",
+	codemodeTools: "b982c9c0ace3",
 	compactionPrompt: "04da95f62da0",
 	multimodalCompaction: "e2da2b8b68fa",
 	replyRecovery: "4fc7e277e338",

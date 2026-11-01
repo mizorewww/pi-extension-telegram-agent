@@ -20,5 +20,6 @@
 | [engineering/debugging-guide.md](engineering/debugging-guide.md) | 诊断报告、证据梯、日志契约 |
 | [engineering/decisions.md](engineering/decisions.md) | 长期有效的设计取舍与生产事故 |
 | [runbooks/daemon.md](runbooks/daemon.md) | 启停、systemd、部署、备份、故障恢复 |
+| [runbooks/sandbox.md](runbooks/sandbox.md) | bot 工作区：rootless Docker 用户、镜像、配置、清空 |
 
 一个事实只在一处是权威，其它地方链接过去。

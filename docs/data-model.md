@@ -30,7 +30,7 @@ SQLite（WAL），默认 `data/agent.db`，schema 在 `src/db/schema.sql`，启�
 | `reply_obligations` | `(bot_id, chat_id, message_id)` | 直接点名后待回复的消息身份（不存正文） |
 | `routing_claims` | `(chat_id, message_id, bot_id, route_version)` | 防止同一消息对同一 bot 重复启动 |
 | `bot_state` | `(bot_id, key)` | epoch、Telegram offset、bot user id / username |
-| `daemon_state` | `key` | router secret、当前 cache schema 等单例 |
+| `daemon_state` | `key` | router secret、当前 cache schema、每个 bot 工作区上次每周清空时间（`box_reset_at:<bot>`）等单例 |
 
 - 新配置的 bot 没有 cursor 时，默认从 `message_events_backfill_max_seq`（若存在）开始，不重放更早历史。
 - daemon 启动删除已不在配置中的 bot 的 cursor 与回复义务，否则它们会永久卡住 `message_events` 的保留期清理。

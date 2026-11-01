@@ -75,8 +75,9 @@ provider 没有返回 cache 用量时，若同一 cache cohort（provider/api/mo
 
 ## 版本记录
 
-当前：**30**。更早的版本见 git 历史。
+当前：**31**。更早的版本见 git 历史。
 
+- **v31**：codemode 脚本工具新增 `tg_download`、`sh_exec`、`sh_reset`（`tools.sandbox` 开启时注册；fingerprint 只含实际注册的脚本工具）。
 - **v30**：新增 `media.mode: "hybrid"` 与 model-only `view_image` 工具（`TOOL_DEFS` 第三项）；view_image 结果的图片只在 `context` 投影时由引用物化。
 - **v29**：codemode 脚本可调用 `tg_messages`（声明含 `outputSchema`，计入 `toolProtocolHash` 与 golden `codemodeTools`）；系统提示的 codemode 摘要写明可检索历史。
 - **v28**：`run_js` 删除，改用 Pi 原生 `codemode`（`send` 为 model-only）；系统提示工具摘要相应改变。

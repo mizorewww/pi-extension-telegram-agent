@@ -45,6 +45,7 @@
 - 进程管理 / IPC server → `src/daemon/`、`src/ipc.ts`
 - TUI → `.pi/extensions/tg-extension.ts` + `src/plugin/timeline.ts`（UI-only 改动不得影响 provider payload）
 - 工具实现（search 等）→ `src/tools/`；codemode 接入 → `src/agent/extensions/codemode.ts`，注册顺序固定在 `src/agent/runtime.ts`
+- 工作区容器（sandbox）→ `src/sandbox/`；镜像 `deploy/box/Dockerfile`；运维见 `docs/runbooks/sandbox.md`
 - 安装向导 → `src/onboarding/`
 
 ## 5. 测试规则

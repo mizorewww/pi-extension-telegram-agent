@@ -60,6 +60,8 @@ import {
 import { MessageQueryError, queryMessages, type MessageQuery } from "../tools/messages.ts";
 import { runTinyFishTool } from "../tools/search.ts";
 import { contextMediaRefs, createContextImageResolver, ensureContextMedia } from "../media/context-media.ts";
+import { downloadSource } from "../media/local-cache.ts";
+import { WorkBox } from "../sandbox/box.ts";
 import { isVisionMedia, type MediaDownloadApi } from "../media/local-cache.ts";
 import { ensureVision, type VisionExecutor, type VisionUpdateSink } from "../media/vision.ts";
 import type { VisionScheduler } from "../media/vision-scheduler.ts";
@@ -159,6 +161,15 @@ const TELEGRAM_CONTEXT_COMMIT_TYPE = "telegram_context_commit_v2";
 const EPOCH_KEY = "context_epoch";
 const VISION_BATCH_CONCURRENCY = 2;
 
+/** A codemode tool result whose script-facing value is the same object the model sees as JSON. */
+function structured<T extends object>(value: T) {
+	return {
+		content: [{ type: "text" as const, text: JSON.stringify(value) }],
+		details: {},
+		structuredContent: value as unknown as JsonValue,
+	};
+}
+
 /** view_image calls that may attach images within one turn. */
 const VIEW_IMAGE_MAX_PER_TURN = 4;
 
@@ -171,6 +182,9 @@ const ACTIVITY_RAW_EVENT_KINDS = new Set([
 	"tool_fetch",
 	"tool_messages",
 	"tool_view_image",
+	"tool_sh_exec",
+	"tool_tg_download",
+	"box_reset",
 	"markdown_sent",
 	"plain_fallback",
 	"send",
@@ -306,6 +320,7 @@ export class BotRuntime {
 	private telemetryHmacKey = "";
 	private staticPrefixTokenEstimate = 0;
 	private viewedImagesThisTurn = 0;
+	private readonly box: WorkBox | null;
 	private pendingPayloadObservation: ProviderPayloadObservation | null = null;
 	private allowedReactions: ReadonlySet<string> | null = null;
 	private previousRequest: (PreviousProviderPayloadFingerprint & { cohort: string }) | null = null;
@@ -348,6 +363,7 @@ export class BotRuntime {
 			botApis?: ReadonlyMap<string, MediaDownloadApi>;
 			visionExecutor?: VisionExecutor;
 			visionScheduler?: VisionScheduler;
+			box?: WorkBox;
 		},
 	) {
 		this.db = db;
@@ -359,6 +375,7 @@ export class BotRuntime {
 		this.videoTranscoder = options.videoTranscoder;
 		this.api = options.api ?? new BotApi(bot.token);
 		this.botApis = options.botApis ?? new Map([[bot.id, this.api]]);
+		this.box = options.box ?? (bot.tools.sandbox && config.sandbox ? new WorkBox(bot.id, config.sandbox) : null);
 		const chatId = config.groupChatId;
 		this.typingLease = new TelegramTypingLease(
 			options.chatActionSender ?? ((signal) => this.api.sendChatAction(chatId, signal)),
@@ -456,7 +473,40 @@ export class BotRuntime {
 				}
 			},
 		};
-		const scriptTools = this.bot.tools.codemode ? [messagesTool] : [];
+		const [, downloadDef, execDef, resetDef] = CODEMODE_TOOL_DEFS;
+		const boxTools = this.box
+			? [
+					{
+						...downloadDef,
+						exposure: "codemode" as const,
+						execute: async (_toolCallId: string, params: { message_id: number }) =>
+							structured(await this.downloadToBox(params.message_id)),
+					},
+					{
+						...execDef,
+						exposure: "codemode" as const,
+						execute: async (_toolCallId: string, params: { command: string; timeout_s?: number }) => {
+							const result = await this.box!.exec(params.command, params.timeout_s);
+							this.recordEvent("tool_sh_exec", {
+								exit_code: result.exit_code,
+								timed_out: result.timed_out,
+								bytes: result.output.length,
+								wall_ms: result.wall_ms,
+							});
+							return structured(result);
+						},
+					},
+					{
+						...resetDef,
+						exposure: "codemode" as const,
+						execute: async () => {
+							await this.resetBox("tool");
+							return structured({ reset: true });
+						},
+					},
+				]
+			: [];
+		const scriptTools = this.bot.tools.codemode ? [messagesTool, ...boxTools] : [];
 		const catalogModel = this.modelRuntime.getModel(this.bot.provider, this.bot.model);
 		if (!catalogModel) throw new Error(`model not found: ${this.bot.provider}/${this.bot.model}`);
 		const model = { ...catalogModel, contextWindow: Math.min(catalogModel.contextWindow, this.config.contextWindow) };
@@ -481,7 +531,7 @@ export class BotRuntime {
 		// Pi renders the codemode declaration from the callable tools; it is pinned by the Pi
 		// version and these tools, both already in the fingerprint.
 		const declaredTools = this.bot.tools.codemode
-			? [...activeTools, CODEMODE_FINGERPRINT_ENTRY, ...CODEMODE_TOOL_DEFS]
+			? [...activeTools, CODEMODE_FINGERPRINT_ENTRY, ...scriptTools]
 			: activeTools;
 		this.toolsHash = toolProtocolHash(declaredTools);
 		this.staticPrefixTokenEstimate =
@@ -1878,6 +1928,57 @@ export class BotRuntime {
 			],
 			details,
 		};
+	}
+
+	/** The bot's work box, when this deployment gives it one. */
+	get workBox(): WorkBox | null {
+		return this.box;
+	}
+
+	async resetBoxForControl(): Promise<{ ok: true } | { ok: false; code: "unavailable" | "failed" }> {
+		if (!this.box) return { ok: false, code: "unavailable" };
+		try {
+			await this.resetBox("admin");
+			return { ok: true };
+		} catch (error) {
+			log.warn("sandbox", "box_reset_failed", { bot_id: this.bot.id, category: errorCategory(error) });
+			return { ok: false, code: "failed" };
+		}
+	}
+
+	/** Destroy the work box; `reason` is telemetry only. */
+	async resetBox(reason: "tool" | "weekly" | "admin"): Promise<void> {
+		if (!this.box) return;
+		await this.box.reset();
+		this.recordEvent("box_reset", { reason });
+		log.info("sandbox", "box_reset", { bot_id: this.bot.id, reason });
+	}
+
+	/** tg_download: any attachment, by this bot's (or a sibling bot's) file_id, into /work/inbox. */
+	private async downloadToBox(messageId: number): Promise<{ path: string; size: number; kind: string }> {
+		const chatId = this.config.groupChatId;
+		const row = this.db
+			.query(
+				`SELECT m.media, m.first_seen_by FROM messages m
+				  WHERE m.chat_id = ? AND m.message_id = ?
+				    AND NOT EXISTS (SELECT 1 FROM telegram_control_messages c
+				                     WHERE c.chat_id = m.chat_id AND c.message_id = m.message_id)`,
+			)
+			.get(chatId, messageId) as { media: string | null; first_seen_by: string } | null;
+		const media = row?.media
+			? (JSON.parse(row.media) as { kind: string; file_unique_id: string; file_id: string })
+			: null;
+		if (!row || !media) throw new Error("tg_download failed: no attachment on that message");
+		const mapped = downloadSource(this.db, this.api, this.bot.id, media.file_unique_id, this.botApis);
+		const source = mapped ?? { api: this.botApis.get(row.first_seen_by), fileId: media.file_id };
+		if (!source.api) throw new Error("tg_download failed: file_id_unavailable");
+		const file = await source.api.getFile(source.fileId);
+		if (!file.file_path) throw new Error("tg_download failed: telegram_file_unavailable (over 20 MB?)");
+		const bytes = await source.api.downloadFile(file.file_path);
+		const extension = /\.[A-Za-z0-9]{1,8}$/.exec(file.file_path)?.[0] ?? "";
+		const path = await this.box!.writeFile(`inbox/${messageId}${extension}`, bytes);
+		this.recordEvent("tool_tg_download", { kind: media.kind, bytes: bytes.byteLength });
+		return { path, size: bytes.byteLength, kind: media.kind };
 	}
 
 	private markVisible(ids: readonly number[]): void {

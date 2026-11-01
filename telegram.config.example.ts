@@ -43,6 +43,9 @@ export default defineConfig({
 	max_suffix_tokens: 12_000, // new-message tokens per request
 	max_message_tokens: 4_096, // tokens per single message
 
+	// ===== Work box for tools.sandbox (host setup: docs/runbooks/sandbox.md) =====
+	// sandbox: { image: "tg-box:1", docker_host: "unix:///run/tgbox/docker.sock", memory: "1g", cpus: 2, pids: 256, network: true },
+
 	// ===== Media: how images and videos reach a model =====
 	// "off" (default): media are text placeholders such as [photo].
 	// "describe": vision_model describes each new image / video once as text (shared by all bots);
@@ -88,6 +91,7 @@ export default defineConfig({
 				send: true,
 				search: false, // needs tiny_fish_api_key in .env
 				codemode: false, // Pi-native JavaScript scripts that can call the other tools; off by default
+				sandbox: false, // own Linux work box for scripts (needs codemode and the sandbox section)
 			},
 		},
 	],

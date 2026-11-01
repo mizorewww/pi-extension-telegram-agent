@@ -65,12 +65,14 @@ Each bot has its own token, personality, session and statistics. They share the 
 ## Tools
 
 ```ts
-tools: { send: true, search: false, codemode: false }
+tools: { send: true, search: false, codemode: false, sandbox: false }
 ```
 
 - `send`: post in the group, send stickers, add reactions. Turn it off for a bot that only watches.
 - `search`: search the web or read one public page (TinyFish). Requires `tiny_fish_api_key` in `.env`. Links in the group are not opened automatically, and private network addresses are refused.
 - `codemode`: let the bot write JavaScript scripts (Pi's native QuickJS sandbox) for exact calculations, or to call other tools in bulk and filter their results before answering; off by default. Scripts have no file system or network and cannot post for the bot.
+
+- `sandbox`: give the bot its own Linux work box (a Docker container) where codemode scripts run commands and process files people send. Requires `codemode: true` and a top-level `sandbox` section; host setup is in the repository's `docs/runbooks/sandbox.md`. The box is wiped every Monday 05:00, and admins can `/box reset` at any time.
 
 ## Images and videos
 
