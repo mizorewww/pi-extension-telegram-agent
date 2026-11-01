@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 26; // v26: per-batch sticker notes; tool declaration follows enabled tools
+export const CACHE_SCHEMA_VERSION = 27; // v27: search url paging (offset) and 4k-token pages
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";

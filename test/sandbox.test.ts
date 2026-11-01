@@ -79,6 +79,37 @@ test("search marks pages untrusted and keeps secrets out of telemetry", async ()
 		expect(telemetry).not.toContain(secret);
 });
 
+// Regression: bytes/2 token estimate cut CJK pages to ~1.3k chars with no way to read on.
+test("search pages through a long fetched page without refetching it", async () => {
+	let calls = 0;
+	const text = Array.from({ length: 30_000 }, (_, i) => "天地玄黄宇宙洪荒"[i % 8]).join("");
+	const fetchPage = async () => {
+		calls++;
+		return { title: "T", hostname: "example.com", content: text, characters: text.length, truncated: false };
+	};
+	const url = "https://example.com/long-cjk";
+	const read = (offset?: number) =>
+		runTinyFishTool("key", offset === undefined ? { url } : { url, offset }, { fetchPage });
+	const body = (content: string) => content.split("\n\n").slice(1).join("\n\n").split("\n[")[0] as string;
+
+	let offset = 0;
+	let joined = "";
+	for (let page = 0; page < 20; page++) {
+		const result = await read(page === 0 ? undefined : offset);
+		const chunk = body(result.content);
+		if (page === 0) expect(chunk.length).toBeGreaterThan(3_000);
+		joined += chunk;
+		if (result.details.next_offset === undefined) {
+			expect(result.content).toContain("[END OF PAGE]");
+			break;
+		}
+		offset = result.details.next_offset as number;
+		expect(result.content).toContain(`offset: ${offset}`);
+	}
+	expect(joined).toBe(text);
+	expect(calls).toBe(1);
+});
+
 // Defense in depth below the vm: even raw code (no vm) inside the confinement must not see the
 // project, .env or the network. Only runs where bubblewrap exists (production Linux hosts).
 test.skipIf(!BWRAP)(

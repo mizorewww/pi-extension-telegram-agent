@@ -83,7 +83,7 @@ Telegram create 不可回滚，所以：
 
 固定为 `send`、`search`、`run_js`，顺序固定（cache 可见）。`src/agent/tools.ts` 是工具说明的唯一权威；系统提示里的“可用工具”声明按 bot 实际开启的工具生成。
 
-- `search(query | url)`：TinyFish；query 最多 5 条短结果；url 只接受公网 HTTP(S)（本地预检 userinfo、localhost、私网、link-local），正文 ≤8,000 字符再截到 ≤2,048 token，并包在“不可信网页内容”边界里。日志不记录 query、URL 路径或正文。
+- `search(query | url [, offset])`：TinyFish；query 最多 5 条短结果；url 只接受公网 HTTP(S)（本地预检 userinfo、localhost、私网、link-local），整页（≤200k 字符）在内存缓存 15 分钟，每次返回从 `offset` 起约 4k token 的一页并给出下一页 offset，包在“不可信网页内容”边界里。日志不记录 query、URL 路径或正文。
 - `run_js`：见下节威胁模型。
 - 没有调用 send 的 assistant 文本只写本地事件和 TUI，session 里用固定 `[no_send]` 代替。
 
