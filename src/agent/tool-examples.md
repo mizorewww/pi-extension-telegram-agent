@@ -38,6 +38,20 @@ return `月供 ${pay.toFixed(2)}，总利息 ${(pay * n - P).toFixed(2)}；2^100
 { "reply_to": 9015, "reaction": "🤣" }
 ```
 
+## send-script
+
+【脚本】批量点 reaction：在脚本里循环 send，只点 reaction 时任何检索到的消息都可以，最后回一句。
+```js
+const { rows } = await tools.tg_messages({ limit: 50 });
+let done = 0;
+for (const m of rows) {
+  if (m.sender.is_bot) continue;
+  try { await tools.send({ reply_to: m.id, reaction: "🌭" }); done++; } catch {} // 个别失败就跳过
+}
+await tools.send({ message: `给 ${done} 条消息点了 🌭`, reply_to: 9012 });
+return `已点 ${done} 条`;
+```
+
 ## search
 
 【脚本】几个关键词并行搜，先回一句再查，失败的单独标出。

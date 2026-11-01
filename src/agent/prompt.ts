@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-export const CACHE_SCHEMA_VERSION = 39; // v39: send/task/job callable from scripts, tg_post removed, rewritten tool guides
+export const CACHE_SCHEMA_VERSION = 40; // v40: no send limit in the prompt; reactions reach any group message
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
@@ -83,7 +83,7 @@ function toolGuides(tools: EnabledTools): string[] {
 	const scripted = tools.codemode && tools.send;
 	if (tools.send)
 		guides.push(
-			`### send\n\n- 群里只看得到 send 发出的内容；你的普通文字输出群友看不到。\n- 直接调用 send 会结束本轮。${scripted ? "在 codemode 脚本里调用 send 不会结束本轮，所以可以在一个脚本里先回一句、再干活、最后发结果。" : ""}每轮最多 3 次。\n- reply_to 只能填上下文里真实出现过的 #id；reaction 必须搭配 reply_to；sticker 只用目录或〔系统附注〕里的 short_id。${tools.sandbox ? "\n- files 把工作区里的文件发到群里：图片（≤10 MB 的 jpg/png/webp）合成相册，其他文件（≤50 MB）作为文档；路径写 /work 下的绝对路径。" : ""}${examples("send")}`,
+			`### send\n\n- 群里只看得到 send 发出的内容；你的普通文字输出群友看不到。\n- 直接调用 send 会结束本轮。${scripted ? "在 codemode 脚本里调用 send 不会结束本轮，所以可以在一个脚本里先回一句、再干活、最后发结果，也可以循环调用（比如批量点 reaction）。" : ""}\n- 发文字时 reply_to 只能填上下文里真实出现过的 #id；只点 reaction 时可以是本群任意一条消息（包括用 tg_messages 检索到的）；reaction 必须搭配 reply_to；sticker 只用目录或〔系统附注〕里的 short_id。${tools.sandbox ? "\n- files 把工作区里的文件发到群里：图片（≤10 MB 的 jpg/png/webp）合成相册，其他文件（≤50 MB）作为文档；路径写 /work 下的绝对路径。" : ""}${examples("send", ...(scripted ? ["send-script"] : []))}`,
 		);
 	if (tools.search)
 		guides.push(

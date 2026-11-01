@@ -457,13 +457,21 @@ for (const failure of ["auth", "overflow", "persistent_transport"] as const) {
 	});
 }
 
-test("a turn may send at most three times, so a looping script cannot flood the group", async () => {
+test("reactions are uncounted and reach any group message; posting stays capped and visible-only", async () => {
 	const { rt, db } = setup();
+	const reacted: number[] = [];
+	(rt as any).api.setMessageReaction = async (_chat: number, messageId: number) => {
+		reacted.push(messageId);
+		return true;
+	};
+	for (let id = 9400; id < 9430; id++) insertMessage(db, id, `old ${id}`); // in history, not in context
 	(rt as any).sendsThisTurn = 0;
-	await (rt as any).executeSend({ message: "我去查一下～" }, false);
-	await (rt as any).executeSend({ message: "还在翻资料" }, false);
-	await (rt as any).executeSend({ message: "查到了" });
-	await expect((rt as any).executeSend({ message: "第四条" })).rejects.toThrow("at most 3");
+	for (let id = 9400; id < 9430; id++) await (rt as any).executeSend({ reply_to: id, reaction: "🌭" }, false);
+	expect(reacted).toHaveLength(30);
+	// A text reply still needs a message the bot can actually see.
+	await expect((rt as any).executeSend({ message: "hi", reply_to: 9400 }, false)).rejects.toThrow("reply_not_visible");
+	for (let i = 0; i < 20; i++) await (rt as any).executeSend({ message: `m${i}` }, false);
+	await expect((rt as any).executeSend({ message: "one more" })).rejects.toThrow("runaway loop");
 	db.close();
 });
 

@@ -67,8 +67,11 @@ export const TOOL_EXPOSURE = {
 	job: "direct",
 } as const;
 
-/** Public sends one turn may make, from any mix of direct calls and scripts. */
-export const MAX_SENDS_PER_TURN = 3;
+/**
+ * Runaway guard for a looping script, not a behavior rule: the prompt never states it, and normal
+ * turns (an acknowledgement, a result, a batch of reactions) stay far below it.
+ */
+export const MAX_SENDS_PER_TURN = 20;
 
 /** Fixed tool order — never reorder (cache-visible). */
 export const TOOL_DEFS = [
@@ -76,7 +79,7 @@ export const TOOL_DEFS = [
 		name: "send",
 		label: "Send",
 		description:
-			"Telegram 群唯一的公开输出通道，普通 Assistant 文本只在本地可见。人类 @你、回复你或用配置名称点名时必须公开回应，只点 reaction 不算回应；其他场景可按人设沉默，不必回复时可以只用 reaction 表态。message、sticker 或 reaction 至少填一个。直接调用成功会立即结束本轮；在 codemode 脚本里调用不会结束本轮，所以要先回一句再查资料、跑命令时，把 send 和这些工作写进同一个脚本。每轮最多 3 次 send。",
+			"Telegram 群唯一的公开输出通道，普通 Assistant 文本只在本地可见。人类 @你、回复你或用配置名称点名时必须公开回应，只点 reaction 不算回应；其他场景可按人设沉默，不必回复时可以只用 reaction 表态。message、sticker 或 reaction 至少填一个。直接调用成功会立即结束本轮；在 codemode 脚本里调用不会结束本轮，所以要先回一句再查资料、跑命令时，把 send 和这些工作写进同一个脚本。",
 		parameters: Type.Object({
 			message: Type.Optional(
 				Type.String({
@@ -101,7 +104,7 @@ export const TOOL_DEFS = [
 				Type.String({
 					maxLength: 16,
 					description:
-						"对 reply_to 消息点一个 Telegram reaction 表态（如 👍、❤️、🔥、🤣、🎉），仅限 Telegram 支持的 reaction emoji，其他 emoji 会报错；必须搭配 reply_to。不必回复时单独用它表示态度，也可与 message 合并边回复边表态；被 @、被回复或被点名时不能用它代替必须的文字回应。",
+						"对 reply_to 消息点一个 Telegram reaction 表态（只点 reaction、不发文字时，reply_to 可以是本群任意一条消息，包括检索到的旧消息）（如 👍、❤️、🔥、🤣、🎉），仅限 Telegram 支持的 reaction emoji，其他 emoji 会报错；必须搭配 reply_to。不必回复时单独用它表示态度，也可与 message 合并边回复边表态；被 @、被回复或被点名时不能用它代替必须的文字回应。",
 				}),
 			),
 		}),

@@ -1295,12 +1295,16 @@ export class BotRuntime {
 	}
 
 	private async executeSend(params: SendParams, endsTurn = true) {
-		// Scripts may send several times in one turn (an acknowledgement, then the result); the
-		// cap keeps a looping script from flooding the group.
-		if (this.sendsThisTurn >= MAX_SENDS_PER_TURN)
-			throw new Error(`send failed: at most ${MAX_SENDS_PER_TURN} sends per turn; end the turn instead`);
-		this.sendsThisTurn++;
+		// Scripts may send several times in one turn (an acknowledgement, then the result). The cap
+		// only guards a looping script against flooding the group with messages; reactions post
+		// nothing and are not counted.
+		const posts = Boolean(params.message || params.sticker || params.files?.length);
+		if (posts && this.sendsThisTurn >= MAX_SENDS_PER_TURN)
+			throw new Error(
+				`send failed: ${MAX_SENDS_PER_TURN} messages already this turn, which looks like a runaway loop; stop and tell the group what happened`,
+			);
 		const result = await executeAgentSend(params, this.sendContext(endsTurn));
+		if (posts && result.details.sent.length > 0) this.sendsThisTurn++;
 		// Both successful sends and degraded terminal outcomes forbid an automatic resend.
 		// A reaction-only turn created no message, so a direct address is still owed a reply.
 		if ("outcome" in result.details) {

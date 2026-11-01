@@ -156,12 +156,21 @@ export class BotApi {
 	}
 
 	/** Bots get one non-paid reaction per message; re-setting the same emoji is idempotent. */
-	setMessageReaction(chatId: number, messageId: number, emoji: string): Promise<true> {
-		return this.call<true>("setMessageReaction", {
-			chat_id: chatId,
-			message_id: messageId,
-			reaction: [{ type: "emoji", emoji }],
-		});
+	/** Idempotent, so a flood-limit answer is simply waited out (batches of reactions hit it). */
+	async setMessageReaction(chatId: number, messageId: number, emoji: string): Promise<true> {
+		for (let attempt = 0; ; attempt++) {
+			try {
+				return await this.call<true>("setMessageReaction", {
+					chat_id: chatId,
+					message_id: messageId,
+					reaction: [{ type: "emoji", emoji }],
+				});
+			} catch (error) {
+				const wait = error instanceof TelegramApiError && error.code === 429 ? error.retryAfter : null;
+				if (wait == null || wait > 30 || attempt >= 3) throw error;
+				await new Promise((resolve) => setTimeout(resolve, wait * 1000));
+			}
+		}
 	}
 
 	/** Current deployment's group-capable processing indicator; draft Thinking is private-only. */

@@ -139,7 +139,18 @@ function preflight(
 		});
 		params = { ...params, reaction: undefined };
 	}
-	if (params.reply_to != null && !context.visibleMessageIds.has(params.reply_to))
+	// A reaction alone needs no context: any real message of this group may receive it.
+	const reactionOnly = params.reaction != null && !params.message && !params.sticker && !params.files?.length;
+	const reactable =
+		reactionOnly &&
+		context.db
+			.query(
+				`SELECT 1 FROM messages m WHERE m.chat_id = ? AND m.message_id = ?
+				   AND NOT EXISTS (SELECT 1 FROM telegram_control_messages c
+				                    WHERE c.chat_id = m.chat_id AND c.message_id = m.message_id)`,
+			)
+			.get(context.chatId, params.reply_to ?? 0) != null;
+	if (params.reply_to != null && !context.visibleMessageIds.has(params.reply_to) && !reactable)
 		reject("reply_not_visible", "messaging.reply_not_visible", {
 			reply_to: params.reply_to,
 			visible_count: context.visibleMessageIds.size,

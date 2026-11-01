@@ -63,7 +63,7 @@ Telegram ── poller × N ──┐
 
 Telegram create 不可回滚，所以：
 
-- 发送前做完所有本地校验（`reply_to` 必须在上下文中可见、sticker 必须有本 bot 的 `file_id`、reaction 只允许 Telegram 固定集合，群组限制了 reaction 时再与启动时 `getChat.available_reactions` 取交集）。带内容的 send 遇到无效 reaction 时丢弃 reaction 继续发；只点 reaction 才报错。
+- 发送前做完所有本地校验（发文字时 `reply_to` 必须在上下文中可见，只点 reaction 时可以是本群任意一条非控制消息；sticker 必须有本 bot 的 `file_id`、reaction 只允许 Telegram 固定集合，群组限制了 reaction 时再与启动时 `getChat.available_reactions` 取交集）。带内容的 send 遇到无效 reaction 时丢弃 reaction 继续发；只点 reaction 才报错。
 - 只有 Telegram 确定性的 4xx 拒绝（且之前没有任何提交）才把错误还给模型重试。超时、断线、429、5xx、非 JSON 一律算结果未知，返回固定 `no_retry` 并结束本轮。
 - 提交后的本地记账（canonical 写库、可见性、广播、事件）失败只降级为 `committed`，不重发；SQLite busy 有 25/100/250 ms 有界重试。
 - `files`（只有带工作区的 bot 声明）：发送前先把全部文件从工作区拷出（容器内 `realpath` 后必须仍在 `/work`），任何文件缺失、过大或类型不符都在第一次 create 之前报错；顺序为文字 → 图片（≤10 MB 的 jpg/png/webp，多张合成相册）→ 文件（≤50 MB）→ sticker，只有第一条 create 带 `reply_to`。
@@ -100,7 +100,7 @@ Telegram create 不可回滚，所以：
 
 系统提示的「可用工具」只描述 bot 实际开启的工具及其用法，每个工具下附经过真实运行的示例（`src/agent/tool-examples.md`，改动后跑 `scripts/e2e-examples.ts`）（`src/agent/prompt.ts` 的 `toolCapabilityDeclaration`），并给出源代码仓库地址供 bot 阅读自己的实现。模型可见的声明按固定顺序为 `send`、`search`、`view_image`（hybrid 模式）、`task`（`tools.tasks`），再加 Pi 渲染的 `codemode`（cache 可见）。`src/agent/tools.ts` 是各工具说明与暴露方式（`TOOL_EXPOSURE`）的唯一权威。
 
-- `send` 既能直接调用也能在 codemode 脚本里调用：直接调用成功即结束本轮；脚本里的调用不结束本轮（Pi 只认顶层调用的 terminate），所以一个脚本可以先回一句、干活、再发结果，同时不停 typing。任何路径合计每轮最多 3 次 send（`MAX_SENDS_PER_TURN`）。`task`、`job` 同样可在脚本里调用；`view_image` 是 model-only，因为脚本输出会丢弃图片。
+- `send` 既能直接调用也能在 codemode 脚本里调用：直接调用成功即结束本轮；脚本里的调用不结束本轮（Pi 只认顶层调用的 terminate），所以一个脚本可以先回一句、干活、再发结果，同时不停 typing。发出内容（文字 / sticker / 文件）的 send 每轮最多 20 次（`MAX_SENDS_PER_TURN`），只防脚本死循环刷屏，不写进提示词；只点 reaction 不计数。`task`、`job` 同样可在脚本里调用；`view_image` 是 model-only，因为脚本输出会丢弃图片。
 - `search(query | url [, offset])`：TinyFish；query 最多 5 条短结果；url 只接受公网 HTTP(S)（本地预检 userinfo、localhost、私网、link-local），整页（≤200k 字符）在内存缓存 15 分钟，每次返回从 `offset` 起约 4k token 的一页并给出下一页 offset，包在“不可信网页内容”边界里。日志不记录 query、URL 路径或正文。脚本里也可调用。
 - `codemode`：Pi 原生（`createCodemodeExtension`，`mode: "on"`、`models: false`），见下节威胁模型。声明文本由 Pi 按可调用工具渲染，fingerprint 以 Pi 版本 + 工具列表锁定。
 - `tg_messages`（`exposure: "codemode"`，只有脚本能调）：只读检索本群 canonical 历史（`src/tools/messages.ts`），按 id / 时间 / 发送者 / 回复 / 媒体类型 / 子串过滤（3 字以上走 FTS5 trigram 索引，可按 relevance 排序；更短的回退 LIKE），每次 ≤500 行、正文 ≤4000 字，带 `next_before_id`/`next_after_id` 分页；返回固定 DTO（声明为 `outputSchema`），不暴露 SQL 与表结构；排除 `telegram_control_messages` 与其他 chat。bot 收不到 Telegram 删除事件，已删除的消息仍可能被检索到。
@@ -110,7 +110,7 @@ Telegram create 不可回滚，所以：
 ## codemode 威胁模型
 
 - **威胁**：群成员或网页内容通过 prompt injection 让 bot 执行任意 JS。
-- **边界**：脚本跑在 Pi 的 QuickJS（wasm）VM 里，位于独立 worker 线程；VM 的唯一出口是被注册为可调用的工具，没有 Node API、文件系统、网络、计时器。可调用工具 = 激活的 `direct` 工具（含 send、task、job）+ `codemode` 暴露的工具；脚本发消息受每轮 3 次 send 上限约束，`view_image` 是 model-only。
+- **边界**：脚本跑在 Pi 的 QuickJS（wasm）VM 里，位于独立 worker 线程；VM 的唯一出口是被注册为可调用的工具，没有 Node API、文件系统、网络、计时器。可调用工具 = 激活的 `direct` 工具（含 send、task、job）+ `codemode` 暴露的工具；脚本发消息受每轮 20 条的防死循环上限约束，`view_image` 是 model-only。
 - **宿主侧约束**（`src/agent/extensions/codemode.ts`）：单次结果最多 16,000 字符（脚本的 `// @options` 不能调高）；脚本 `image()` 产生的图片替换为固定文本，session 里永远不存 base64。
 - **残余风险**：wasm 引擎漏洞；VM 每次最多 256 MB，同进程最多 2 个 worker（`PI_CODEMODE_MAX_WORKERS`）。默认关闭。
 
