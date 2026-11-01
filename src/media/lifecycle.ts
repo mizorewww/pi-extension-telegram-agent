@@ -51,11 +51,6 @@ const ACTIVE_MEDIA_REFERENCE_SQL = `EXISTS (
 	               WHERE cursor.bot_id = configured.value
 	                 AND cursor.chat_id = event.chat_id
 	            ),
-	            CAST((
-	              SELECT state.value
-	                FROM daemon_state state
-	               WHERE state.key = 'message_events_backfill_max_seq'
-	            ) AS INTEGER),
 	            0
 	          )
 	     )

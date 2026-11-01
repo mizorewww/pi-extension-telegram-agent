@@ -110,11 +110,7 @@ export function getConsumedSeq(db: Database, botId: string, chatId: number): num
 	const row = db
 		.query("SELECT consumed_seq AS consumedSeq FROM bot_cursors WHERE bot_id = ? AND chat_id = ?")
 		.get(botId, chatId) as { consumedSeq: number } | null;
-	if (row) return row.consumedSeq;
-	const baseline = db.query("SELECT value FROM daemon_state WHERE key = 'message_events_backfill_max_seq'").get() as {
-		value: string;
-	} | null;
-	return Number(baseline?.value ?? "0");
+	return row?.consumedSeq ?? 0;
 }
 
 export function setConsumedSeq(db: Database, botId: string, chatId: number, consumedSeq: number): void {
@@ -194,15 +190,7 @@ export function commitConsumedContext(
 ): void {
 	const transaction = db.transaction(() => {
 		setConsumedSeq(db, input.botId, input.chatId, input.consumedSeq);
-		db.query("DELETE FROM bot_visible_messages WHERE bot_id = ? AND chat_id = ?").run(input.botId, input.chatId);
-		const insertVisible = db.query(`
-			INSERT OR IGNORE INTO bot_visible_messages
-				(bot_id, chat_id, message_id, context_epoch)
-			VALUES (?, ?, ?, ?)
-		`);
-		for (const messageId of new Set(input.visibleMessageIds)) {
-			insertVisible.run(input.botId, input.chatId, messageId, input.epoch);
-		}
+		replaceVisibleMessageIds(db, input.botId, input.chatId, input.epoch, input.visibleMessageIds);
 		const removeObligation = db.query(`
 			DELETE FROM reply_obligations
 			 WHERE bot_id = ? AND chat_id = ? AND message_id = ?

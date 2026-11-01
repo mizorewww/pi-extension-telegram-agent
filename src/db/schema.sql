@@ -161,14 +161,11 @@ CREATE TABLE IF NOT EXISTS media (
 	file_unique_id TEXT PRIMARY KEY,
 	kind TEXT NOT NULL, -- photo | sticker | animation | video | document
 	mime TEXT,
-	width INTEGER,
-	height INTEGER,
 	local_path TEXT, -- cache-relative source filename; resolved inside configured data/media
 	vision TEXT, -- JSON: {model, kind, text, at} — vision-mode description shared by all bots
 	context_files TEXT, -- JSON: [{name, mime}] derived images/frames for view_image in data/media
 	sticker_set TEXT,
 	sticker_emoji TEXT,
-	semantic TEXT, -- sticker semantic description
 	short_id TEXT UNIQUE -- s<N> catalog id shown to the model for sticker sending
 );
 
@@ -207,7 +204,6 @@ CREATE TABLE IF NOT EXISTS llm_runs (
 	compaction INTEGER NOT NULL DEFAULT 0,
 	system_hash TEXT,
 	tools_hash TEXT,
-	messages_hash TEXT,
 	provider TEXT,
 	api TEXT,
 	session_id_hash TEXT,

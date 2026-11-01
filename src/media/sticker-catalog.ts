@@ -20,8 +20,6 @@ export interface CatalogSticker {
 	file_unique_id: string;
 	file_id: string;
 	emoji: string | null;
-	width?: number;
-	height?: number;
 	mime: StickerMime;
 }
 
@@ -48,8 +46,6 @@ export async function fetchStickerSet(api: BotApi, setName: string): Promise<Cat
 			file_id: string;
 			file_unique_id: string;
 			emoji?: string;
-			width?: number;
-			height?: number;
 			is_animated?: boolean;
 			is_video?: boolean;
 		}[];
@@ -58,8 +54,6 @@ export async function fetchStickerSet(api: BotApi, setName: string): Promise<Cat
 		file_unique_id: s.file_unique_id,
 		file_id: s.file_id,
 		emoji: s.emoji ?? null,
-		width: s.width,
-		height: s.height,
 		mime: stickerMime(s),
 	}));
 }
@@ -73,18 +67,16 @@ export async function ensureStickerCatalog(
 	api: BotApi,
 	botId: string,
 	sets: string[],
-): Promise<{ total: number; sendable: number; missingMapping: number; truncated: boolean }> {
+): Promise<void> {
 	let total = 0;
 	let truncated = false;
 	const upsertMedia = db.query(
-		`INSERT INTO media (file_unique_id, kind, mime, sticker_set, sticker_emoji, width, height)
-		 VALUES (?, 'sticker', ?, ?, ?, ?, ?)
+		`INSERT INTO media (file_unique_id, kind, mime, sticker_set, sticker_emoji)
+		 VALUES (?, 'sticker', ?, ?, ?)
 		 ON CONFLICT(file_unique_id) DO UPDATE SET
 		   mime = excluded.mime,
 		   sticker_set = COALESCE(excluded.sticker_set, media.sticker_set),
-		   sticker_emoji = COALESCE(excluded.sticker_emoji, media.sticker_emoji),
-		   width = COALESCE(excluded.width, media.width),
-		   height = COALESCE(excluded.height, media.height)`,
+		   sticker_emoji = COALESCE(excluded.sticker_emoji, media.sticker_emoji)`,
 	);
 	const upsertMapping = db.query(
 		"INSERT OR IGNORE INTO media_file_ids (bot_id, file_id, file_unique_id) VALUES (?, ?, ?)",
@@ -95,7 +87,7 @@ export async function ensureStickerCatalog(
 				truncated = true;
 				break;
 			}
-			upsertMedia.run(s.file_unique_id, s.mime, setName, s.emoji, s.width ?? null, s.height ?? null);
+			upsertMedia.run(s.file_unique_id, s.mime, setName, s.emoji);
 			upsertMapping.run(botId, s.file_id, s.file_unique_id);
 			assignStickerShortId(db, s.file_unique_id);
 			total++;
@@ -122,36 +114,7 @@ export async function ensureStickerCatalog(
 	if (truncated) {
 		log.warn("sticker_catalog", "catalog_truncated", { bot_id: botId, limit: STICKER_CATALOG_MAX });
 	}
-	const counts = db
-		.query(
-			`SELECT
-			   COUNT(*) AS catalog_rows,
-			   SUM(CASE WHEN EXISTS (
-			     SELECT 1 FROM media_file_ids f
-			      WHERE f.bot_id = ? AND f.file_unique_id = media.file_unique_id
-			   ) THEN 1 ELSE 0 END) AS sendable
-			 FROM media
-			 WHERE kind = 'sticker' AND sticker_set IN (SELECT value FROM json_each(?))`,
-		)
-		.get(botId, JSON.stringify(sets)) as { catalog_rows: number; sendable: number | null };
-	const sendable = counts.sendable ?? 0;
-	const missingMapping = counts.catalog_rows - sendable;
-	log.info("sticker_catalog", "catalog_ready", {
-		bot_id: botId,
-		fetched: total,
-		catalog: counts.catalog_rows,
-		sendable,
-		missing_file_id: missingMapping,
-	});
-	if (missingMapping > 0) {
-		log.warn("sticker_catalog", "mapping_incomplete", {
-			bot_id: botId,
-			catalog: counts.catalog_rows,
-			sendable,
-			missing_file_id: missingMapping,
-		});
-	}
-	return { total, sendable, missingMapping, truncated };
+	log.info("sticker_catalog", "catalog_ready", { bot_id: botId, fetched: total });
 }
 
 interface CatalogRow {

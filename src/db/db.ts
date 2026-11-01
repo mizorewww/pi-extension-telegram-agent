@@ -13,17 +13,7 @@ export function openDb(dbPath: string): Database {
 	db.exec("PRAGMA foreign_keys = ON;");
 	db.exec(readFileSync(SCHEMA_PATH, "utf8"));
 	assertCurrentSchema(db);
-	buildMessageIndexOnce(db);
 	return db;
-}
-
-const MESSAGE_INDEX_VERSION = "1";
-
-/** Databases created before messages_fts get it filled once; triggers keep it current after. */
-function buildMessageIndexOnce(db: Database): void {
-	if (getDaemonState(db, "messages_fts_version") === MESSAGE_INDEX_VERSION) return;
-	db.exec("INSERT INTO messages_fts (messages_fts) VALUES ('rebuild')");
-	setDaemonState(db, "messages_fts_version", MESSAGE_INDEX_VERSION);
 }
 
 /** Databases created before the current schema are not migrated; fail before touching them. */
