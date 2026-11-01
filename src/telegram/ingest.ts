@@ -58,13 +58,7 @@ function recordMedia(db: Database, botId: string, m: CanonicalMessage): void {
 		   mime = COALESCE(excluded.mime, media.mime),
 		   sticker_set = COALESCE(excluded.sticker_set, media.sticker_set),
 		   sticker_emoji = COALESCE(excluded.sticker_emoji, media.sticker_emoji)`,
-	).run(
-		media.file_unique_id,
-		media.kind,
-		media.mime ?? null,
-		media.sticker_set ?? null,
-		media.sticker_emoji ?? null,
-	);
+	).run(media.file_unique_id, media.kind, media.mime ?? null, media.sticker_set ?? null, media.sticker_emoji ?? null);
 	db.query("INSERT OR IGNORE INTO media_file_ids (bot_id, file_id, file_unique_id) VALUES (?, ?, ?)").run(
 		botId,
 		media.file_id,

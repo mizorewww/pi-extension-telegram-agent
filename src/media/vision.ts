@@ -180,13 +180,7 @@ export function createPiVisionExecutor(runtime: VisionModelRuntime, modelRef: st
 				],
 			};
 			const telemetry = (outcome: VisionOutcome, message?: AssistantMessage): VisionTelemetry =>
-				usageTelemetry(
-					input.kind,
-					performance.now() - startedAt,
-					outcome,
-					message,
-					input.images.length,
-				);
+				usageTelemetry(input.kind, performance.now() - startedAt, outcome, message, input.images.length);
 			let message: AssistantMessage;
 			try {
 				// Single timeout layer: the SDK enforces VISION_TIMEOUT_MS inside completeSimple.

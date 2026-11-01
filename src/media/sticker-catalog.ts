@@ -62,12 +62,7 @@ export async function fetchStickerSet(api: BotApi, setName: string): Promise<Cat
  * Load the catalog for one bot: persist media identity + per-bot file_id, assign short_ids.
  * A failed set (bad name / network) logs and is skipped — startup must not be blocked.
  */
-export async function ensureStickerCatalog(
-	db: Database,
-	api: BotApi,
-	botId: string,
-	sets: string[],
-): Promise<void> {
+export async function ensureStickerCatalog(db: Database, api: BotApi, botId: string, sets: string[]): Promise<void> {
 	let total = 0;
 	let truncated = false;
 	const upsertMedia = db.query(
