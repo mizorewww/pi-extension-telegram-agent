@@ -251,6 +251,11 @@ export function appendMediaUpdateEvents(db: Database, fileUniqueId: string, text
 	return changes;
 }
 
+/** Notes belong to one bot; every other bot's cursor just passes over them. */
+export function eventsForBot(events: readonly MessageEvent[], botId: string): MessageEvent[] {
+	return events.filter((event) => event.kind !== "note" || (event.payload as NotePayload).bot_id === botId);
+}
+
 /** Append one note event; `key` makes the append idempotent. Returns its ingest_seq, or null. */
 export function appendNoteEvent(
 	db: Database,

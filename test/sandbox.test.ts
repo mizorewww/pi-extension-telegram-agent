@@ -105,3 +105,31 @@ test("send with a missing box file fails before anything reaches Telegram", asyn
 	).rejects.toThrow("out/missing.png");
 	expect(creates).toBe(0);
 });
+
+test("file sends upload as multipart: one photo, or an album with the reply on it", async () => {
+	const { BotApi } = await import("../src/telegram/api.ts");
+	const calls: { method: string; form: FormData }[] = [];
+	const original = globalThis.fetch;
+	globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+		calls.push({ method: String(url).split("/").pop()!, form: init!.body as FormData });
+		const body = String(url).endsWith("sendMediaGroup") ? [{ message_id: 2 }, { message_id: 3 }] : { message_id: 1 };
+		return new Response(JSON.stringify({ ok: true, result: body }));
+	}) as typeof fetch;
+	try {
+		const api = new BotApi("token");
+		const file = (name: string) => ({ name, bytes: new Uint8Array([1, 2, 3]) });
+		expect(await api.sendFiles(-1001, "photo", [file("a.png")])).toEqual([{ message_id: 1 }]);
+		expect(calls[0]!.method).toBe("sendPhoto");
+		expect(calls[0]!.form.get("photo")).toBe("attach://f0");
+		expect((calls[0]!.form.get("f0") as File).name).toBe("a.png");
+		expect(await api.sendFiles(-1001, "document", [file("a.pdf"), file("b.pdf")], 42)).toHaveLength(2);
+		expect(calls[1]!.method).toBe("sendMediaGroup");
+		expect(JSON.parse(calls[1]!.form.get("media") as string)).toEqual([
+			{ type: "document", media: "attach://f0" },
+			{ type: "document", media: "attach://f1" },
+		]);
+		expect(JSON.parse(calls[1]!.form.get("reply_parameters") as string)).toEqual({ message_id: 42 });
+	} finally {
+		globalThis.fetch = original;
+	}
+});

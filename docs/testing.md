@@ -34,8 +34,8 @@ bun run scripts/e2e-compaction.ts --bot <id>   # 通过公开 control 入口压�
 | `provider-guard.test.ts` | 请求创建/消费 deadline 中止且不重试；HTTP 413 进入 Pi overflow 恢复。 |
 | `codemode.test.ts` | codemode 脚本没有 host 能力、调不到 `send`、只能调用可调用工具；结果有宿主上限，脚本图片不进 session。 |
 | `messages.test.ts` | `tg_messages` 只读本群：不返回控制消息与其他 chat，分页无缝，LIKE 通配符被转义；附件占位符带清洗后的文件名、大小、时长；全文索引能找到中文子串、按相关性排序、随编辑同步，并为旧库补建。 |
-| `sandbox.test.ts` | 工作区容器参数始终带隔离 flag、不挂宿主机目录、不传 env；路径（含容器内软链接解析结果）不能离开 `/work`；每周清空每个边界只触发一次、首次见到不清空；`send` 的文件缺失时在任何 Telegram create 之前失败。 |
-| `tasks.test.ts` | 任务容器参数带隔离 flag、凭证不进 argv；RPC 帧不被 U+2028 切开；报告变成所属 bot 的 note，进展节流，完成 / 失败 / 需要输入时对发起人产生义务；daemon 停止不判失败，重启后 running 任务从原 session 继续、need_input 任务等回答再启动；用量写入 `task_usage`。 |
+| `sandbox.test.ts` | 工作区容器参数始终带隔离 flag、不挂宿主机目录、不传 env；路径（含容器内软链接解析结果）不能离开 `/work`；每周清空每个边界只触发一次、首次见到不清空；`send` 的文件缺失时在任何 Telegram create 之前失败；文件以 multipart 上传（单张走 sendPhoto，多个走带 reply 的 sendMediaGroup）。 |
+| `tasks.test.ts` | 任务容器参数带隔离 flag、凭证不进 argv；RPC 帧不被 U+2028 切开；报告变成所属 bot 的 note，进展节流，完成 / 失败 / 需要输入时对发起人产生义务；daemon 停止不判失败，重启后 running 任务从原 session 继续、need_input 任务等回答再启动；用量写入 `task_usage`；note 只进入所属 bot 的输入。 |
 | `search.test.ts` | search 只访问公网 HTTP(S)，遥测不含 query/URL/正文/key；长页分页可完整读完且不重复抓取。 |
 | `daemon-control.test.ts` | 进程归属识别（含空格路径）、拒绝其他部署与无法验证的 pid。 |
 | `network-isolation.test.ts` | `network-guard.ts` preload 机械拒绝外网，即使存在真实 `.env`。 |

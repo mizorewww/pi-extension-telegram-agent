@@ -99,6 +99,7 @@ import {
 	setConsumedSeq,
 	setSessionManifest,
 	appendNoteEvent,
+	eventsForBot,
 	type MessageEvent,
 	type NotePayload,
 } from "../db/message-events.ts";
@@ -1329,9 +1330,7 @@ export class BotRuntime {
 
 		const consumedSeq = getConsumedSeq(this.db, this.bot.id, chatId);
 		let highWater = messageEventHighWater(this.db, chatId);
-		// Notes belong to one bot; every other bot's cursor just passes over them.
-		const ownEvents = (events: MessageEvent[]) =>
-			events.filter((event) => event.kind !== "note" || (event.payload as NotePayload).bot_id === this.bot.id);
+		const ownEvents = (events: MessageEvent[]) => eventsForBot(events, this.bot.id);
 		let recent = ownEvents(listRecentMessageEvents(this.db, chatId, consumedSeq, highWater, MAX_EVENT_SCAN));
 		let obligationEvents = ownEvents(listReplyObligationEvents(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN));
 		let rowsScanned = recent.length + obligationEvents.length;

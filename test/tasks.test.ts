@@ -167,3 +167,14 @@ test("tasks survive a daemon restart: running ones resume, waiting ones wait for
 	expect(after.list("A").find((row) => row.task_id === waiting)!.status).toBe("running");
 	expect(running).toBe("t1");
 });
+
+test("a note reaches only the bot it belongs to", async () => {
+	const { appendNoteEvent, eventsForBot } = await import("../src/db/message-events.ts");
+	const db = new Database(":memory:");
+	db.exec(readFileSync("src/db/schema.sql", "utf8"));
+	appendNoteEvent(db, CHAT, 42, "a", { bot_id: "A", source: "task", task_id: "t1", phase: "done", text: "A 的结果" });
+	appendNoteEvent(db, CHAT, 0, "b", { bot_id: "B", source: "system", text: "B 的工作区清空了" });
+	const events = listRecentMessageEvents(db, CHAT, 0, 1_000, 100);
+	expect(eventsForBot(events, "A").map((event) => (event.payload as NotePayload).text)).toEqual(["A 的结果"]);
+	expect(eventsForBot(events, "B").map((event) => (event.payload as NotePayload).text)).toEqual(["B 的工作区清空了"]);
+});
