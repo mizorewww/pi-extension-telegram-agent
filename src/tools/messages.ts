@@ -1,12 +1,11 @@
 // tg_messages: read-only search over the configured group's canonical message history, for
 // codemode scripts. Returns a fixed DTO (never SQL or table rows) so the schema stays private and
 // the model-facing contract is the declared output type. Control commands and their replies are
-// excluded, like everywhere else the model sees the group.
+// excluded, like everywhere else the model sees the group. Pi validates the arguments against the
+// tool schema (src/agent/tools.ts) before this runs; only semantic checks live here.
 
 import type { Database } from "bun:sqlite";
 
-export const MAX_MESSAGE_ROWS = 2_000;
-export const MAX_MESSAGE_IDS = 1_000;
 /** The trigram index only matches needles of at least three characters. */
 const INDEX_MIN_CHARS = 3;
 
@@ -83,9 +82,6 @@ export function queryMessages(db: Database, chatId: number, query: MessageQuery)
 	const where = ["m.chat_id = ?", "c.message_id IS NULL"];
 	const args: (string | number)[] = [chatId];
 	if (query.ids !== undefined) {
-		if (!Array.isArray(query.ids) || query.ids.length === 0 || query.ids.length > MAX_MESSAGE_IDS)
-			throw new MessageQueryError(`ids: expected 1-${MAX_MESSAGE_IDS} message ids`);
-		if (!query.ids.every((id) => Number.isSafeInteger(id))) throw new MessageQueryError("ids: expected integers");
 		where.push(`m.message_id IN (${query.ids.map(() => "?").join(",")})`);
 		args.push(...query.ids);
 	}
@@ -104,35 +100,30 @@ export function queryMessages(db: Database, chatId: number, query: MessageQuery)
 	] as const) {
 		const value = query[field];
 		if (value === undefined) continue;
-		if (!Number.isSafeInteger(value)) throw new MessageQueryError(`${field}: expected an integer`);
 		where.push(`m.${field === "reply_to" ? "reply_to_message_id" : "message_id"} ${op} ?`);
 		args.push(value);
 	}
-	if (query.sender !== undefined) {
-		if (typeof query.sender === "number" && Number.isSafeInteger(query.sender)) {
-			where.push("m.sender_id = ?");
-			args.push(query.sender);
-		} else if (typeof query.sender === "string" && query.sender.trim()) {
-			const name = query.sender.trim().replace(/^@/, "");
-			where.push("(lower(m.username) = lower(?) OR a.alias = ?)");
-			args.push(name, name);
-		} else throw new MessageQueryError("sender: expected a user id, @username or u<N> alias");
+	if (typeof query.sender === "number") {
+		where.push("m.sender_id = ?");
+		args.push(query.sender);
+	} else if (query.sender !== undefined) {
+		const name = query.sender.trim().replace(/^@/, "");
+		if (!name) throw new MessageQueryError("sender: expected a user id, @username or u<N> alias");
+		where.push("(lower(m.username) = lower(?) OR a.alias = ?)");
+		args.push(name, name);
 	}
-	if (query.has_media !== undefined) {
-		const kind = query.has_media;
-		if (kind === "any") where.push("m.media IS NOT NULL");
-		else if (kind === "video")
-			where.push(`json_extract(m.media, '$.kind') IN (${VIDEO_KINDS.map(() => "?").join(",")})`);
-		else if (kind === "photo" || kind === "sticker" || kind === "document")
-			where.push("json_extract(m.media, '$.kind') = ?");
-		else throw new MessageQueryError("has_media: expected photo, video, sticker, document or any");
-		if (kind === "video") args.push(...VIDEO_KINDS);
-		else if (kind !== "any") args.push(kind);
+	const kind = query.has_media;
+	if (kind === "any") where.push("m.media IS NOT NULL");
+	else if (kind === "video") {
+		where.push(`json_extract(m.media, '$.kind') IN (${VIDEO_KINDS.map(() => "?").join(",")})`);
+		args.push(...VIDEO_KINDS);
+	} else if (kind !== undefined) {
+		where.push("json_extract(m.media, '$.kind') = ?");
+		args.push(kind);
 	}
 	let indexed: string | null = null;
-	if (query.text_contains !== undefined) {
-		const needle = typeof query.text_contains === "string" ? query.text_contains : "";
-		if (!needle) throw new MessageQueryError("text_contains: expected a non-empty string");
+	const needle = query.text_contains;
+	if (needle) {
 		if (Array.from(needle).length >= INDEX_MIN_CHARS) {
 			// A quoted FTS5 phrase is a plain substring under the trigram tokenizer.
 			indexed = `"${needle.replaceAll('"', '""')}"`;
@@ -143,13 +134,9 @@ export function queryMessages(db: Database, chatId: number, query: MessageQuery)
 		}
 	}
 	const order = query.order ?? "desc";
-	if (order !== "desc" && order !== "asc" && order !== "relevance")
-		throw new MessageQueryError("order: expected desc, asc or relevance");
 	if (order === "relevance" && indexed == null)
 		throw new MessageQueryError("order relevance needs text_contains of at least 3 characters");
 	const limit = query.limit ?? 100;
-	if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_MESSAGE_ROWS)
-		throw new MessageQueryError(`limit: expected 1-${MAX_MESSAGE_ROWS}`);
 
 	const rows = db
 		.query(
