@@ -183,7 +183,7 @@ const composition = await composeDeployment(db, config, {
 });
 const { botApis, runtimes, identities, botNames, botUserIds } = composition;
 runtimesForTasks = runtimes as ReadonlyMap<string, BotRuntime>;
-taskManager?.recoverInterrupted();
+await taskManager?.recover();
 
 // The per-bot content fingerprint rotated incompatible sessions before they were opened.
 const storedSchema = getDaemonState(db, "cache_schema_version");

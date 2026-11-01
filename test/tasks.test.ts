@@ -46,7 +46,9 @@ test("task containers run isolated and never carry a secret in argv", () => {
 	]);
 	expect(joined).not.toContain("tinyfish-secret");
 	expect(args).toContain("TINYFISH_API_KEY");
-	expect(joined).toContain("pi -a -e /opt/tg-task-bridge/index.ts --mode rpc --no-session");
+	expect(joined).toContain(
+		"pi -a -e /opt/tg-task-bridge/index.ts --mode rpc --session-dir /work/tasks/t1/.pi-sessions --session-id t1",
+	);
 });
 
 test("task lifecycle notes belong to the bot, throttle progress and owe the requester", async () => {
@@ -110,4 +112,58 @@ test("task lifecycle notes belong to the bot, throttle progress and owe the requ
 	second.emit("close", 1);
 	expect(manager.list("A").find((row) => row.task_id === failed)!.status).toBe("failed");
 	expect(wakes.at(-1)).toEqual(["A", 43, true]);
+});
+
+test("tasks survive a daemon restart: running ones resume, waiting ones wait for the answer", async () => {
+	const db = new Database(":memory:");
+	db.exec(readFileSync("src/db/schema.sql", "utf8"));
+	const children: ReturnType<typeof fakeChild>[] = [];
+	const prompts: string[][] = [];
+	const spawner = (() => {
+		const child = fakeChild();
+		const sent: string[] = [];
+		prompts.push(sent);
+		child.stdin.on("data", (chunk: Buffer) => sent.push(chunk.toString()));
+		children.push(child);
+		return child;
+	}) as unknown as Spawner;
+	const wakes: number[] = [];
+	const deps = {
+		db,
+		chatId: CHAT,
+		config: { workflows: { search: "/unused" }, maxRunning: 2, timeoutMs: 60 * 60_000 },
+		run: RUN,
+		box: () => ({ extractTar: async () => {} }) as never,
+		wake: (_bot: string, origin: number) => void wakes.push(origin),
+		spawner,
+		packWorkflow: async () => new Uint8Array(),
+		removeStaleContainers: async () => {},
+	};
+	const before = new TaskManager(deps);
+	const running = await before.start("A", 50, "search", "一", "brief one");
+	const waiting = await before.start("A", 51, "search", "二", "brief two");
+	children[1]!.stdout.write(
+		`${JSON.stringify({ type: "tool_execution_start", toolName: "report", args: { kind: "need_input", text: "哪种？" } })}\n`,
+	);
+	await new Promise((resolve) => setTimeout(resolve, 10));
+	wakes.length = 0;
+	before.stopAll();
+	for (const child of children) child.emit("close", 137);
+	expect(
+		before
+			.list("A")
+			.map((row) => row.status)
+			.sort(),
+	).toEqual(["need_input", "running"]);
+	expect(wakes).toEqual([]);
+
+	const after = new TaskManager(deps);
+	await after.recover();
+	expect(children).toHaveLength(3); // only the running task restarted
+	expect(prompts[2]!.join("")).toContain("daemon 重启");
+	after.message("A", waiting, "要中文");
+	expect(children).toHaveLength(4);
+	expect(prompts[3]!.join("")).toContain("要中文");
+	expect(after.list("A").find((row) => row.task_id === waiting)!.status).toBe("running");
+	expect(running).toBe("t1");
 });

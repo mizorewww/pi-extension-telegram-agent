@@ -40,7 +40,7 @@ Telegram ── poller × N ──┐
 
 - bot 用 model-only `task` 工具（`tools.tasks`，需要工作区与顶层 `tasks` 段）把耗时工作交给工作流（`tasks.workflows`，目录里的 `.pi` 原样拷进任务目录）。`TaskManager`（`src/tasks/manager.ts`）为每个任务起一个一次性容器 `tg-task-<bot>-<id>`（`src/tasks/process.ts`）：与工作区同一镜像、同一 `/work` 卷，另挂凭证卷 `tg-pihome-<bot>:/pi-agent`，运行 `pi -a --mode rpc` 加载桥接扩展（`deploy/box/task-bridge`）。
 - 任务只通过 `report(progress | need_input | done)` 与 bot 通信；daemon 读 RPC 事件流，把报告写成该 bot 的 `note` 事件。进展同一任务至少间隔 5 分钟才唤醒 bot；完成、失败、需要输入时在发起消息上重新创建回复义务并唤醒，复用补答与不重发语义。run 结束却没报 done 时取最后的 assistant 文本当结果。
-- 群友的补充经 `task message` 转给任务（运行中 steer，等待输入时开始下一 run）；`task cancel` 停止；每个 bot 最多 `tasks.max_running` 个，超过 `tasks.timeout_minutes` 判失败。daemon 重启时进行中的任务标记 interrupted 并通知发起人，残留容器按 label 删除；有任务时每周清空顺延。
+- 群友的补充经 `task message` 转给任务（运行中 steer，等待输入时开始下一 run）；`task cancel` 停止；每个 bot 最多 `tasks.max_running` 个，超过 `tasks.timeout_minutes` 判失败。任务的 Pi session 存在 `/work/tasks/<id>/.pi-sessions`：daemon 停止时只停容器、不判失败；重启后先按 label 删除残留容器，running 的任务用同一 session 重新起容器并提示它从中断处继续，need_input 的任务等收到回答再启动；超时按创建时间计算。工作区不可用时才标记 interrupted 并通知发起人。有任务时每周清空顺延。
 
 ## 任务威胁模型
 

@@ -8,9 +8,11 @@ import { spawn } from "node:child_process";
 import { appendNoteEvent, type NotePayload } from "../db/message-events.ts";
 import { log } from "../observability/log.ts";
 import type { WorkBox } from "../sandbox/box.ts";
-import { type ReportKind, type Spawner, TaskProcess, type TaskRunConfig } from "./process.ts";
+import { type ReportKind, type Spawner, TaskProcess, type TaskRunConfig, type TaskUsage } from "./process.ts";
 
 export const PROGRESS_INTERVAL_MS = 5 * 60_000;
+const RESUME_PROMPT =
+	"（daemon 重启，你之前的运行被打断了。先根据会话和 /work 里的文件确认已经做到哪一步，再继续完成任务；完成时调用 report，kind 为 done。）";
 
 export interface TasksConfig {
 	/** workflow name -> host directory whose `.pi` is copied into each task. */
@@ -41,6 +43,8 @@ export interface TaskManagerDeps {
 	/** Wake the bot; `owe` also creates a reply obligation on the origin message first. */
 	wake: (botId: string, originMessageId: number, owe: boolean) => void;
 	spawner?: Spawner;
+	/** Removes leftover task containers before recovery; injectable for tests. */
+	removeStaleContainers?: (dockerHost: string) => Promise<void>;
 	/** Builds the `.pi` tar of a workflow directory; injectable for tests. */
 	packWorkflow?: (dir: string) => Promise<Uint8Array>;
 }
@@ -67,8 +71,23 @@ const packWorkflowDir = (dir: string) =>
 		);
 	});
 
+const removeTaskContainers = (dockerHost: string) =>
+	new Promise<void>((resolve) => {
+		const child = spawn(
+			"sh",
+			["-c", 'ids=$(docker ps -aq --filter label=tg-task); [ -z "$ids" ] || docker rm -f $ids'],
+			{
+				env: { PATH: process.env.PATH ?? "/usr/bin:/bin", DOCKER_HOST: dockerHost },
+				stdio: "ignore",
+			},
+		);
+		child.on("close", () => resolve());
+		child.on("error", () => resolve());
+	});
+
 export class TaskManager {
 	private readonly live = new Map<string, Live>();
+	private stopping = false;
 
 	constructor(private readonly deps: TaskManagerDeps) {}
 
@@ -86,18 +105,28 @@ export class TaskManager {
 			.all(botId, limit) as TaskRow[];
 	}
 
-	/** Mark runs a previous daemon left behind; their containers are already gone with it. */
-	recoverInterrupted(): void {
-		const rows = this.deps.db.query("SELECT * FROM tasks WHERE status IN ('running', 'need_input')").all() as TaskRow[];
+	/**
+	 * Pick up the tasks a previous daemon left behind. Their Pi sessions live in /work, so a
+	 * running task resumes from its session and a task waiting for input waits again.
+	 */
+	async recover(): Promise<void> {
+		await (this.deps.removeStaleContainers ?? removeTaskContainers)(this.deps.run.dockerHost);
+		const rows = this.deps.db
+			.query("SELECT * FROM tasks WHERE status IN ('running', 'need_input') ORDER BY created_at")
+			.all() as TaskRow[];
 		for (const row of rows) {
-			this.setStatus(row.task_id, "interrupted");
-			this.note(row, "interrupted", "daemon 重启，任务被中断；需要的话重新开始。");
-			this.deps.wake(row.bot_id, row.origin_message_id, true);
+			if (!this.deps.box(row.bot_id)) {
+				this.setStatus(row.task_id, "interrupted");
+				this.note(row, "interrupted", "工作区不可用，任务无法继续；需要的话重新开始。");
+				this.deps.wake(row.bot_id, row.origin_message_id, true);
+				continue;
+			}
+			const task = this.track(row.task_id, row.bot_id, row.created_at);
+			if (row.status === "running") {
+				task.process.start(RESUME_PROMPT);
+				log.info("tasks", "task_resumed", { bot_id: row.bot_id, task_id: row.task_id });
+			} else task.agentRunning = false;
 		}
-		spawn("sh", ["-c", 'ids=$(docker ps -aq --filter label=tg-task) && [ -n "$ids" ] && docker rm -f $ids'], {
-			env: { PATH: process.env.PATH ?? "/usr/bin:/bin", DOCKER_HOST: this.deps.run.dockerHost },
-			stdio: "ignore",
-		});
 	}
 
 	async start(botId: string, originMessageId: number, workflow: string, title: string, brief: string): Promise<string> {
@@ -118,59 +147,24 @@ export class TaskManager {
 		// Ids from rowid, like sticker short ids: stable and race-free.
 		const taskId = `t${lastInsertRowid}`;
 		this.deps.db.query("UPDATE tasks SET task_id = ? WHERE rowid = ?").run(taskId, lastInsertRowid);
-		const run = new TaskProcess(
-			taskId,
-			botId,
-			this.deps.run,
-			{
-				onUsage: (usage) =>
-					this.deps.db
-						.query(
-							`INSERT INTO task_usage (task_id, bot_id, ts, provider, model, input_tokens, output_tokens, cache_read, cache_write, cost)
-							 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-						)
-						.run(
-							taskId,
-							botId,
-							Date.now(),
-							usage.provider,
-							usage.model,
-							usage.input,
-							usage.output,
-							usage.cacheRead,
-							usage.cacheWrite,
-							usage.cost,
-						),
-				onReport: (kind, text, files) => this.onReport(taskId, kind, text, files),
-				onSettled: (lastText) => this.onSettled(taskId, lastText),
-				onExit: (code) => this.onExit(taskId, code),
-			},
-			this.deps.spawner,
-		);
+		const task = this.track(taskId, botId, now);
 		try {
-			await box.extractTar(run.workdir, await (this.deps.packWorkflow ?? packWorkflowDir)(dir));
+			await box.extractTar(task.process.workdir, await (this.deps.packWorkflow ?? packWorkflowDir)(dir));
 		} catch (error) {
+			clearTimeout(task.timer);
+			this.live.delete(taskId);
 			this.setStatus(taskId, "failed");
 			throw new TaskError(`could not prepare the task: ${(error as Error).message}`);
 		}
-		const timer = setTimeout(() => this.fail(taskId, "超过时间上限，已停止。"), this.deps.config.timeoutMs);
-		timer.unref?.();
-		this.live.set(taskId, {
-			process: run,
-			agentRunning: true,
-			lastProgressAt: now,
-			pendingProgress: [],
-			timer,
-			terminal: false,
-		});
-		run.start(`${brief}\n\n（任务标题：${title}。完成时调用 report，kind 为 done。）`);
+		task.process.start(`${brief}\n\n（任务标题：${title}。完成时调用 report，kind 为 done。）`);
 		log.info("tasks", "task_started", { bot_id: botId, task_id: taskId, workflow });
 		return taskId;
 	}
 
 	message(botId: string, taskId: string, text: string): void {
 		const task = this.ownLive(botId, taskId);
-		task.process.message(text, task.agentRunning);
+		if (!task.process.started) task.process.start(text);
+		else task.process.message(text, task.agentRunning);
 		task.agentRunning = true;
 		this.setStatus(taskId, "running");
 	}
@@ -182,8 +176,58 @@ export class TaskManager {
 		task.process.cancel();
 	}
 
+	/** Daemon shutdown: stop the containers but keep the tasks resumable. */
 	stopAll(): void {
+		this.stopping = true;
 		for (const task of this.live.values()) task.process.cancel();
+	}
+
+	private track(taskId: string, botId: string, createdAt: number): Live {
+		const process = new TaskProcess(
+			taskId,
+			botId,
+			this.deps.run,
+			{
+				onUsage: (usage) => this.recordUsage(taskId, botId, usage),
+				onReport: (kind, text, files) => this.onReport(taskId, kind, text, files),
+				onSettled: (lastText) => this.onSettled(taskId, lastText),
+				onExit: (code) => this.onExit(taskId, code),
+			},
+			this.deps.spawner,
+		);
+		const remaining = Math.max(5 * 60_000, createdAt + this.deps.config.timeoutMs - Date.now());
+		const timer = setTimeout(() => this.fail(taskId, "超过时间上限，已停止。"), remaining);
+		timer.unref?.();
+		const task: Live = {
+			process,
+			agentRunning: true,
+			lastProgressAt: Date.now(),
+			pendingProgress: [],
+			timer,
+			terminal: false,
+		};
+		this.live.set(taskId, task);
+		return task;
+	}
+
+	private recordUsage(taskId: string, botId: string, usage: TaskUsage): void {
+		this.deps.db
+			.query(
+				`INSERT INTO task_usage (task_id, bot_id, ts, provider, model, input_tokens, output_tokens, cache_read, cache_write, cost)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				taskId,
+				botId,
+				Date.now(),
+				usage.provider,
+				usage.model,
+				usage.input,
+				usage.output,
+				usage.cacheRead,
+				usage.cacheWrite,
+				usage.cost,
+			);
 	}
 
 	private ownLive(botId: string, taskId: string): Live {
@@ -277,7 +321,7 @@ export class TaskManager {
 		const task = this.live.get(taskId);
 		if (!task) return;
 		clearTimeout(task.timer);
-		if (!task.terminal) this.fail(taskId, `任务进程意外退出（code ${code ?? "?"}）。`);
+		if (!task.terminal && !this.stopping) this.fail(taskId, `任务进程意外退出（code ${code ?? "?"}）。`);
 		this.live.delete(taskId);
 	}
 }

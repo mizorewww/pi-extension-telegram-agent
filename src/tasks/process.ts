@@ -1,5 +1,5 @@
 // One task run: a throwaway container from the work-box image running Pi in RPC mode inside
-// the bot's /work volume, with the task Pi home (credentials, settings) mounted at /pi-agent.
+// the bot's /work volume (its Pi session included), with the task Pi home (credentials, settings) mounted at /pi-agent.
 // The daemon only reads the RPC event stream: `report` tool calls are the task's messages to
 // the bot, `agent_settled` ends a run. Threat model: docs/architecture.md "任务威胁模型".
 
@@ -111,10 +111,19 @@ export class TaskProcess {
 			"/opt/tg-task-bridge/index.ts",
 			"--mode",
 			"rpc",
-			"--no-session",
+			// The session lives in the task dir, so a restarted daemon resumes the same run.
+			"--session-dir",
+			`${this.workdir}/.pi-sessions`,
+			"--session-id",
+			this.taskId,
 		];
 	}
 
+	get started(): boolean {
+		return this.child != null;
+	}
+
+	/** Start the container and send the first prompt of this run. */
 	start(brief: string): void {
 		const child = this.spawner("docker", this.runArgs(), {
 			PATH: process.env.PATH ?? "/usr/bin:/bin",
