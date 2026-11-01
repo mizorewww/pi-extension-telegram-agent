@@ -79,8 +79,9 @@ provider 没有返回 cache 用量时，若同一 cache cohort（provider/api/mo
 
 ## 版本记录
 
-当前：**33**。更早的版本见 git 历史。
+当前：**34**。更早的版本见 git 历史。
 
+- **v34**：系统提示的「可用工具」按开启的工具逐个给出用法（send / search / view_image / codemode / 工作区 / task），新增「你自己」一节（源代码仓库与阅读方式）；共享协议说明 `[message_edit]`、`[media_update]`、`[task …]`、`[系统]` 行的含义；脚本工具描述补充用法。
 - **v33**：后台任务：model-only `task` 工具（workflow 选项来自配置，golden `taskTool`）、`note` 事件 grammar（serializer v6）、系统提示的 task 摘要。
 - **v32**：带工作区的 bot 的 `send` 声明多出 `files`（golden `sendWithFiles`），系统提示多一句工作区说明；没有工作区的 bot 字节不变。
 - **v31**：codemode 脚本工具新增 `tg_download`、`sh_exec`、`sh_reset`（`tools.sandbox` 开启时注册；fingerprint 只含实际注册的脚本工具）。

@@ -37,12 +37,12 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 33,
-	systemZhTemplate: "2e5bf4023481",
-	systemEnTemplate: "692c40e98b9c",
+	schemaVersion: 34,
+	systemZhTemplate: "bd37b8a338f2",
+	systemEnTemplate: "4a9f3ceaaa95",
 	eventSerialize: "a05c0584eb08",
 	tools: "3bd9368f55d6",
-	codemodeTools: "b982c9c0ace3",
+	codemodeTools: "42539ec2849b",
 	sendWithFiles: "d888994aa0b7",
 	taskTool: "f5343a7cbdb5",
 	compactionPrompt: "04da95f62da0",
@@ -101,6 +101,8 @@ test("prompt, tool and protocol hashes are stable", () => {
 	expect(sendOnly).toContain("你有一个工具：send");
 	expect(sendOnly).not.toContain("search（");
 	expect(sendOnly).toContain("你不能联网搜索");
+	for (const missing of ["### codemode", "sh_exec", "view_image", "### task", "files"])
+		expect(sendOnly).not.toContain(missing);
 	expect(toolProtocolHash(TOOL_DEFS)).toBe(GOLDEN.tools);
 	expect(toolProtocolHash(CODEMODE_TOOL_DEFS)).toBe(GOLDEN.codemodeTools);
 	expect(toolProtocolHash([sendToolWithFiles()])).toBe(GOLDEN.sendWithFiles);

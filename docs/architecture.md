@@ -95,7 +95,7 @@ Telegram create 不可回滚，所以：
 
 ## 工具
 
-模型可见的声明固定为 `send`、`search`、`codemode`，顺序固定（cache 可见）。`src/agent/tools.ts` 是 `send`/`search` 说明与暴露方式（`TOOL_EXPOSURE`）的唯一权威；系统提示里的“可用工具”声明按 bot 实际开启的工具生成。
+系统提示的「可用工具」只描述 bot 实际开启的工具及其用法（`src/agent/prompt.ts` 的 `toolCapabilityDeclaration`），并给出源代码仓库地址供 bot 阅读自己的实现。模型可见的声明固定为 `send`、`search`、`codemode`，顺序固定（cache 可见）。`src/agent/tools.ts` 是 `send`/`search` 说明与暴露方式（`TOOL_EXPOSURE`）的唯一权威；系统提示里的“可用工具”声明按 bot 实际开启的工具生成。
 
 - `send` 是 `model-only`：只能由模型直接调用，codemode 脚本调不到，保证“每轮唯一一次 send、成功即结束”。
 - `search(query | url [, offset])`：TinyFish；query 最多 5 条短结果；url 只接受公网 HTTP(S)（本地预检 userinfo、localhost、私网、link-local），整页（≤200k 字符）在内存缓存 15 分钟，每次返回从 `offset` 起约 4k token 的一页并给出下一页 offset，包在“不可信网页内容”边界里。日志不记录 query、URL 路径或正文。脚本里也可调用。

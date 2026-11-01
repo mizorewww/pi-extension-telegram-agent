@@ -151,7 +151,7 @@ export const CODEMODE_TOOL_DEFS = [
 		name: "tg_messages",
 		label: "Messages",
 		description:
-			"Read this group's message history, newest first by default, including messages no longer in your context. Filter here, then refine in the script (regex, grouping, counting) and output only what you need. Page with next_before_id / next_after_id. Control commands are excluded.",
+			"Read this group's message history, newest first by default, including messages no longer in your context. Filter here, then refine in the script (regex, grouping, counting) and output only what you need. Page with next_before_id / next_after_id. Control commands are excluded. Each row's id is the #id you can use with reply_to, view_image or tg_download; media.description is the stored text description of its image or video.",
 		parameters: Type.Object(
 			{
 				ids: Type.Optional(
@@ -216,7 +216,7 @@ export const CODEMODE_TOOL_DEFS = [
 		name: "tg_download",
 		label: "Download",
 		description:
-			"Copy the photo, video, voice, audio or file attached to one message into your work box at /work/inbox, so sh_exec can process it. Telegram limits downloads to 20 MB.",
+			"Copy the photo, video, voice, audio or file attached to one message into your work box at /work/inbox/<message_id>.<ext>, so sh_exec can process it, then send the result back with send files. Telegram limits bot downloads to 20 MB.",
 		parameters: Type.Object(
 			{ message_id: Type.Integer({ description: "The #id of a message with an attachment" }) },
 			{ additionalProperties: false },
@@ -231,7 +231,7 @@ export const CODEMODE_TOOL_DEFS = [
 		name: "sh_exec",
 		label: "Shell",
 		description:
-			"Run a shell command in your own Linux work box (Debian; python3 with Pillow/numpy/requests, node/npm, ffmpeg, imagemagick, poppler-utils, jq, git, curl, CJK fonts; network on). Working directory and $HOME live under /work; files there persist until the weekly reset, and send can post them with files. The root filesystem is read-only, so install extras with pip install --user or npm install -g. Output is stdout+stderr combined.",
+			"Run a shell command in your own Linux work box (Debian; python3 with Pillow/numpy/requests, node/npm, ffmpeg, imagemagick, poppler-utils, jq, git, curl, CJK fonts; network on). Working directory and $HOME live under /work; files there persist until the weekly reset, and send can post them with files. The root filesystem is read-only, so install extras with pip install --user or npm install -g. Output is stdout+stderr combined. Each call is a fresh sh in /work (no state between calls except files); keep work under 120 s per call, and hand longer jobs to a background task if you have one.",
 		parameters: Type.Object(
 			{
 				command: Type.String({ minLength: 1, description: "Passed to sh -c in /work" }),
