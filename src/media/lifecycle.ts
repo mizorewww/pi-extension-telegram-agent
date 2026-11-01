@@ -72,32 +72,6 @@ const defaultRemove: NonNullable<MediaPruneOptions["remove"]> = (path) => {
 	}
 };
 
-/** Return only missing static-display files that still have an active configured-bot reference. */
-export function listReferencedMissingDisplayMediaIds(
-	db: Database,
-	configuredBotIds: readonly string[],
-	limit: number,
-): string[] {
-	const botIdsJson = configuredBotIdsJson(configuredBotIds);
-	if (!botIdsJson || limit <= 0) return [];
-	return (
-		db
-			.query(`
-				SELECT media.file_unique_id AS fileUniqueId
-				  FROM media
-				 WHERE media.local_path IS NULL
-				   AND (
-				     media.kind = 'photo'
-				     OR (media.kind = 'sticker' AND COALESCE(media.mime, 'image/webp') = 'image/webp')
-				   )
-				   AND ${ACTIVE_MEDIA_REFERENCE_SQL}
-				 ORDER BY media.rowid DESC
-				 LIMIT ?2
-			`)
-			.all(botIdsJson, Math.max(1, Math.floor(limit))) as Array<{ fileUniqueId: string }>
-	).map((row) => row.fileUniqueId);
-}
-
 /**
  * Delete a bounded batch of reproducible local media after compaction visibility is committed.
  * Derived context images (media.context_files) are removed together with their source file and

@@ -42,8 +42,6 @@ export type LocalMediaFailure =
 	| "empty_file"
 	| "download_oversize";
 
-export type LocalMediaCacheOutcome = "cached" | "ready" | "oversize" | "install_failed";
-
 export type LocalMediaResult =
 	| {
 			ok: true;
@@ -51,21 +49,10 @@ export type LocalMediaResult =
 			bytes: Uint8Array;
 			mimeType: SourceMediaMime;
 			sourceExtension: string;
+			/** The installed cache file; null only when installing it failed. */
 			sourcePath: string | null;
-			mediaPath: string | null;
-			cacheOutcome: LocalMediaCacheOutcome;
 	  }
 	| { ok: false; outcome: LocalMediaFailure };
-
-export type MediaBytesBucket = "unavailable" | "lt_32_kib" | "32_128_kib" | "128_512_kib";
-
-/** Bucket encoded byte size; the caller pins its own top-band label so telemetry bands never drift. */
-export function bytesBucket<TopBand extends string>(bytes: number, topBand: TopBand): MediaBytesBucket | TopBand {
-	if (bytes < 32 * 1024) return "lt_32_kib";
-	if (bytes < 128 * 1024) return "32_128_kib";
-	if (bytes < 512 * 1024) return "128_512_kib";
-	return topBand;
-}
 
 function writeExclusive(path: string, bytes: Uint8Array): void {
 	const fd = openSync(path, "wx", 0o600);
@@ -189,10 +176,7 @@ function readExisting(path: string): { bytes: Uint8Array; mimeType: SourceMediaM
 	try {
 		const stat = statSync(path);
 		if (!stat.isFile() || stat.size <= 0 || stat.size > MEDIA_DOWNLOAD_MAX_BYTES) return null;
-		const bytes = new Uint8Array(readFileSync(path));
-		if (bytes.byteLength !== stat.size || bytes.byteLength === 0 || bytes.byteLength > MEDIA_DOWNLOAD_MAX_BYTES)
-			return null;
-		return { bytes, mimeType, sourceExtension };
+		return { bytes: new Uint8Array(readFileSync(path)), mimeType, sourceExtension };
 	} catch {
 		return null;
 	}
@@ -245,9 +229,16 @@ export function dedupeInFlight<T>(
 	return promise;
 }
 
+let mediaReadySink: ((fileUniqueId: string, mediaPath: string) => void) | null = null;
+
+/** The daemon forwards each newly cached display image (vision or view_image fetched it) to the TUI. */
+export function setMediaReadySink(sink: (fileUniqueId: string, mediaPath: string) => void): void {
+	mediaReadySink = sink;
+}
+
 const inFlightByDb = new WeakMap<Database, Map<string, Promise<LocalMediaResult>>>();
 
-/** Share Telegram download and atomic cache installation across UI precache and view_image. */
+/** Share Telegram download and atomic cache installation across vision and view_image. */
 export function ensureLocalMedia(
 	db: Database,
 	api: MediaDownloadApi,
@@ -278,22 +269,10 @@ async function ensureLocalMediaInner(
 		return { ok: false, outcome: "media_unavailable" };
 	}
 	const kind = media.kind as LocalMediaKind;
-	const video = isVideoMedia(media.kind, media.mime);
 	if (media.local_path) {
 		const existingPath = resolveMediaSourcePath(cacheDir, media.local_path);
 		const existing = existingPath ? readExisting(existingPath) : null;
-		if (existing) {
-			const existingVideo = video || existing.mimeType.startsWith("video/");
-			const displayReady = !existingVideo && isDisplayReadyPath(existingPath);
-			return {
-				ok: true,
-				kind,
-				...existing,
-				sourcePath: existingPath,
-				mediaPath: displayReady ? existingPath : null,
-				cacheOutcome: displayReady || existingVideo ? "cached" : "oversize",
-			};
-		}
+		if (existing) return { ok: true, kind, ...existing, sourcePath: existingPath };
 	}
 
 	const source = downloadSource(db, api, botId, fileUniqueId, options.botApis);
@@ -309,7 +288,6 @@ async function ensureLocalMediaInner(
 	const mimeType = sourceMediaMimeForPath(remotePath);
 	const extension = normalizedSourceExtension(remotePath);
 	if (!mimeType || !extension) return { ok: false, outcome: "unsupported_format" };
-	const sourceVideo = video || mimeType.startsWith("video/");
 
 	let bytes: Uint8Array;
 	try {
@@ -320,18 +298,6 @@ async function ensureLocalMediaInner(
 	if (signal?.aborted) return { ok: false, outcome: "aborted" };
 	if (bytes.byteLength === 0) return { ok: false, outcome: "empty_file" };
 	if (bytes.byteLength > MEDIA_DOWNLOAD_MAX_BYTES) return { ok: false, outcome: "download_oversize" };
-	if (!sourceVideo && bytes.byteLength > MEDIA_CACHE_MAX_BYTES) {
-		return {
-			ok: true,
-			kind,
-			bytes,
-			mimeType,
-			sourceExtension: extension,
-			sourcePath: null,
-			mediaPath: null,
-			cacheOutcome: "oversize",
-		};
-	}
 
 	let sourcePath: string | null = null;
 	try {
@@ -349,25 +315,14 @@ async function ensureLocalMediaInner(
 				// The DB remains authoritative; cleanup failure is intentionally non-sensitive.
 			}
 		}
-		return {
-			ok: true,
-			kind,
-			bytes,
-			mimeType,
-			sourceExtension: extension,
-			sourcePath: null,
-			mediaPath: null,
-			cacheOutcome: "install_failed",
-		};
+		return { ok: true, kind, bytes, mimeType, sourceExtension: extension, sourcePath: null };
 	}
-	return {
-		ok: true,
-		kind,
-		bytes,
-		mimeType,
-		sourceExtension: extension,
-		sourcePath,
-		mediaPath: sourceVideo ? null : sourcePath,
-		cacheOutcome: "ready",
-	};
+	if (isDisplayReadyPath(resolveMediaCachePath(cacheDir, sourcePath))) {
+		try {
+			mediaReadySink?.(fileUniqueId, sourcePath);
+		} catch {
+			// The TUI preview is best effort; the cached file is already durable.
+		}
+	}
+	return { ok: true, kind, bytes, mimeType, sourceExtension: extension, sourcePath };
 }

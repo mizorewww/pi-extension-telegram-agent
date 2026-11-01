@@ -23,7 +23,7 @@ import { createSharedModelRuntime, PiModelConfigurationError, piAuthSource } fro
 import { parsePiModelReference } from "../agent/model-ref.ts";
 import { assertPiVisionExecutorReady, createPiVisionExecutor } from "../media/vision.ts";
 import { VisionScheduler } from "../media/vision-scheduler.ts";
-import { MediaCacheQueue } from "../media/media-cache.ts";
+import { setMediaReadySink } from "../media/local-cache.ts";
 import { composeDeployment, composePollers } from "./composition.ts";
 import { applyRetention, pruneUnconfiguredBotState } from "../db/retention.ts";
 import { log } from "../observability/log.ts";
@@ -222,18 +222,7 @@ ipc = new IpcServer(
 	(request) => manualSend.send(request),
 	(botId) => runtimes.get(botId)?.controlSnapshot(),
 );
-const mediaCache = new MediaCacheQueue(db, botApis, {
-	cacheDir: mediaDir,
-	onReady: (fileUniqueId, mediaPath) => ipc.broadcastMediaReady({ fileUniqueId, mediaPath }),
-	onTelemetry: (event) => {
-		log.info("media_cache", event.event, {
-			kind: event.kind,
-			outcome: event.outcome,
-			bytes_bucket: event.bytesBucket,
-			queue_depth: event.queueDepth,
-		});
-	},
-});
+setMediaReadySink((fileUniqueId, mediaPath) => ipc.broadcastMediaReady({ fileUniqueId, mediaPath }));
 for (const [botId, rt] of runtimes) {
 	rt.eventSink = (event) => {
 		ipc.broadcast({
@@ -250,7 +239,6 @@ for (const [botId, rt] of runtimes) {
 		const m = rawMsg as { chat: { id: number }; message_id: number };
 		const row = broadcastMessageRow(m.chat.id, m.message_id);
 		if (!row) return; // persistence failed: nothing durable to route
-		mediaCache.scheduleMessage(botId, row);
 		// Only agent sends reach this sink; control replies and TUI manual sends never route.
 		router.routeLocalSend(row);
 	};
@@ -272,8 +260,6 @@ for (const [botId, rt] of runtimes) {
 	rt.streamSink = (stream) => ipc.broadcastStream(stream);
 	rt.streamDemand = () => ipc.hasStreamListener(botId);
 }
-const mediaBackfillCount = mediaCache.scheduleBackfill();
-log.info("media_cache", "startup_scheduled", { scheduled: mediaBackfillCount, limit: 100, concurrency: 2 });
 
 const telegramControl = new TelegramControlCommandService(
 	db,
@@ -332,8 +318,6 @@ const pollers = composePollers(
 		if (command) await telegramControlCoordinator.handle(command);
 		else router.route(result, row);
 		ipc.broadcast(ipc.msgToItem(row));
-		// Poller offset + canonical row are durable before this non-blocking side effect.
-		mediaCache.scheduleMessage(botId, row);
 	},
 	async (update, botId) => {
 		const command = parseTelegramControlCallback(update, botId, config.groupChatId);
@@ -357,7 +341,6 @@ async function shutdown(signal: string, exitCode = 0) {
 	clearInterval(retentionTimer);
 	clearInterval(boxResetTimer);
 	taskManager?.stopAll();
-	const mediaCacheStop = mediaCache.stop();
 	const runtimeStops = await Promise.allSettled([...runtimes.values()].map((rt) => rt.stop()));
 	for (const [index, result] of runtimeStops.entries()) {
 		if (result.status === "rejected") {
@@ -369,7 +352,6 @@ async function shutdown(signal: string, exitCode = 0) {
 			});
 		}
 	}
-	await mediaCacheStop;
 	ipc.stop();
 	releasePidLock(config.dataDir);
 	// wait for the poller loops to actually exit; stop() aborts any in-flight long

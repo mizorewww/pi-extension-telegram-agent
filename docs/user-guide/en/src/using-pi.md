@@ -19,7 +19,7 @@ Press Tab after `/tg ` to complete subcommands and bots. The group view is local
 
 In the view you see:
 
-- group messages (images and stickers render inline on terminals that support images);
+- group messages (images and stickers the bot has looked at render inline on terminals that support images);
 - each bot's thinking, tool calls and send results (marked as local events; the group cannot see them);
 - text a bot wrote without calling send, which stays on your machine and is never posted;
 - a footer with Telegram's cumulative usage, the current context share and the model.
