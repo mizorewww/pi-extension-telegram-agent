@@ -10,7 +10,7 @@ provider prefix cache 是本项目的第一成本杠杆。本文是“哪些字�
 4. **每个请求都必须是下一个请求的严格前缀。** 生产数据显示，只要上一请求的末尾在下一请求里消失，provider 就要回退到更早的缓存点，每轮多 miss 一万多 token。所以不存在“只挂在最后一条”的动态尾部：每批消息的 sticker 附注（只列该批新出现、本 bot 能发、不在固定目录里的 sticker）存在 `details.stickerCandidates`，由 `context` 事件投影成紧跟**该批**的〔系统附注〕独立消息，之后永远原样保留；它**永不写入持久化 content**（compaction 直接读持久化字节）。
 5. 只有完整 context fingerprint 相同且 session 文件存在时才恢复 session；否则在打开旧 session **之前**新建 session、推进 epoch，旧文件保留。
 6. UI、IPC、日志、控制命令、本地媒体准备都不得改变 provider payload。
-7. 所有 provider 输入有界：每轮 suffix 默认 ≤12,000 token，单条消息 ≤4,096 token，网页正文 ≤2,048 token，每批 sticker 附注 ≤8 条。
+7. 所有 provider 输入有界：每轮 suffix 默认 ≤12,000 token，单条消息 ≤4,096 token，网页正文每页 ≤4,096 token（更多内容经 `offset` 分页读取），每批 sticker 附注 ≤8 条。
 
 ## 哪些东西是 cache-visible
 
@@ -37,7 +37,7 @@ golden 意外失败是报警：先查原因，不要直接改 expected。
 system:   共享协议 --- persona [--- sticker 目录]
 messages: Telegram 批次（custom message，各自后面可能跟一条〔系统附注〕sticker 附注）、
           assistant/tool/summary entries
-tools:    send, search[, codemode]（按 bot 开关过滤，顺序不变；codemode 声明由 Pi 渲染）
+tools:    send, search, view_image, task[, codemode]（按 bot 开关与媒体模式过滤，顺序不变；codemode 声明由 Pi 按脚本工具渲染）
 ```
 
 - context 模式下一批消息内部是 text|image 交错的内容块；没有图片时投影为纯字符串。

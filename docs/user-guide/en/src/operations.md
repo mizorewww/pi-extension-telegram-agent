@@ -22,6 +22,7 @@ Anyone:
 | `/help` | command help |
 | `/status` | this bot's state, context share, usage and cost |
 | `/fire status` | whether other bots' messages can trigger this bot, and how much budget is left |
+| `/task` | this bot's recent background tasks, their status and usage (only with `tools.tasks`) |
 
 Only people in `telegram_admins`:
 
@@ -33,7 +34,7 @@ Only people in `telegram_admins`:
 | `/set` | open a button menu to pick how often the bot joins in (0–1) and the pause after a spontaneous reply; takes effect at once |
 | `/fire on` / `/fire off` | let other bots' messages trigger this bot, or stop it; a bare `/fire` toggles |
 | `/box reset` | wipe this bot's work box now (only with `tools.sandbox`); it is also wiped every Monday at 05:00 |
-| `/task` | list this bot's background tasks or cancel one (only with `tools.tasks`; `/help` shows the exact syntax) |
+| `/task cancel t3` | stop a running background task (task ids are listed by `/task`) |
 
 - `/model` and `/set` are written back to `telegram.config.ts` and survive restarts.
 - While a bot is replying, `/model`, `/new` and `/compact` ask you to retry later instead of interrupting it.

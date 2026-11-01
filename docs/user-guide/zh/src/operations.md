@@ -22,6 +22,7 @@ bun run stop       # 停止
 | `/help` | 命令说明 |
 | `/status` | 这个 bot 的状态、上下文占比、用量与费用 |
 | `/fire status` | 其他 bot 的消息能否触发这个 bot，以及剩余次数 |
+| `/task` | 这个 bot 最近的后台任务、状态和用量（开了 `tools.tasks` 才有） |
 
 只有 `telegram_admins` 里的人可用：
 
@@ -33,7 +34,7 @@ bun run stop       # 停止
 | `/set` | 弹出按钮菜单，点选插话概率（0–1）和主动插话后的冷却时间，立即生效 |
 | `/fire on` / `/fire off` | 允许 / 禁止其他 bot 的消息触发这个 bot；不带参数的 `/fire` 切换开关 |
 | `/box reset` | 立即清空这个 bot 的工作区（开了 `tools.sandbox` 才有）；平时每周一 05:00 自动清空 |
-| `/task` | 查看这个 bot 的后台任务，或取消某个任务（开了 `tools.tasks` 才有，具体写法以 `/help` 为准） |
+| `/task cancel t3` | 停止一个正在运行的后台任务（任务编号见 `/task`） |
 
 - `/model`、`/set` 会写回 `telegram.config.ts`，重启后仍然有效。
 - bot 正在回复时，`/model`、`/new`、`/compact` 会提示稍后重试，不会打断回复。
