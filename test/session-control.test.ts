@@ -56,7 +56,7 @@ function fixture() {
 	reasoning_effort: "off",
 	compaction_model: "fixture/old:low",
 	context_window: 65536,
-	media: { mode: "context" },
+	media: { mode: "off" },
 	telegram_admins: [42],
 	bots: [
 		{

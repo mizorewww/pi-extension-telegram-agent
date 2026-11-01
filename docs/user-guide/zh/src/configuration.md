@@ -110,12 +110,11 @@ tasks: { workflows: { search: "~/pi-tasks/search" }, max_running: 2, timeout_min
 | 模式 | 方式 | 要求 |
 |---|---|---|
 | `"off"`（默认） | 只显示 `[图片]` 这类文字占位 | 无 |
-| `"context"` | 图片和视频截帧直接交给主模型 | 主模型支持图片输入 |
 | `"hybrid"` | 视觉模型（`media.vision_model`）把每张新图片/视频描述成文字一次，所有 bot 共用；bot 觉得描述不够时用 `view_image` 打开某条消息的原图或视频帧，被回复或检索到的旧消息也能看 | 主模型支持图片输入 |
 
-怎么选：图片多、想省钱用 `hybrid`，平时只付文字描述的费用，真正需要细看时才把图片交给主模型；希望每张图都被主模型直接看到用 `context`。
+想让 bot 看懂图片就用 `hybrid`：平时只付文字描述的费用，真正需要细看时才把原图交给主模型。
 
-`media.max_per_turn` 是每轮最多处理的新媒体数（context 默认 4，hybrid 默认 2），`media.concurrency` 是并行处理数（默认 2）。语音、音频、普通文件、TGS 动画贴纸在所有模式下都只是文字占位（开了 `sandbox` 的 bot 可以把文件拷进工作区处理）。视频需要主机装有 FFmpeg。
+`media.max_per_turn` 是每轮最多描述的新媒体数（默认 2），`media.concurrency` 是并行处理数（默认 2）。语音、音频、普通文件、TGS 动画贴纸在所有模式下都只是文字占位（开了 `sandbox` 的 bot 可以把文件拷进工作区处理）。视频需要主机装有 FFmpeg。
 
 ## 上限与默认值
 

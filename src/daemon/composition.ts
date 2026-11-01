@@ -58,10 +58,5 @@ export function composePollers(
 	onMessage: MessageHandler,
 	onCallback?: CallbackHandler,
 ): Poller[] {
-	// media_update deltas (persisted vision descriptions) exist only in vision mode; context mode
-	// attaches image blocks to the message event itself and never injects description text.
-	const emitMediaUpdates = config.media.mode !== "context";
-	return config.bots.map(
-		(bot) => new Poller(db, bot.id, bot.token, config.groupChatId, onMessage, emitMediaUpdates, onCallback),
-	);
+	return config.bots.map((bot) => new Poller(db, bot.id, bot.token, config.groupChatId, onMessage, onCallback));
 }

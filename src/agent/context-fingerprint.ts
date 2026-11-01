@@ -16,7 +16,7 @@ export interface ContextFingerprintInput {
 	compactionPromptSha256: string;
 	compactionModel: string;
 	stickerCatalogSnapshotSha256: string;
-	/** Media handling mode ("vision" | "context"); changes placeholder semantics and payload shape. */
+	/** Media handling mode ("off" | "hybrid"); changes placeholder semantics and payload shape. */
 	mediaMode: string;
 	extensionOrder: readonly string[];
 	tools: readonly { name: string; description: string; parameters: unknown }[];

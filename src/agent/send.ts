@@ -28,7 +28,6 @@ interface AgentSendContext {
 	api: BotApi;
 	botId: string;
 	chatId: number;
-	emitMediaUpdates: boolean;
 	/** The group's narrowed reaction set; null when every standard reaction is allowed. */
 	allowedReactions: ReadonlySet<string> | null;
 	/** The bot's work box; `files` are only accepted when it has one. */
@@ -335,7 +334,7 @@ async function sendAttempt(requested: SendParams, context: AgentSendContext) {
 		}
 		for (const raw of raws) {
 			try {
-				await persistSentMessageWithRetry(context.db, context.botId, raw, "file", context.emitMediaUpdates);
+				await persistSentMessageWithRetry(context.db, context.botId, raw, "file");
 				await committed("file", raw, null, "file_sent");
 			} catch (error) {
 				await committed("file", raw, (error as SentMessagePersistenceError).cause, "file_sent");
@@ -350,7 +349,7 @@ async function sendAttempt(requested: SendParams, context: AgentSendContext) {
 			return await createFailed("sticker", error);
 		}
 		try {
-			await persistSentMessageWithRetry(context.db, context.botId, raw, "sticker", context.emitMediaUpdates);
+			await persistSentMessageWithRetry(context.db, context.botId, raw, "sticker");
 			await committed("sticker", raw, null);
 		} catch (error) {
 			await committed("sticker", raw, (error as SentMessagePersistenceError).cause);

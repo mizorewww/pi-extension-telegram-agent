@@ -8,7 +8,7 @@ import type { ContextMediaImage } from "../../media/context-media.ts";
 import { SEND_NO_RETRY_ACK, SEND_SUCCESS_ACK } from "../tools.ts";
 
 export const TELEGRAM_CONTEXT_TYPE = "telegram_context_v2";
-export const TELEGRAM_CONTEXT_VERSION = 4;
+export const TELEGRAM_CONTEXT_VERSION = 5;
 
 export interface TelegramContextEventRef {
 	ingestSeq: number;
@@ -18,38 +18,25 @@ export interface TelegramContextEventRef {
 	fullMessageVisible: boolean;
 }
 
-/**
- * Provider-bound content block. Text blocks carry rendered Telegram grammar; image blocks
- * reference prepared files by cache-relative basename only — base64 bytes are materialized at
- * projection time and never persisted in the session, the DB, or logs.
- */
-export type TelegramContextBlock = { type: "text"; text: string } | { type: "image"; name: string; mime: string };
-
 export interface TelegramContextDetails {
 	version: typeof TELEGRAM_CONTEXT_VERSION;
 	consumedSeq: number;
 	providerText: string;
-	blocks: TelegramContextBlock[];
 	stickerCandidates: string;
 	visibleMessageIds: number[];
 	events: TelegramContextEventRef[];
 }
 
-function isValidBlock(block: unknown): block is TelegramContextBlock {
-	if (!block || typeof block !== "object") return false;
-	const value = block as Partial<TelegramContextBlock>;
-	if (value.type === "text") return typeof (value as { text?: unknown }).text === "string";
-	if (value.type === "image") {
-		const image = value as { name?: unknown; mime?: unknown };
-		return (
-			typeof image.name === "string" &&
-			image.name.length > 0 &&
-			!image.name.includes("/") &&
-			!image.name.includes("\0") &&
-			typeof image.mime === "string"
-		);
-	}
-	return false;
+/** A prepared image file referenced by cache-relative basename; bytes join only at projection. */
+function isImageRef(value: unknown): value is ContextMediaImage {
+	const image = value as { name?: unknown; mime?: unknown } | null;
+	return (
+		typeof image?.name === "string" &&
+		image.name.length > 0 &&
+		!image.name.includes("/") &&
+		!image.name.includes("\0") &&
+		typeof image.mime === "string"
+	);
 }
 
 export function isTelegramContextDetails(value: unknown): value is TelegramContextDetails {
@@ -60,8 +47,6 @@ export function isTelegramContextDetails(value: unknown): value is TelegramConte
 		Number.isSafeInteger(details.consumedSeq) &&
 		(details.consumedSeq as number) >= 0 &&
 		typeof details.providerText === "string" &&
-		Array.isArray(details.blocks) &&
-		details.blocks.every(isValidBlock) &&
 		typeof details.stickerCandidates === "string" &&
 		Array.isArray(details.visibleMessageIds) &&
 		details.visibleMessageIds.every((id) => Number.isSafeInteger(id) && id > 0) &&
@@ -90,11 +75,7 @@ export interface ViewImageDetails {
 function isViewImageDetails(value: unknown): value is ViewImageDetails {
 	if (!value || typeof value !== "object") return false;
 	const details = value as Partial<ViewImageDetails>;
-	return (
-		Number.isSafeInteger(details.messageId) &&
-		Array.isArray(details.images) &&
-		details.images.every((image) => isValidBlock({ type: "image", ...image }))
-	);
+	return Number.isSafeInteger(details.messageId) && Array.isArray(details.images) && details.images.every(isImageRef);
 }
 
 /** Image refs of a successful view_image tool result message, else null. */
@@ -103,28 +84,15 @@ export function viewImageRefs(message: AgentMessage): ViewImageDetails | null {
 	return isViewImageDetails(message.details) ? message.details : null;
 }
 
-/** Image refs carried by one session entry: a Telegram batch or a view_image result. */
-export function entryImageRefs(entry: SessionEntry): readonly { name: string; mime: string }[] {
-	if (entry.type === "custom_message" && entry.customType === TELEGRAM_CONTEXT_TYPE) {
-		if (!isTelegramContextDetails(entry.details)) return [];
-		return entry.details.blocks.filter((block) => block.type === "image");
-	}
-	if (entry.type === "message") return viewImageRefs(entry.message)?.images ?? [];
-	return [];
+/** Image refs carried by one session entry: only view_image results hold images. */
+export function entryImageRefs(entry: SessionEntry): readonly ContextMediaImage[] {
+	return entry.type === "message" ? (viewImageRefs(entry.message)?.images ?? []) : [];
 }
 
 /** File bytes per image occurrence in the active Pi context, before base64 encoding. */
-export function contextImageBytes(
-	entries: readonly SessionEntry[],
-	mediaDir: string,
-	pending?: TelegramContextDetails,
-): number {
+export function contextImageBytes(entries: readonly SessionEntry[], mediaDir: string): number {
 	let bytes = 0;
-	const refs = [
-		...(pending?.blocks.filter((block) => block.type === "image") ?? []),
-		...entries.flatMap((entry) => entryImageRefs(entry)),
-	];
-	for (const ref of refs) {
+	for (const ref of entries.flatMap((entry) => entryImageRefs(entry))) {
 		try {
 			bytes += statSync(join(mediaDir, ref.name)).size;
 		} catch {
@@ -132,22 +100,6 @@ export function contextImageBytes(
 		}
 	}
 	return bytes;
-}
-
-/** Assemble provider-bound blocks from packed segments, merging adjacent text. */
-export function buildTelegramContextBlocks(
-	segments: readonly { text: string; images: readonly ContextMediaImage[] }[],
-): TelegramContextBlock[] {
-	const blocks: TelegramContextBlock[] = [];
-	for (const segment of segments) {
-		if (segment.text) {
-			const last = blocks.at(-1);
-			if (last?.type === "text") last.text += `\n${segment.text}`;
-			else blocks.push({ type: "text", text: segment.text });
-		}
-		for (const image of segment.images) blocks.push({ type: "image", name: image.name, mime: image.mime });
-	}
-	return blocks;
 }
 
 /** Resolve one image reference to a provider block; null drops it (pruned/missing file). */
@@ -193,11 +145,10 @@ export function projectTelegramContext(
 		}
 		if (message.role !== "custom" || message.customType !== TELEGRAM_CONTEXT_TYPE) return [message];
 		if (!isTelegramContextDetails(message.details)) return [message];
-		const projected = { ...message, content: projectContent(message.details, resolveImage) };
 		const candidates = includeStickerCandidates ? message.details.stickerCandidates.trim() : "";
-		if (!candidates) return [projected];
+		if (!candidates) return [message];
 		return [
-			projected,
+			message,
 			{
 				role: "custom",
 				customType: TELEGRAM_STICKER_CANDIDATES_TYPE,
@@ -207,22 +158,6 @@ export function projectTelegramContext(
 			},
 		];
 	});
-}
-
-function projectContent(
-	details: TelegramContextDetails,
-	resolveImage?: TelegramContextImageResolver,
-): string | ({ type: "text"; text: string } | ImageContent)[] {
-	if (!resolveImage || !details.blocks.some((block) => block.type === "image")) return details.providerText;
-	const content: ({ type: "text"; text: string } | ImageContent)[] = [];
-	for (const block of details.blocks) {
-		if (block.type === "text") content.push({ type: "text", text: block.text });
-		else {
-			const resolved = resolveImage({ name: block.name, mime: block.mime });
-			if (resolved) content.push(resolved);
-		}
-	}
-	return content;
 }
 
 export function makeTelegramContextExtension(

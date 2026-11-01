@@ -110,12 +110,11 @@ tasks: { workflows: { search: "~/pi-tasks/search" }, max_running: 2, timeout_min
 | Mode | How | Needs |
 |---|---|---|
 | `"off"` (default) | text placeholders such as `[photo]` only | nothing |
-| `"context"` | images and video frames go straight to the main model | a main model with image input |
 | `"hybrid"` | a vision model (`media.vision_model`) describes each new image or video once as text, shared by all bots; when a description is not enough, the bot calls `view_image` to open one message's actual image or video frames, including replied-to or searched older messages | a main model with image input |
 
-Which one: with many images or a tight budget, use `hybrid`, which pays only for text descriptions until the bot really needs to look; use `context` if the main model should see every image directly.
+Use `hybrid` when the bot should understand images: it pays only for text descriptions until the bot really needs to look at the original.
 
-`media.max_per_turn` caps new media handled per turn (4 by default for context, 2 for hybrid) and `media.concurrency` caps parallel jobs (default 2). Voice, audio, ordinary files and TGS animated stickers are placeholders in every mode (a bot with `sandbox` can copy files into its box and work on them). Videos require FFmpeg on the host.
+`media.max_per_turn` caps new media described per turn (default 2) and `media.concurrency` caps parallel jobs (default 2). Voice, audio, ordinary files and TGS animated stickers are placeholders in every mode (a bot with `sandbox` can copy files into its box and work on them). Videos require FFmpeg on the host.
 
 ## Limits and defaults
 

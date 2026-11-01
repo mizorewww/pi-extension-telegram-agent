@@ -1,8 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { MediaUpdatePayload, MessageEvent, NotePayload } from "../db/message-events.ts";
-import type { ContextMediaImage } from "../media/context-media.ts";
-import type { MessageRow, SerializeOptions, SerializedEventSegment } from "./serialize.ts";
-import { replySnapshot, serializeMessageEvents, serializeMessageEventSegments } from "./serialize.ts";
+import type { MessageRow, SerializeOptions } from "./serialize.ts";
+import { replySnapshot, serializeMessageEvents } from "./serialize.ts";
 import type { ReplySnapshot } from "../telegram/normalize.ts";
 
 export const DEFAULT_SUFFIX_TOKEN_BUDGET = 12_000;
@@ -13,7 +12,7 @@ export const DEFAULT_REASONING_RESERVE = 4_096;
 export const DEFAULT_SAFETY_MARGIN = 2_048;
 
 /**
- * Fixed per-image budget charge for context media. Measured against the production endpoint
+ * Fixed per-image budget charge for viewed images. Measured against the production endpoint
  * (a 1px PNG cost ~1_100 prompt tokens); providers bill images by tiles/patches, so a flat
  * conservative constant keeps packing deterministic without inspecting each payload.
  */
@@ -107,41 +106,16 @@ export function capMessageEvent(event: MessageEvent, maxTokens = DEFAULT_MESSAGE
 	};
 }
 
-export interface PackedEventSegment {
-	event: MessageEvent;
-	text: string;
-	/** Prepared context images anchored to this event's message (empty when text-only). */
-	images: ContextMediaImage[];
-}
-
 export interface PackedMessageEvents {
 	events: MessageEvent[];
-	/** Chronological per-event segments; joined text equals `text`. */
-	segments: PackedEventSegment[];
 	text: string;
 	estimatedTokens: number;
 	visibleMessageIds: number[];
 	deferredMandatory: number;
-	imagesAttached: number;
-}
-
-export interface PackMediaOptions {
-	/** Prepared context images for a media identity; null/empty means text-only placeholder. */
-	refs: (fileUniqueId: string) => ContextMediaImage[] | null;
-	/** Total images this pack may attach across all events. */
-	maxImages: number;
 }
 
 function eventKey(event: MessageEvent): string {
 	return `${event.kind}:${event.chatId}:${event.messageId}:${event.revision}:${event.ingestSeq}`;
-}
-
-function mediaFileUniqueId(event: MessageEvent): string | null {
-	if (event.kind !== "message") return null;
-	const row = event.payload as MessageRow;
-	if (!row.media) return null;
-	const media = JSON.parse(row.media) as { file_unique_id?: string };
-	return typeof media.file_unique_id === "string" && media.file_unique_id ? media.file_unique_id : null;
 }
 
 /** Mandatory direct replies first, then newest ordinary events; output is chronological. */
@@ -152,13 +126,10 @@ export function packMessageEvents(
 	budgetTokens: number,
 	serializeOptions: SerializeOptions,
 	messageTokenCap = DEFAULT_MESSAGE_TOKEN_CAP,
-	media?: PackMediaOptions,
 ): PackedMessageEvents {
 	const selected: MessageEvent[] = [];
 	const selectedKeys = new Set<string>();
-	const selectedImages = new Map<string, ContextMediaImage[]>();
 	let remaining = Math.max(512, budgetTokens);
-	let imagesAttached = 0;
 	let deferredMandatory = 0;
 	const trySelect = (source: MessageEvent, required: boolean): boolean => {
 		const key = eventKey(source);
@@ -171,20 +142,6 @@ export function packMessageEvents(
 		let event = capMessageEvent(source, messageTokenCap);
 		let rendered = serializeMessageEvents(db, [event], { visibleIds: new Set(serializeOptions.visibleIds) });
 		let tokens = estimateProviderTokensUpperBound(rendered);
-		let images: ContextMediaImage[] = [];
-		const fileUniqueId = media ? mediaFileUniqueId(event) : null;
-		if (media && fileUniqueId) {
-			const refs = media.refs(fileUniqueId) ?? [];
-			const allowed = Math.min(refs.length, media.maxImages - imagesAttached);
-			images = allowed > 0 ? refs.slice(0, allowed) : [];
-		}
-		const withImages = tokens + images.length * CONTEXT_IMAGE_TOKEN_ESTIMATE;
-		if (images.length > 0 && withImages <= remaining) {
-			tokens = withImages;
-		} else {
-			// Over budget (or over the per-turn image cap): the event still enters text-only.
-			images = [];
-		}
 		if (required && selected.length === 0 && tokens > remaining) {
 			const header = serializeMessageEvents(db, [capMessageEvent(source, 0)], {
 				visibleIds: new Set(serializeOptions.visibleIds),
@@ -194,15 +151,10 @@ export function packMessageEvents(
 			event = capMessageEvent(source, Math.min(messageTokenCap, bodyBudget));
 			rendered = serializeMessageEvents(db, [event], { visibleIds: new Set(serializeOptions.visibleIds) });
 			tokens = estimateProviderTokensUpperBound(rendered);
-			// A force-capped mandatory event is already degraded; keep it text-only so the
-			// image charge can never push it back over the remaining budget.
-			images = [];
 		}
 		if (tokens > remaining) return false;
 		selected.push(event);
 		selectedKeys.add(key);
-		if (images.length > 0) selectedImages.set(key, images);
-		imagesAttached += images.length;
 		remaining -= tokens;
 		return true;
 	};
@@ -214,27 +166,15 @@ export function packMessageEvents(
 		trySelect(normal[index]!, false);
 	}
 	selected.sort((left, right) => left.ingestSeq - right.ingestSeq || left.eventDate - right.eventDate);
-	const visibleBefore = new Set(serializeOptions.visibleIds);
-	const rendered = serializeMessageEventSegments(db, selected, { visibleIds: visibleBefore });
-	const segments: PackedEventSegment[] = rendered.map((segment: SerializedEventSegment) => ({
-		event: segment.event,
-		text: segment.text,
-		images: selectedImages.get(eventKey(segment.event)) ?? [],
-	}));
-	const text = segments
-		.map((segment) => segment.text)
-		.filter(Boolean)
-		.join("\n");
+	const text = serializeMessageEvents(db, selected, { visibleIds: new Set(serializeOptions.visibleIds) });
 	const visibleMessageIds = selected
 		.filter((event) => event.kind === "message" || event.kind === "edit")
 		.map((event) => event.messageId);
 	return {
 		events: selected,
-		segments,
 		text,
-		estimatedTokens: estimateProviderTokensUpperBound(text) + imagesAttached * CONTEXT_IMAGE_TOKEN_ESTIMATE,
+		estimatedTokens: estimateProviderTokensUpperBound(text),
 		visibleMessageIds: [...new Set(visibleMessageIds)],
 		deferredMandatory,
-		imagesAttached,
 	};
 }

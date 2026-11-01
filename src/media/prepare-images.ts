@@ -1,8 +1,8 @@
-// Shared image preparation for both media modes: Telegram identity -> bounded provider-ready
+// Shared image preparation for vision and view_image: Telegram identity -> bounded provider-ready
 // images. Photos and static stickers become one PNG/JPEG (WebP/GIF via Pi convertToPng, then
 // Pi resizeImage with one fixed bound); videos and video stickers are sampled into 1-3 JPEG
 // frames by ffmpeg (already bounded to 1280px). Vision sends the result to completeSimple;
-// context mode installs it as derived cache files. No provider call happens here.
+// view_image installs it as derived cache files. No provider call happens here.
 
 import type { Database } from "bun:sqlite";
 import { convertToPng, resizeImage } from "@earendil-works/pi-coding-agent";
@@ -22,7 +22,7 @@ import {
 } from "./video-frames.ts";
 
 /**
- * Prepared images ride provider payloads as base64 (context mode) or a single vision request,
+ * Prepared images ride provider payloads as base64 (view_image) or a single vision request,
  * so the encoded size is bounded hard: 1024px / ~200KB keeps content readable while a
  * photo-heavy group cannot balloon one request body into tens of MB.
  */

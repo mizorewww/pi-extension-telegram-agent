@@ -1,7 +1,7 @@
 // Daemon entry: long-running core. Owns SQLite, pollers, (later) agents, IPC server.
 // Started by `src/main.ts start` (detached) or directly with `bun run src/daemon/index.ts`.
 
-import { loadConfig, mediaNeedsImageInput, mediaUsesVision } from "../config.ts";
+import { loadConfig } from "../config.ts";
 import { openDb, getDaemonState, setDaemonState } from "../db/db.ts";
 import { BotApi } from "../telegram/api.ts";
 import { BotRuntime } from "../agent/runtime.ts";
@@ -39,7 +39,7 @@ const config = loadConfig(rootDir);
 // (REQ-OPS-0001 R4). Released on shutdown; stale pid files are taken over.
 acquirePidLock(config.dataDir);
 const videoTranscoder = inspectVideoTranscoder();
-// Frame sampling matters in both media modes: vision descriptions and context-mode image blocks.
+// Frame sampling feeds vision descriptions and view_image.
 const mediaNeedsFrames = config.media.mode !== "off";
 if (mediaNeedsFrames && (!videoTranscoder.ffmpeg || !videoTranscoder.ffprobe)) {
 	log.warn("media_transcoder", "tools_unavailable", {
@@ -52,9 +52,8 @@ if (mediaNeedsFrames && (!videoTranscoder.ffmpeg || !videoTranscoder.ffprobe)) {
 	});
 }
 // loadConfig already canonicalizes model references (config.ts), so values from config always parse.
-// The auxiliary visual model describes media in describe and hybrid modes; context mode feeds
-// images to the chat model directly.
-const visualModel = mediaUsesVision(config.media.mode) ? parsePiModelReference(config.media.visionModel)! : null;
+// Hybrid mode describes media with the auxiliary vision model.
+const visualModel = config.media.mode === "hybrid" ? parsePiModelReference(config.media.visionModel)! : null;
 const chatModels = config.bots.map((bot) => ({
 	provider: bot.provider,
 	model: bot.model,
@@ -72,7 +71,7 @@ const { sharedModelRuntime, sharedVisionExecutor } = await (async () => {
 			...compactionModels,
 			...(visualModel ? [{ ...visualModel, purpose: "vision" }] : []),
 		]);
-		if (mediaNeedsImageInput(config.media.mode)) {
+		if (config.media.mode === "hybrid") {
 			// Context and hybrid media attach image blocks; a chat model without image input would
 			// silently degrade every viewed photo/sticker/video to a bare placeholder, so fail fast.
 			for (const bot of chatModels) {

@@ -89,7 +89,6 @@ test("send with a missing box file fails before anything reaches Telegram", asyn
 				api: api as never,
 				botId: "A",
 				chatId: -1001,
-				emitMediaUpdates: false,
 				allowedReactions: null,
 				box: new WorkBox("A", CONFIG, docker),
 				triggerMessageId: null,

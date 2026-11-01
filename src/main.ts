@@ -17,8 +17,7 @@ function report(result: DaemonControlResult): void {
 function reportAdvisory(): void {
 	try {
 		const config = loadConfig(rootDir);
-		// Frame sampling matters whenever media reaches a model: vision descriptions or
-		// context-mode image blocks.
+		// Frame sampling matters whenever media reaches a model: vision descriptions or view_image.
 		const advisory = videoTranscoderAdvisory(config.media.mode !== "off", inspectVideoTranscoder());
 		if (advisory) console.warn(advisory);
 	} catch {

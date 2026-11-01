@@ -1,9 +1,7 @@
-// Context media preparation: turn a Telegram media identity into bounded image files the main
-// model can see directly (no auxiliary vision model, no text descriptions). Image bytes come
-// from the shared prepare-images pipeline; this module only installs them in the media cache dir
-// next to the source download and records them in media.context_files so pruning and context
-// packing share one source of truth. voice / audio / non-video document / TGS stickers never
-// produce images.
+// Image files for view_image: turn a Telegram media identity into bounded images the main model
+// sees directly. Bytes come from the shared prepare-images pipeline; this module installs them in
+// the media cache dir and records them in media.context_files, so pruning and projection share
+// one source of truth. voice / audio / non-video document / TGS stickers never produce images.
 
 import type { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";

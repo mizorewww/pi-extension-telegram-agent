@@ -52,7 +52,6 @@ test("all mentions outrank replies regardless of bot ordering, including caption
 			"A",
 			{ update_id: caption ? 2 : 1, message: { ...addressed, message_id: caption ? 2 : 1 } },
 			chatId,
-			true,
 		);
 		const row = db.query("SELECT * FROM messages WHERE message_id = ?").get(caption ? 2 : 1) as MessageRow;
 		for (const order of [bots, [...bots].reverse()]) {
@@ -90,18 +89,11 @@ test("operator timeouts remain unknown outcomes and request replay never repeats
 test("routing handoff survives a failed handler and restart before another Telegram poll", async () => {
 	const { Poller } = await import("../src/telegram/poller.ts");
 	let attempts = 0;
-	const first = new Poller(
-		db,
-		"A",
-		"unused",
-		chatId,
-		async () => {
-			attempts++;
-			first.stop();
-			throw new Error("route storage unavailable");
-		},
-		true,
-	);
+	const first = new Poller(db, "A", "unused", chatId, async () => {
+		attempts++;
+		first.stop();
+		throw new Error("route storage unavailable");
+	});
 	(first as any).api = {
 		getUpdates: async () => [
 			{
@@ -120,18 +112,11 @@ test("routing handoff survives a failed handler and restart before another Teleg
 	applyRetention(db, { telemetryDays: 1, rawUpdateDays: 1, messageEventDays: 1 }, Date.now() + 2 * 86400000);
 	expect(db.query("SELECT COUNT(*) n FROM message_events WHERE message_id = 1").get()).toEqual({ n: 1 });
 	let delivered: unknown;
-	const second = new Poller(
-		db,
-		"A",
-		"unused",
-		chatId,
-		async (result, update) => {
-			attempts++;
-			delivered = { result, update };
-			second.stop();
-		},
-		true,
-	);
+	const second = new Poller(db, "A", "unused", chatId, async (result, update) => {
+		attempts++;
+		delivered = { result, update };
+		second.stop();
+	});
 	(second as any).api = {
 		getUpdates: async () => {
 			second.stop();
@@ -158,7 +143,7 @@ test("/fire lets other bots trigger only the enabled bot in its chat, never itse
 			...(mention ? { entities: [{ type: "mention", offset: 0, length: mention.length }] } : {}),
 			...(editDate ? { edit_date: editDate } : {}),
 		};
-		ingestUpdate(db, "A", { update_id: updateId++, [editDate ? "edited_message" : "message"]: msg }, chatId, true);
+		ingestUpdate(db, "A", { update_id: updateId++, [editDate ? "edited_message" : "message"]: msg }, chatId);
 		return db.query("SELECT * FROM messages WHERE message_id = ?").get(messageId) as MessageRow;
 	};
 	const other = { id: 77, is_bot: true, first_name: "Other" };
@@ -255,7 +240,6 @@ test("/fire routes persisted sibling sends locally, once, never to the sender or
 				botId,
 				chatId,
 				box: null,
-				emitMediaUpdates: false,
 				allowedReactions: null,
 				triggerMessageId: null,
 				recordPublicSend: noop,
@@ -295,7 +279,7 @@ test("/fire routes persisted sibling sends locally, once, never to the sender or
 
 	// A human message refills; the sender is never its own target.
 	router.route(
-		ingestUpdate(db, "A", { update_id: 900, message: { ...message, message_id: 900, text: "hi all" } }, chatId, true),
+		ingestUpdate(db, "A", { update_id: 900, message: { ...message, message_id: 900, text: "hi all" } }, chatId),
 		db.query("SELECT * FROM messages WHERE message_id = 900").get() as MessageRow,
 	);
 	await send("A", "@alpha_bot talking to myself");
@@ -304,7 +288,7 @@ test("/fire routes persisted sibling sends locally, once, never to the sender or
 	// No duplicate dispatch: a later poller echo of the same send is suppressed by its claim.
 	const echoed = await send("B", "@alpha_bot once");
 	expect(queue.map(({ botId }) => botId)).toEqual(["A"]);
-	const echo = ingestUpdate(db, "A", { update_id: 901, message: sentRaw.get(echoed) }, chatId, true);
+	const echo = ingestUpdate(db, "A", { update_id: 901, message: sentRaw.get(echoed) }, chatId);
 	expect(echo.kind).toBe("duplicate");
 	router.route(echo, db.query("SELECT * FROM messages WHERE message_id = ?").get(echoed) as MessageRow);
 	router.routeLocalSend(db.query("SELECT * FROM messages WHERE message_id = ?").get(echoed) as MessageRow);

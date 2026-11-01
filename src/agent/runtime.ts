@@ -27,13 +27,7 @@ import {
 	type SessionEntry,
 	type SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
-import {
-	MIN_COMPACTION_RESERVE,
-	mediaNeedsImageInput,
-	mediaUsesVision,
-	type AppConfig,
-	type BotConfig,
-} from "../config.ts";
+import { MIN_COMPACTION_RESERVE, type AppConfig, type BotConfig } from "../config.ts";
 import { getBotState, setBotState } from "../db/db.ts";
 import { BotApi, groupReactionAllowlist, TelegramApiError } from "../telegram/api.ts";
 import { TelegramTypingLease } from "../telegram/activity.ts";
@@ -65,7 +59,7 @@ import {
 } from "./tools.ts";
 import { MessageQueryError, queryMessages, type MessageQuery } from "../tools/messages.ts";
 import { runTinyFishTool } from "../tools/search.ts";
-import { contextMediaRefs, createContextImageResolver, ensureContextMedia } from "../media/context-media.ts";
+import { createContextImageResolver, ensureContextMedia } from "../media/context-media.ts";
 import { downloadSource, MEDIA_DOWNLOAD_MAX_BYTES } from "../media/local-cache.ts";
 import { WorkBox } from "../sandbox/box.ts";
 import { TaskError, type TaskManager } from "../tasks/manager.ts";
@@ -118,10 +112,10 @@ import {
 } from "./token-packer.ts";
 import {
 	estimateCacheReadFromPrefix,
-	buildTelegramContextBlocks,
 	compactionTextBudget,
 	buildCompactionContent,
 	isTelegramContextDetails,
+	viewImageRefs,
 	makeAssistantPersistencePolicyExtension,
 	makeCodemodeExtension,
 	CODEMODE_DECLARATION_TOKENS,
@@ -705,11 +699,10 @@ export class BotRuntime {
 		);
 		this.telemetryHmacKey = payloadKey;
 		const extensions = [
-			// The image resolver is only wired in context mode; in vision mode the context is
-			// text-only (vision descriptions render inside the serialized placeholders).
+			// Only hybrid mode has images in context: view_image results, resolved at projection.
 			makeTelegramContextExtension(
 				() => this.pendingTurnContext,
-				mediaNeedsImageInput(this.config.media.mode)
+				this.config.media.mode === "hybrid"
 					? createContextImageResolver(join(this.config.dataDir, "media"))
 					: undefined,
 			),
@@ -1150,11 +1143,7 @@ export class BotRuntime {
 		const model = this.compactionModel;
 		const messages = [...prep.messagesToSummarize, ...prep.turnPrefixMessages];
 		const imageReferences = messages.reduce(
-			(count, message) =>
-				count +
-				(message.role === "custom" && isTelegramContextDetails(message.details)
-					? message.details.blocks.filter((block) => block.type === "image").length
-					: 0),
+			(count, message) => count + (viewImageRefs(message)?.images.length ?? 0),
 			0,
 		);
 		const content = buildCompactionContent(
@@ -1274,7 +1263,6 @@ export class BotRuntime {
 			api: this.api,
 			botId: this.bot.id,
 			chatId: this.config.groupChatId,
-			emitMediaUpdates: this.config.media.mode !== "context",
 			allowedReactions: this.allowedReactions,
 			box: this.box,
 			triggerMessageId: this.currentTriggerMessageId,
@@ -1457,24 +1445,20 @@ export class BotRuntime {
 
 		this.pendingInputMetrics = emptyInputMetrics();
 		this.sendsThisTurn = 0;
-		if (this.config.media.mode === "context") {
-			await this.ensureBatchContextMedia([...mandatory, ...normal], obligationIds);
-		} else {
-			// Descriptions get a short head start, then finish in the background and arrive later as
-			// media_update events; the reply never waits on a slow vision call (view_image covers it).
-			const vision = this.ensureBatchVision([...mandatory, ...normal], obligationIds).catch(() => {});
-			await Promise.race([vision, delay(VISION_WAIT_MS)]);
-			// Vision descriptions land as media_update events mid-scan: pick them up so the
-			// same flush already sees the fresh descriptions.
-			const postVisionHighWater = messageEventHighWater(this.db, chatId);
-			if (postVisionHighWater > highWater) {
-				highWater = postVisionHighWater;
-				recent = ownEvents(listRecentMessageEvents(this.db, chatId, consumedSeq, highWater, MAX_EVENT_SCAN));
-				obligationEvents = ownEvents(listReplyObligationEvents(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN));
-				rowsScanned += recent.length + obligationEvents.length;
-				mandatory = requiredEvents();
-				normal = ordinaryEvents();
-			}
+		// Descriptions get a short head start, then finish in the background and arrive later as
+		// media_update events; the reply never waits on a slow vision call (view_image covers it).
+		const vision = this.ensureBatchVision([...mandatory, ...normal], obligationIds).catch(() => {});
+		await Promise.race([vision, delay(VISION_WAIT_MS)]);
+		// Vision descriptions land as media_update events mid-scan: pick them up so the
+		// same flush already sees the fresh descriptions.
+		const postVisionHighWater = messageEventHighWater(this.db, chatId);
+		if (postVisionHighWater > highWater) {
+			highWater = postVisionHighWater;
+			recent = ownEvents(listRecentMessageEvents(this.db, chatId, consumedSeq, highWater, MAX_EVENT_SCAN));
+			obligationEvents = ownEvents(listReplyObligationEvents(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN));
+			rowsScanned += recent.length + obligationEvents.length;
+			mandatory = requiredEvents();
+			normal = ordinaryEvents();
 		}
 		const usage = this.session.getContextUsage();
 		const suffixBudget = availableSuffixBudget({
@@ -1495,12 +1479,6 @@ export class BotRuntime {
 			// can omit their body only when the parent is included in this same new batch.
 			{ visibleIds: new Set() },
 			this.bot.maxMessageTokens,
-			this.config.media.mode === "context"
-				? {
-						refs: (fileUniqueId) => contextMediaRefs(this.db, fileUniqueId),
-						maxImages: this.config.media.maxPerTurn,
-					}
-				: undefined,
 		);
 		log.info("agent_runtime", "context_packed", {
 			bot_id: this.bot.id,
@@ -1512,7 +1490,6 @@ export class BotRuntime {
 			visible_count: packed.visibleMessageIds.length,
 			obligation_count: obligations.length,
 			estimated_tokens: packed.estimatedTokens,
-			images_attached: packed.imagesAttached,
 			suffix_budget: suffixBudget,
 		});
 		if (packed.deferredMandatory > 0) {
@@ -1552,7 +1529,6 @@ export class BotRuntime {
 			version: TELEGRAM_CONTEXT_VERSION,
 			consumedSeq: highWater,
 			providerText: packed.text,
-			blocks: buildTelegramContextBlocks(packed.segments),
 			stickerCandidates: boundedStickerCandidates,
 			visibleMessageIds: packed.visibleMessageIds,
 			events: packed.events.map((event) => ({
@@ -1569,12 +1545,12 @@ export class BotRuntime {
 			estimatedTokens: packed.estimatedTokens + boundedStickerCandidateTokens,
 			rowsScanned,
 			visionCalls: this.pendingInputMetrics.visionCalls,
-			imagesAttached: packed.imagesAttached,
+			imagesAttached: 0, // counted by view_image during the turn
 		};
 		// Native prompt preflight installs system/tools even on the first request; the
 		// before_agent_start extension appends this batch as a persistent custom message.
 		// Make packed references addressable during the turn; durable visibility commits below.
-		await this.checkContextImageBudget(details);
+		await this.checkContextImageBudget();
 		for (const messageId of packed.visibleMessageIds) this.visibleMessageIds.add(messageId);
 		this.pendingTurnContext = details;
 		this.activeTurn = { steeredThrough: highWater, steering: Promise.resolve() };
@@ -1701,14 +1677,10 @@ export class BotRuntime {
 	}
 
 	/** Check before appending the batch, including after a failed or restored turn. */
-	private async checkContextImageBudget(pending: TelegramContextDetails): Promise<void> {
-		if (!this.session || !mediaNeedsImageInput(this.config.media.mode)) return;
+	private async checkContextImageBudget(): Promise<void> {
+		if (!this.session || this.config.media.mode !== "hybrid") return;
 		const imageBytes = () =>
-			contextImageBytes(
-				this.session!.sessionManager.buildContextEntries(),
-				join(this.config.dataDir, "media"),
-				pending,
-			);
+			contextImageBytes(this.session!.sessionManager.buildContextEntries(), join(this.config.dataDir, "media"));
 		const bytes = imageBytes();
 		if (bytes <= this.bot.contextImageBudgetBytes) return;
 		log.info("agent_runtime", "auto_compact_triggered", {
@@ -1821,7 +1793,7 @@ export class BotRuntime {
 		const catalog = this.modelRuntime.getModel(provider, modelId);
 		if (!catalog) return { ok: false, code: "unknown_model" };
 		if (!this.modelRuntime.hasConfiguredAuth(provider)) return { ok: false, code: "unauthenticated_provider" };
-		if (mediaNeedsImageInput(this.config.media.mode) && !catalog.input.includes("image"))
+		if (this.config.media.mode === "hybrid" && !catalog.input.includes("image"))
 			return { ok: false, code: "image_input_unsupported" };
 		const reasoningEffort = clampThinkingLevel(catalog, this.bot.reasoningEffort);
 		if (provider === this.bot.provider && modelId === this.bot.model && reasoningEffort === this.bot.reasoningEffort)
@@ -1969,34 +1941,9 @@ export class BotRuntime {
 	 * Preparation failures are transient (retried on a later turn); packing falls back to the
 	 * text placeholder when no prepared refs exist.
 	 */
-	private async ensureBatchContextMedia(
-		batch: readonly MessageEvent[],
-		obligationIds: ReadonlySet<number>,
-	): Promise<void> {
-		if (this.config.media.maxPerTurn <= 0) return;
-		const pending = pendingMediaIds(batch, obligationIds, this.config.media.maxPerTurn, (id) =>
-			Boolean(contextMediaRefs(this.db, id)),
-		);
-		await forEachConcurrent(pending, this.config.media.concurrency, async (fileUniqueId) => {
-			try {
-				const prepared = await ensureContextMedia(this.db, this.api, this.bot.id, fileUniqueId, {
-					cacheDir: join(this.config.dataDir, "media"),
-					botApis: this.botApis,
-					videoTranscoder: this.videoTranscoder,
-				});
-				if (!prepared.ok) {
-					this.recordEvent("error", { stage: "context_media", category: prepared.outcome });
-					log.warn("context_media", "prepare_failed", { bot_id: this.bot.id, category: prepared.outcome });
-				}
-			} catch {
-				this.recordEvent("error", { stage: "context_media", category: "request_failed" });
-			}
-		});
-	}
-
 	/** Lazy vision: bounded per turn, with direct-reply events ordered before ordinary catch-up. */
 	private async ensureBatchVision(batch: readonly MessageEvent[], obligationIds: ReadonlySet<number>): Promise<void> {
-		if (!mediaUsesVision(this.config.media.mode) || this.config.media.maxPerTurn <= 0) return;
+		if (this.config.media.mode !== "hybrid" || this.config.media.maxPerTurn <= 0) return;
 		const described = this.db.query("SELECT vision FROM media WHERE file_unique_id = ?");
 		const pending = pendingMediaIds(
 			batch,
@@ -2056,6 +2003,7 @@ export class BotRuntime {
 		});
 		if (!prepared.ok) return fail(prepared.outcome);
 		this.markVisible([row.message_id]);
+		this.pendingInputMetrics.imagesAttached += prepared.images.length;
 		this.recordEvent("tool_view_image", { ok: true, images: prepared.images.length });
 		const line = renderMessageLine(this.db, row, { visibleIds: new Set() });
 		const details: ViewImageDetails = { messageId: row.message_id, images: prepared.images };
@@ -2100,16 +2048,12 @@ export class BotRuntime {
 				STEER_TOKEN_BUDGET,
 				{ visibleIds: new Set() },
 				this.bot.maxMessageTokens,
-				this.config.media.mode === "context"
-					? { refs: (id) => contextMediaRefs(this.db, id), maxImages: this.config.media.maxPerTurn }
-					: undefined,
 			);
 			if (!packed.text.trim()) return;
 			const details: TelegramContextDetails = {
 				version: TELEGRAM_CONTEXT_VERSION,
 				consumedSeq: through,
 				providerText: packed.text,
-				blocks: buildTelegramContextBlocks(packed.segments),
 				stickerCandidates: "",
 				visibleMessageIds: packed.visibleMessageIds,
 				events: packed.events.map((event) => ({

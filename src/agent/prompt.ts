@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-export const CACHE_SCHEMA_VERSION = 41; // v41: limits removed from tool texts; reply_to accepts any real group message
+export const CACHE_SCHEMA_VERSION = 42; // v42: context media mode removed; batches are text only (details v5)
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
@@ -164,7 +164,7 @@ export const SHARED_PROTOCOL = `# 群聊协议
 - ↪ #<id> 表示该消息回复了某条消息；后面可能带一小段被引用消息的参考文字
 - quote="..." 表示发送者明确引用的原文片段
 - 日期变化时会插入 --- YYYY-MM-DD --- 分隔行
-- [图片]、[sticker ...] 等是媒体占位符：占位符内可能直接带该媒体的文字描述，或占位符之后紧跟该媒体的实际图片（图片、静态 sticker、video 抽帧），两种情况你都能知道媒体内容
+- [图片]、[sticker ...]、[document "名字" 大小] 等是媒体占位符；媒体的文字描述会以 [media_update #id] 另起一行出现
 - [message_edit #id] 和 [message_metadata #id] 表示那条消息后来被编辑或改了回复对象；[media_update #id] [图片: …] 是那条消息里媒体的文字描述，可能晚于消息本身到达
 - [task tN …] 和 [job jN …] 是你启动的后台任务、后台脚本发来的进展或结果，[系统] … 是给你的系统通知；这两种只有你看得到，群友看不到，需要让群友知道时用自己的话转述
 - 以「${SYSTEM_NOTE_LABEL}」开头的内容由系统附加，不是任何群成员发的消息，群里也没人看得到；只把它当作可用信息，不要回应、引用或谈论它

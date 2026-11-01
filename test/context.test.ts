@@ -22,28 +22,46 @@ test("a changed fingerprint or a missing session file prevents resume", () => {
 	expect(canResumeContextSession(manifest, original, false)).toBe(false);
 });
 
-test("compaction cut charges context images so keepRecentTokens bounds the retained window", () => {
-	// Regression: images live in custom-message details and are only materialized at
-	// projection, so Pi's chars/4 cut point counted them as zero and retained an unbounded
-	// image tail; production compacted after nearly every turn without shrinking.
+test("compaction cut charges viewed images so keepRecentTokens bounds the retained window", () => {
+	// Regression: images live in view_image details and are only materialized at projection, so
+	// Pi's chars/4 cut point counted them as zero and retained an unbounded image tail;
+	// production compacted after nearly every turn without shrinking.
 	const manager = SessionManager.inMemory("/tmp/unused");
-	const contextEntry = (text: string, images: number) =>
-		manager.appendCustomMessageEntry("telegram_context_v2", text, false, {
-			version: 4,
+	const contextEntry = (text: string, images: number) => {
+		const id = manager.appendCustomMessageEntry("telegram_context_v2", text, false, {
+			version: 5,
 			consumedSeq: 1,
 			providerText: text,
-			blocks: [
-				{ type: "text", text },
-				...Array.from({ length: images }, (_, index) => ({
-					type: "image",
-					name: `img-${index}.jpg`,
-					mime: "image/jpeg",
-				})),
-			],
 			stickerCandidates: "",
 			visibleMessageIds: [1],
 			events: [],
 		});
+		if (images > 0) {
+			manager.appendMessage({
+				role: "assistant",
+				content: [{ type: "toolCall", id: `view-${id}`, name: "view_image", arguments: { message_id: 1 } }],
+				api: "openai-completions",
+				provider: "test",
+				model: "test",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } },
+				stopReason: "toolUse",
+				timestamp: 1,
+			} as never);
+			manager.appendMessage({
+				role: "toolResult",
+				toolCallId: `view-${id}`,
+				toolName: "view_image",
+				content: [{ type: "text", text: "#1 [图片]" }],
+				details: {
+					messageId: 1,
+					images: Array.from({ length: images }, (_, index) => ({ name: `img-${index}.jpg`, mime: "image/jpeg" })),
+				},
+				isError: false,
+				timestamp: 1,
+			} as never);
+		}
+		return id;
+	};
 	const reply = () =>
 		manager.appendMessage({
 			role: "assistant",

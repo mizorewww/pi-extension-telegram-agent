@@ -40,7 +40,7 @@ messages: Telegram 批次（custom message，各自后面可能跟一条〔系�
 tools:    send, search, view_image, task[, codemode]（按 bot 开关与媒体模式过滤，顺序不变；codemode 声明由 Pi 按脚本工具渲染）
 ```
 
-- context 模式下一批消息内部是 text|image 交错的内容块；没有图片时投影为纯字符串。
+- 一批 Telegram 消息投影为纯字符串；图片只出现在 view_image 结果里，投影时才把文件读成 image block。
 - send 成功后模型只看到固定 ACK（`ok sent_message_ids=#…` 或 `no_retry`），发送详情只留本地。
 - 没调 send 的 assistant 文本在 session 里替换为 `[no_send]`。
 
@@ -64,7 +64,7 @@ tools:    send, search, view_image, task[, codemode]（按 bot 开关与媒体�
 - 无 username 的发送者用稳定别名 `u<N>`（rowid 分配）。
 - 引用父消息优先用随消息保存的 `reply_snapshot`；父消息在同一新批次里时只写裸 `↪ #id`。
 - `[task …]` / `[系统]` 来自 `note` 事件（serializer v6），只出现在它所属 bot 的上下文里；除进展外都带 `↪ #origin`。
-- `media_update` 只出现在 off / hybrid 模式；context 模式的图片在消息首次打包时就位，或永远不出现。
+- `media_update` 只在 hybrid 模式出现。
 
 ## Compaction
 
@@ -80,8 +80,9 @@ provider 没有返回 cache 用量时，若同一 cache cohort（provider/api/mo
 
 ## 版本记录
 
-当前：**41**。更早的版本见 git 历史。
+当前：**42**。更早的版本见 git 历史。
 
+- **v42**：删除 context 媒体模式（`media.mode` 只剩 off / hybrid）；批次 details 去掉 `blocks`（`TELEGRAM_CONTEXT_VERSION` 5），批次永远是纯文本，图片只来自 view_image；共享协议的媒体占位符说明相应改写。
 - **v41**：工具说明与提示词去掉各种数字上限（view_image 每轮张数、codemode 输出字数、job 并发与时长、tg_messages 行数与正文长度、sh_exec 时长）；`reply_to` 只要求是本群真实存在的消息。
 - **v40**：提示词不再写 send 次数上限（代码里只留 20 条消息的防死循环保护，reaction 不计）；send 的 reaction 说明与 send 指南写明只点 reaction 时可以点本群任意消息；新增批量点 reaction 的脚本示例。
 - **v39**：`send`、`task`、`job` 改为 direct（脚本里可调用，脚本里的 send 不结束本轮，每轮最多 3 次），删除 `tg_post`；工具指南去掉"每轮一次 send""十几秒才打招呼"等互相冲突的规则，示例改为每个工具都用脚本串起来。

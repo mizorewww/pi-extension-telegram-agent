@@ -3,9 +3,7 @@
 //
 // Media renders as a text placeholder (`[图片]` / `[sticker 😄]` / `[video]` ...); set names never
 // appear (serializer v4). Written bytes never change retroactively: a later vision description
-// arrives as a media_update delta. In context-media mode the actual image bytes additionally travel as
-// interleaved image content blocks anchored to the event's text segment (token-packer.ts,
-// extensions/context.ts).
+// arrives as a media_update delta.
 
 import type { Database } from "bun:sqlite";
 import type { MediaUpdatePayload, MessageEvent, NotePayload } from "../db/message-events.ts";
@@ -172,26 +170,17 @@ export function renderMessageLine(db: Database, m: MessageRow, opts: SerializeOp
 	return line;
 }
 
-export interface SerializedEventSegment {
-	event: MessageEvent;
-	/** Rendered text for this event, including a leading date separator when the day changes. */
-	text: string;
-}
-
 /**
- * Serialize events one segment each so context-mode media image blocks can interleave at the
- * exact message position. For pure message runs, joining segment texts with "\n" is byte-identical
- * to the historical whole-batch rendering. One deliberate difference: a media_update delta between
- * two same-day messages no longer re-emits the `--- YYYY-MM-DD ---` separator (the day state now
- * spans segments; the old per-batch reset duplicated the line). A vision description that
- * arrives later is appended as its own media_update segment, never rewritten into a message.
+ * One rendered line per event; the date separator only appears when the day changes. A vision
+ * description that arrives later is appended as its own media_update line, never rewritten into
+ * a message.
  */
-export function serializeMessageEventSegments(
+function serializeSegments(
 	db: Database,
 	events: MessageEvent[],
 	opts: SerializeOptions,
-): SerializedEventSegment[] {
-	const segments: SerializedEventSegment[] = [];
+): { event: MessageEvent; text: string }[] {
+	const segments: { event: MessageEvent; text: string }[] = [];
 	let lastDate: string | null = null;
 	for (const event of events) {
 		if (event.kind === "message") {
@@ -232,7 +221,7 @@ export function serializeMessageEventSegments(
 
 /** Delta events are always appended; no existing serialized message is rewritten. */
 export function serializeMessageEvents(db: Database, events: MessageEvent[], opts: SerializeOptions): string {
-	return serializeMessageEventSegments(db, events, opts)
+	return serializeSegments(db, events, opts)
 		.map((segment) => segment.text)
 		.filter(Boolean)
 		.join("\n");

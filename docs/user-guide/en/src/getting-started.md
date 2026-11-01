@@ -33,7 +33,7 @@ In Pi:
 1. `/login` to your model provider;
 2. `/model` to choose the default model.
 
-Model credentials stay in Pi and are never written to this repository. The default configuration does not look at images, so any chat model works; if you later set `media.mode` to `"context"` or `"hybrid"`, the main model must accept image input.
+Model credentials stay in Pi and are never written to this repository. The default configuration does not look at images, so any chat model works; if you later set `media.mode` to `"hybrid"`, the main model must accept image input.
 
 ## 4. Run `/tg config`
 

@@ -38,9 +38,9 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 41,
-	systemZhTemplate: "87423dc95e31",
-	systemEnTemplate: "769bc5d15939",
+	schemaVersion: 42,
+	systemZhTemplate: "b79b1c48df20",
+	systemEnTemplate: "84e35099beb1",
 	eventSerialize: "a05c0584eb08",
 	tools: "f7554b4d6621",
 	codemodeTools: "7536d4103afc",
@@ -48,11 +48,11 @@ const GOLDEN = {
 	taskTool: "f5343a7cbdb5",
 	jobTool: "a913226f0cba",
 	compactionPrompt: "04da95f62da0",
-	multimodalCompaction: "e2da2b8b68fa",
+	multimodalCompaction: "e3f33923d328",
 	replyRecovery: "4fc7e277e338",
 	telegramTurn: "43bb809c775c",
 	extensionOrder: "e04f7032d531",
-	contextProtocol: "2e1c7762b239",
+	contextProtocol: "3b3dcfd50324",
 };
 
 const CHAT_ID = -1004402809405;
@@ -63,7 +63,7 @@ function schemaDb(): Database {
 	return db;
 }
 
-function contextMessage(id: number, providerText: string, stickerCandidates = "", blocks?: unknown[]) {
+function contextMessage(id: number, providerText: string, stickerCandidates = "") {
 	return {
 		role: "custom",
 		customType: TELEGRAM_CONTEXT_TYPE,
@@ -74,7 +74,6 @@ function contextMessage(id: number, providerText: string, stickerCandidates = ""
 			version: TELEGRAM_CONTEXT_VERSION,
 			consumedSeq: id,
 			providerText,
-			blocks: blocks ?? [{ type: "text", text: providerText }],
 			stickerCandidates,
 			visibleMessageIds: [id],
 			events: [],
@@ -172,13 +171,19 @@ test("immutable event serialization grammar is stable", () => {
 	expect(sha256Short(out)).toBe(GOLDEN.eventSerialize);
 });
 
-test("summary input keeps image order but never sticker candidates or private reasoning", () => {
+test("summary input keeps viewed images in order but never sticker candidates or private reasoning", () => {
 	const content = buildCompactionContent(
 		[
-			contextMessage(12, "photo #12", "must not enter summary", [
-				{ type: "text", text: "photo #12" },
-				{ type: "image", name: "fixture.png", mime: "image/png" },
-			]),
+			contextMessage(12, "photo #12 [图片]", "must not enter summary"),
+			{
+				role: "toolResult",
+				toolCallId: "view-1",
+				toolName: "view_image",
+				content: [{ type: "text", text: "#12 photo" }],
+				details: { messageId: 12, images: [{ name: "fixture.png", mime: "image/png" }] },
+				isError: false,
+				timestamp: 13,
+			},
 		] as never,
 		"previous summary",
 		() => ({ type: "image", data: "Zml4dHVyZQ==", mimeType: "image/png" }),

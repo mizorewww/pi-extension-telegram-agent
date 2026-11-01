@@ -288,19 +288,33 @@ function assistantResult(input = 100) {
 	};
 }
 
-function imageDetails(id: number) {
+function batchDetails(id: number) {
 	return {
-		version: 4,
+		version: 5,
 		consumedSeq: id,
 		providerText: `photo #${id}`,
-		blocks: [
-			{ type: "text", text: `photo #${id}` },
-			...Array.from({ length: 4 }, () => ({ type: "image", name: "photo.png", mime: "image/png" })),
-		],
 		stickerCandidates: "stale-candidate-canary",
 		visibleMessageIds: [id],
 		events: [],
 	};
+}
+
+/** A turn in which the bot looked at four images of message #id with view_image. */
+function appendViewedImages(manager: SessionManager, id: number): void {
+	manager.appendMessage({
+		...assistantResult(),
+		content: [{ type: "toolCall", id: `view-${id}`, name: "view_image", arguments: { message_id: id } }],
+		stopReason: "toolUse",
+	} as never);
+	manager.appendMessage({
+		role: "toolResult",
+		toolCallId: `view-${id}`,
+		toolName: "view_image",
+		content: [{ type: "text", text: `#${id} [图片]` }],
+		details: { messageId: id, images: Array.from({ length: 4 }, () => ({ name: "photo.png", mime: "image/png" })) },
+		isError: false,
+		timestamp: Date.now(),
+	} as never);
 }
 
 for (const mode of ["automatic", "cancelled"] as const) {
@@ -325,7 +339,8 @@ for (const mode of ["automatic", "cancelled"] as const) {
 		} as unknown as ModelRuntime;
 		const manager = SessionManager.inMemory(root);
 		for (let i = 1; i <= 12; i++) {
-			manager.appendCustomMessageEntry("telegram_context_v2", `photo #${i}`, false, imageDetails(i));
+			manager.appendCustomMessageEntry("telegram_context_v2", `photo #${i}`, false, batchDetails(i));
+			appendViewedImages(manager, i);
 			manager.appendMessage(assistantResult());
 		}
 		const { session } = await createAgentSession({

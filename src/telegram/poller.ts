@@ -20,7 +20,6 @@ export class Poller {
 	private db: Database;
 	private groupChatId: number;
 	private onMessage: MessageHandler;
-	private emitMediaUpdates: boolean;
 	private stopped = false;
 	private readonly abort = new AbortController();
 
@@ -31,7 +30,6 @@ export class Poller {
 		groupChatId: number,
 		onMessage: MessageHandler,
 		/** Vision mode only: replay persisted media descriptions as media_update events. */
-		emitMediaUpdates: boolean,
 		private readonly onCallback?: CallbackHandler,
 	) {
 		this.db = db;
@@ -39,7 +37,6 @@ export class Poller {
 		this.api = new BotApi(token);
 		this.groupChatId = groupChatId;
 		this.onMessage = onMessage;
-		this.emitMediaUpdates = emitMediaUpdates;
 	}
 
 	private offset(): number {
@@ -103,7 +100,7 @@ export class Poller {
 					if ((update as { callback_query?: unknown }).callback_query && updateId >= this.offset())
 						await this.onCallback?.(update, this.botId);
 					this.db.transaction(() => {
-						const result = ingestUpdate(this.db, this.botId, update, this.groupChatId, this.emitMediaUpdates);
+						const result = ingestUpdate(this.db, this.botId, update, this.groupChatId);
 						if (result.kind === "inserted" || result.kind === "edited" || result.kind === "enriched") {
 							this.db
 								.query(`INSERT INTO pending_telegram_dispatch

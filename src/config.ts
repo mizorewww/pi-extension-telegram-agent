@@ -21,20 +21,10 @@ export const MIN_COMPACTION_RESERVE = 16_384;
 
 type CacheRetention = "none" | "short" | "long";
 /**
- * "off": placeholders only; "context": every image goes to the main model; "hybrid": a vision
- * model describes media as text and the main model views one on demand.
+ * "off": placeholders only; "hybrid": a vision model describes media as text and the main model
+ * views one on demand with view_image (so it must accept image input).
  */
-export type MediaMode = "off" | "context" | "hybrid";
-
-/** Modes that attach image blocks for the chat model, which must then accept image input. */
-export function mediaNeedsImageInput(mode: MediaMode): boolean {
-	return mode === "context" || mode === "hybrid";
-}
-
-/** Modes whose context is text plus vision descriptions from media.vision_model. */
-export function mediaUsesVision(mode: MediaMode): boolean {
-	return mode === "hybrid";
-}
+export type MediaMode = "off" | "hybrid";
 
 /** Settings a bot inherits from the deployment level unless it overrides them. */
 interface SharedConfigInput {
@@ -82,9 +72,9 @@ export interface TelegramConfigInput extends SharedConfigInput {
 		mode?: MediaMode;
 		/** "hybrid" only: the vision model as provider/model:effort. */
 		vision_model?: string;
-		/** Media per turn: described ("hybrid", default 2) or attached as images ("context", default 4). */
+		/** Media described per turn ("hybrid", default 2). */
 		max_per_turn?: number;
-		/** Parallel media jobs: vision calls ("hybrid") or downloads/frame extraction ("context"). */
+		/** Parallel media jobs: downloads, frame extraction and vision calls. */
 		concurrency?: number;
 	};
 	telemetry_retention_days?: number;
@@ -213,7 +203,7 @@ const ROOT_RULES: Record<string, Rule> = {
 };
 const BOT_RULES: Record<string, Rule> = { ...SHARED_RULES, routing_p: range(0, 1) };
 const MEDIA_RULES: Record<string, Rule> = {
-	mode: oneOf("off", "context", "hybrid"),
+	mode: oneOf("off", "hybrid"),
 	vision_model: modelRef,
 	max_per_turn: range(0, 16, true),
 	concurrency: range(1, 16, true),
@@ -554,7 +544,7 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 			visionModel: canonicalPiModelReference(
 				(media.vision_model as string | undefined) ?? DEFAULT_AUXILIARY_VISUAL_MODEL,
 			)!,
-			maxPerTurn: (media.max_per_turn as number | undefined) ?? (mediaMode === "context" ? 4 : 2),
+			maxPerTurn: (media.max_per_turn as number | undefined) ?? 2,
 			concurrency: (media.concurrency as number | undefined) ?? 2,
 		},
 		sandbox: raw.sandbox === undefined ? null : sandboxConfig(raw.sandbox as Raw),

@@ -33,7 +33,7 @@ pi --version
 /tg restart
 ```
 
-再看 `data/daemon.log`。常见原因：token 错误、网络不通、bot 不在群里、所选模型不在 Pi 目录里，或在 `media.mode` 为 `"context"` / `"hybrid"` 时选了不支持图片的模型（`image_input_unsupported`）。
+再看 `data/daemon.log`。常见原因：token 错误、网络不通、bot 不在群里、所选模型不在 Pi 目录里，或在 `media.mode` 为 `"hybrid"` 时选了不支持图片的模型（`image_input_unsupported`）。
 
 ## 群里 @ 了 bot 但没反应
 

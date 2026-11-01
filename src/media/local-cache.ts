@@ -247,7 +247,7 @@ export function dedupeInFlight<T>(
 
 const inFlightByDb = new WeakMap<Database, Map<string, Promise<LocalMediaResult>>>();
 
-/** Share Telegram download and atomic cache installation across UI precache and context media. */
+/** Share Telegram download and atomic cache installation across UI precache and view_image. */
 export function ensureLocalMedia(
 	db: Database,
 	api: MediaDownloadApi,

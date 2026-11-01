@@ -33,7 +33,7 @@ Make sure you ran `bun run pi` from the repository root. `/tg config` works with
 /tg restart
 ```
 
-Then read `data/daemon.log`. Typical causes: a wrong token, no network, the bot is not in the group, the model is not in Pi's catalog, or, with `media.mode` set to `"context"` or `"hybrid"`, a model without image input (`image_input_unsupported`).
+Then read `data/daemon.log`. Typical causes: a wrong token, no network, the bot is not in the group, the model is not in Pi's catalog, or, with `media.mode` set to `"hybrid"`, a model without image input (`image_input_unsupported`).
 
 ## The bot ignores a mention
 

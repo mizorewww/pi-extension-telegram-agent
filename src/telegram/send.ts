@@ -108,11 +108,9 @@ export async function persistSentMessageWithRetry(
 	botId: string,
 	raw: Record<string, unknown>,
 	transport: SentMessageTransport,
-	/** Vision mode only: a cached description of the sent media replays as a media_update event. */
-	emitMediaUpdates = true,
 ): Promise<CanonicalMessage> {
 	try {
-		return await retrySqliteBusy(() => insertSentMessage(db, botId, raw, emitMediaUpdates));
+		return await retrySqliteBusy(() => insertSentMessage(db, botId, raw));
 	} catch (error) {
 		throw new SentMessagePersistenceError(error, raw, transport);
 	}

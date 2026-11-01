@@ -50,8 +50,6 @@ export default defineConfig({
 
 	// ===== Media: how images and videos reach a model =====
 	// "off" (default): media are text placeholders such as [photo].
-	// "context": images and 1-3 video frames go to the main model directly; it must accept image
-	//   input (checked at startup). No vision model is called.
 	// "hybrid" (recommended): vision_model describes each new image / video once as text (shared by
 	//   all bots), and a view_image tool lets the bot look at one message's actual image when the
 	//   description is not enough; the main model must accept image input.
@@ -59,7 +57,7 @@ export default defineConfig({
 	media: {
 		mode: "off",
 		vision_model: "openai-codex/gpt-5.6-luna:low", // "hybrid" only
-		max_per_turn: 2, // media described ("hybrid", default 2) or attached ("context", default 4) per turn
+		max_per_turn: 2, // new media described per turn (default 2)
 		concurrency: 2, // parallel vision calls or downloads / frame extractions
 	},
 
