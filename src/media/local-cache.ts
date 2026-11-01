@@ -182,16 +182,20 @@ function readExisting(path: string): { bytes: Uint8Array; mimeType: SourceMediaM
 	}
 }
 
+/** Cache file name for an identity (a file_unique_id, or one with a `#slot` for derived images). */
+export function mediaCacheFileName(identity: string, extension: string): string {
+	return `${createHash("sha256").update(identity).digest("hex").slice(0, 32)}.${extension}`;
+}
+
 /** Install complete bytes with owner-only permissions, then expose them with one rename. */
 export function installMediaCacheFile(
 	cacheDir: string,
-	fileUniqueId: string,
+	identity: string,
 	extension: string,
 	bytes: Uint8Array,
 ): string {
 	mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
-	const basename = createHash("sha256").update(fileUniqueId).digest("hex").slice(0, 32);
-	const target = join(cacheDir, `${basename}.${extension}`);
+	const target = join(cacheDir, mediaCacheFileName(identity, extension));
 	const temporary = `${target}.${process.pid}.${temporarySequence++}.tmp`;
 	try {
 		writeExclusive(temporary, bytes);

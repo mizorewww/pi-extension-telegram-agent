@@ -163,7 +163,6 @@ CREATE TABLE IF NOT EXISTS media (
 	mime TEXT,
 	local_path TEXT, -- cache-relative source filename; resolved inside configured data/media
 	vision TEXT, -- JSON: {model, kind, text, at} — vision-mode description shared by all bots
-	context_files TEXT, -- JSON: [{name, mime}] derived images/frames for view_image in data/media
 	sticker_set TEXT,
 	sticker_emoji TEXT,
 	short_id TEXT UNIQUE -- s<N> catalog id shown to the model for sticker sending

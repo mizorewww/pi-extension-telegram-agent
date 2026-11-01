@@ -60,7 +60,7 @@ import {
 } from "./tools.ts";
 import { MessageQueryError, queryMessages, type MessageQuery } from "../tools/messages.ts";
 import { runTinyFishTool } from "../tools/search.ts";
-import { createContextImageResolver, ensureContextMedia } from "../media/context-media.ts";
+import { createImageRefResolver, ensureViewImages } from "../media/prepare-images.ts";
 import { downloadSource, MEDIA_DOWNLOAD_MAX_BYTES } from "../media/local-cache.ts";
 import { WorkBox } from "../sandbox/box.ts";
 import { TaskError, type TaskManager } from "../tasks/manager.ts";
@@ -710,9 +710,7 @@ export class BotRuntime {
 			// Only hybrid mode has images in context: view_image results, resolved at projection.
 			makeTelegramContextExtension(
 				() => this.pendingTurnContext,
-				this.config.media.mode === "hybrid"
-					? createContextImageResolver(join(this.config.dataDir, "media"))
-					: undefined,
+				this.config.media.mode === "hybrid" ? createImageRefResolver(join(this.config.dataDir, "media")) : undefined,
 			),
 			makeTelegramCompactionExtension((event) => this.handleBeforeCompact(event)),
 			makeCachePayloadObserverExtension(payloadKey, (observation) => {
@@ -1157,7 +1155,7 @@ export class BotRuntime {
 		const content = buildCompactionContent(
 			messages,
 			prep.previousSummary,
-			model.input.includes("image") ? createContextImageResolver(join(this.config.dataDir, "media")) : undefined,
+			model.input.includes("image") ? createImageRefResolver(join(this.config.dataDir, "media")) : undefined,
 		);
 		const imagesAttached = typeof content === "string" ? 0 : content.filter((block) => block.type === "image").length;
 		const text =
@@ -2004,7 +2002,7 @@ export class BotRuntime {
 		if (!row) return fail("message_not_found");
 		const media = row.media ? (JSON.parse(row.media) as { file_unique_id?: unknown }) : null;
 		if (typeof media?.file_unique_id !== "string") return fail("no_image");
-		const prepared = await ensureContextMedia(this.db, this.api, this.bot.id, media.file_unique_id, {
+		const prepared = await ensureViewImages(this.db, this.api, this.bot.id, media.file_unique_id, {
 			cacheDir: join(this.config.dataDir, "media"),
 			botApis: this.botApis,
 			videoTranscoder: this.videoTranscoder,

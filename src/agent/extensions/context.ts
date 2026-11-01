@@ -4,7 +4,7 @@ import type { InlineExtension, SessionEntry } from "@earendil-works/pi-coding-ag
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import type { MessageEventKind } from "../../db/message-events.ts";
-import type { ContextMediaImage } from "../../media/context-media.ts";
+import type { ImageRef } from "../../media/prepare-images.ts";
 import { SEND_NO_RETRY_ACK, SEND_SUCCESS_ACK } from "../tools.ts";
 
 export const TELEGRAM_CONTEXT_TYPE = "telegram_context_v2";
@@ -28,7 +28,7 @@ export interface TelegramContextDetails {
 }
 
 /** A prepared image file referenced by cache-relative basename; bytes join only at projection. */
-function isImageRef(value: unknown): value is ContextMediaImage {
+function isImageRef(value: unknown): value is ImageRef {
 	const image = value as { name?: unknown; mime?: unknown } | null;
 	return (
 		typeof image?.name === "string" &&
@@ -69,7 +69,7 @@ export const VIEW_IMAGE_TOOL = "view_image";
 /** Persisted view_image result details: image references only, never bytes. */
 export interface ViewImageDetails {
 	messageId: number;
-	images: ContextMediaImage[];
+	images: ImageRef[];
 }
 
 function isViewImageDetails(value: unknown): value is ViewImageDetails {
@@ -85,7 +85,7 @@ export function viewImageRefs(message: AgentMessage): ViewImageDetails | null {
 }
 
 /** Image refs carried by one session entry: only view_image results hold images. */
-export function entryImageRefs(entry: SessionEntry): readonly ContextMediaImage[] {
+export function entryImageRefs(entry: SessionEntry): readonly ImageRef[] {
 	return entry.type === "message" ? (viewImageRefs(entry.message)?.images ?? []) : [];
 }
 
