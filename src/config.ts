@@ -354,7 +354,9 @@ function validate(rootDir: string, raw: Raw, env: Record<string, string>, identi
 		if (isObject(raw.media)) {
 			checkKeys(errors, "media.", raw.media, new Set(Object.keys(MEDIA_RULES)));
 			if (raw.media.mode === "describe")
-				errors.push('[config] media.mode: "describe" was removed; use "hybrid" (needs an image-capable main model) or "off"');
+				errors.push(
+					'[config] media.mode: "describe" was removed; use "hybrid" (needs an image-capable main model) or "off"',
+				);
 			else checkFields(errors, "media.", raw.media, MEDIA_RULES);
 		} else errors.push("[config] media: expected object");
 	}
