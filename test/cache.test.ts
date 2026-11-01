@@ -31,11 +31,11 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 27,
-	systemZhTemplate: "929f455372f8",
-	systemEnTemplate: "e3368b9e6674",
+	schemaVersion: 28,
+	systemZhTemplate: "7d18cb780f8d",
+	systemEnTemplate: "18c62f301993",
 	eventSerialize: "a05c0584eb08",
-	tools: "7853e896c17a",
+	tools: "9c2cac4e7b29",
 	compactionPrompt: "04da95f62da0",
 	multimodalCompaction: "e2da2b8b68fa",
 	replyRecovery: "4fc7e277e338",
@@ -73,7 +73,7 @@ function contextMessage(id: number, providerText: string, stickerCandidates = ""
 
 test("prompt, tool and protocol hashes are stable", () => {
 	expect(CACHE_SCHEMA_VERSION).toBe(GOLDEN.schemaVersion);
-	const allTools = { send: true, search: true, runJs: true };
+	const allTools = { send: true, search: true, codemode: true };
 	expect(sha256Short(buildSystemPrompt(readFileSync("personas/template.zh.md", "utf8"), allTools))).toBe(
 		GOLDEN.systemZhTemplate,
 	);
@@ -81,7 +81,7 @@ test("prompt, tool and protocol hashes are stable", () => {
 		GOLDEN.systemEnTemplate,
 	);
 	// A bot is only ever told about the tools it really has.
-	const sendOnly = toolCapabilityDeclaration({ send: true, search: false, runJs: false });
+	const sendOnly = toolCapabilityDeclaration({ send: true, search: false, codemode: false });
 	expect(sendOnly).toContain("你有一个工具：send");
 	expect(sendOnly).not.toContain("search（");
 	expect(sendOnly).toContain("你不能联网搜索");

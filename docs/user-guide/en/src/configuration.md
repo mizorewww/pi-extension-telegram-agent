@@ -65,12 +65,12 @@ Each bot has its own token, personality, session and statistics. They share the 
 ## Tools
 
 ```ts
-tools: { send: true, search: false, run_js: false }
+tools: { send: true, search: false, codemode: false }
 ```
 
 - `send`: post in the group, send stickers, add reactions. Turn it off for a bot that only watches.
 - `search`: search the web or read one public page (TinyFish). Requires `tiny_fish_api_key` in `.env`. Links in the group are not opened automatically, and private network addresses are refused.
-- `run_js`: run small JavaScript snippets in a sandbox for exact calculations; off by default. On Linux with bubblewrap (`bwrap`) installed, the code runs confined and cannot see project files or the network; install it before enabling.
+- `codemode`: let the bot write JavaScript scripts (Pi's native QuickJS sandbox) for exact calculations, or to call other tools in bulk and filter their results before answering; off by default. Scripts have no file system or network and cannot post for the bot.
 
 ## Images and videos
 

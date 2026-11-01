@@ -85,7 +85,7 @@ export default defineConfig({
 			tools: {
 				send: true,
 				search: false, // needs tiny_fish_api_key in .env
-				run_js: false, // sandboxed calculation; off by default
+				codemode: false, // Pi-native JavaScript scripts that can call the other tools; off by default
 			},
 		},
 	],

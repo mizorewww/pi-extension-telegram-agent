@@ -31,7 +31,7 @@
 - **Cache invariant**：永不改写已存在的 provider prefix；动态内容只以新 suffix 追加。每个请求必须是下一请求的严格前缀：不要做“只挂在最后一条”的动态尾部。每批的 sticker 附注只经 `context` 事件投影为紧跟该批的〔系统附注〕消息并永久保留，永不写入持久化 custom message content——compaction 直接读持久化字节。cache-visible 协议（system prompt shape、persona 序列化、tool schema 与顺序、消息 / 摘要序列化 grammar、sticker catalog block）任一变化：bump `CACHE_SCHEMA_VERSION`、更新 `test/cache.test.ts` golden、同步 `docs/cache.md`。
 - Secret 不进日志、测试 fixture、commit；`.env` 不入库。
 - daemon 生产模块只用 `src/observability/log.ts` 结构化日志；不记正文 / prompt / response / tool args / 完整 URL 与 path；业务正确性不得依赖日志。
-- 不得为通过验证而削弱测试、类型检查或安全控制（如 run_js sandbox）。
+- 不得为通过验证而削弱测试、类型检查或安全控制（如 codemode 边界、容器沙箱）。
 - 不改 SQLite schema、IPC 协议、消息序列化 grammar，除非有明确需求并同步文档。
 - 配置只有一套：`telegram.config.ts`（业务配置）+ Pi 内部 settings + `.env`（secrets）。禁止引入第二来源。
 
@@ -44,7 +44,7 @@
 - prompt / serialize / routing / runtime / provider-facing 工具 → `src/agent/`（tool description 是 cache-visible，见 `src/agent/tools.ts`）
 - 进程管理 / IPC server → `src/daemon/`、`src/ipc.ts`
 - TUI → `.pi/extensions/tg-extension.ts` + `src/plugin/timeline.ts`（UI-only 改动不得影响 provider payload）
-- 工具实现（search / run_js）→ `src/tools/`，注册顺序固定在 `src/agent/runtime.ts`
+- 工具实现（search 等）→ `src/tools/`；codemode 接入 → `src/agent/extensions/codemode.ts`，注册顺序固定在 `src/agent/runtime.ts`
 - 安装向导 → `src/onboarding/`
 
 ## 5. 测试规则

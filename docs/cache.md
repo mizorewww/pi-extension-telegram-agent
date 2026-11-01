@@ -37,7 +37,7 @@ golden 意外失败是报警：先查原因，不要直接改 expected。
 system:   共享协议 --- persona [--- sticker 目录]
 messages: Telegram 批次（custom message，各自后面可能跟一条〔系统附注〕sticker 附注）、
           assistant/tool/summary entries
-tools:    send, search, run_js（按 bot 开关过滤，顺序不变）
+tools:    send, search[, codemode]（按 bot 开关过滤，顺序不变；codemode 声明由 Pi 渲染）
 ```
 
 - context 模式下一批消息内部是 text|image 交错的内容块；没有图片时投影为纯字符串。
@@ -75,8 +75,9 @@ provider 没有返回 cache 用量时，若同一 cache cohort（provider/api/mo
 
 ## 版本记录
 
-当前：**27**。更早的版本见 git 历史。
+当前：**28**。更早的版本见 git 历史。
 
+- **v28**：`run_js` 删除，改用 Pi 原生 `codemode`（`send` 为 model-only）；系统提示工具摘要相应改变。
 - **v27**：`search` 读页改为分页：新增 `offset`，每页约 4k token，结尾给出继续读取的 offset；token 估算改为 CJK 约 1 token/字（原先按 UTF-8 字节/2，中文页只剩约 1.3k 字且无法续读）。
 - **v26**：sticker 附注改为每批各一条、永久保留（只列该批新出现的、不在固定目录里的可发送 sticker），让每个请求成为下一请求的严格前缀；系统提示里的工具声明按 bot 实际开启的工具生成（三个工具全开时字节不变）。
 

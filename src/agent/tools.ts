@@ -34,6 +34,12 @@ export interface SendDegradedDetails {
 	category: string;
 }
 
+/**
+ * How the model reaches each tool. `send` is model-only: a codemode script must never post, and
+ * its terminate:true only ends a turn when the model itself calls it.
+ */
+export const TOOL_EXPOSURE = { send: "model-only", search: "direct" } as const;
+
 /** Fixed tool order — never reorder (cache-visible). */
 export const TOOL_DEFS = [
 	{
@@ -96,15 +102,6 @@ export const TOOL_DEFS = [
 			},
 			{ additionalProperties: false },
 		),
-	},
-	{
-		name: "run_js",
-		label: "Run JS",
-		description:
-			"Run small pure-computation JavaScript. Use for exact arithmetic, date math, JSON/regex/string transforms that are error-prone by hand; skip it when the answer is trivial or needs external data. Sandboxed: no filesystem, network, process or environment access. console.log output and the final expression value are returned. 3s limit.",
-		parameters: Type.Object({
-			code: Type.String({ description: "JavaScript source; the value of the last expression is returned" }),
-		}),
 	},
 ] as const;
 

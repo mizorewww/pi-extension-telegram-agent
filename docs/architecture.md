@@ -81,18 +81,19 @@ Telegram create 不可回滚，所以：
 
 ## 工具
 
-固定为 `send`、`search`、`run_js`，顺序固定（cache 可见）。`src/agent/tools.ts` 是工具说明的唯一权威；系统提示里的“可用工具”声明按 bot 实际开启的工具生成。
+模型可见的声明固定为 `send`、`search`、`codemode`，顺序固定（cache 可见）。`src/agent/tools.ts` 是 `send`/`search` 说明与暴露方式（`TOOL_EXPOSURE`）的唯一权威；系统提示里的“可用工具”声明按 bot 实际开启的工具生成。
 
-- `search(query | url [, offset])`：TinyFish；query 最多 5 条短结果；url 只接受公网 HTTP(S)（本地预检 userinfo、localhost、私网、link-local），整页（≤200k 字符）在内存缓存 15 分钟，每次返回从 `offset` 起约 4k token 的一页并给出下一页 offset，包在“不可信网页内容”边界里。日志不记录 query、URL 路径或正文。
-- `run_js`：见下节威胁模型。
+- `send` 是 `model-only`：只能由模型直接调用，codemode 脚本调不到，保证“每轮唯一一次 send、成功即结束”。
+- `search(query | url [, offset])`：TinyFish；query 最多 5 条短结果；url 只接受公网 HTTP(S)（本地预检 userinfo、localhost、私网、link-local），整页（≤200k 字符）在内存缓存 15 分钟，每次返回从 `offset` 起约 4k token 的一页并给出下一页 offset，包在“不可信网页内容”边界里。日志不记录 query、URL 路径或正文。脚本里也可调用。
+- `codemode`：Pi 原生（`createCodemodeExtension`，`mode: "on"`、`models: false`），见下节威胁模型。声明文本由 Pi 按可调用工具渲染，fingerprint 以 Pi 版本 + 工具列表锁定。
 - 没有调用 send 的 assistant 文本只写本地事件和 TUI，session 里用固定 `[no_send]` 代替。
 
-## run_js 威胁模型
+## codemode 威胁模型
 
-- **威胁**：群成员通过 prompt injection 让 bot 执行任意 JS；最坏情况是读到 daemon 同 uid 可读的 `.env` 并外发。
-- **防护**：vm context 由 `Object.create(null)` 创建并禁止字符串/wasm 代码生成，context 内没有任何 host realm 对象；结果只以字符串跨界。子进程 env 只保留 PATH、独立 tmp cwd、`--smol`、同步代码 3 s vm timeout、进程 5 s SIGKILL、输出 4 KB 上限。
-- **第二层（Linux + bubblewrap）**：子进程运行在新的 namespace 里，没有网络，文件系统只有只读 `/usr`、解释器和自己的工作目录；即使引擎漏洞打穿 vm，也看不到项目目录、`.env` 和 home。没有 `bwrap` 的平台只有第一层。
-- **残余风险**：没有 bubblewrap 时，node:vm 不是官方安全边界，引擎 0day 可打穿 realm 读到 daemon 能读的文件；`--smol` 不是硬内存上限。默认关闭。
+- **威胁**：群成员或网页内容通过 prompt injection 让 bot 执行任意 JS。
+- **边界**：脚本跑在 Pi 的 QuickJS（wasm）VM 里，位于独立 worker 线程；VM 的唯一出口是被注册为可调用的工具，没有 Node API、文件系统、网络、计时器。可调用工具 = 激活的 `direct` 工具 + `codemode` 暴露的工具；`send` 是 `model-only`，脚本里不存在。
+- **宿主侧约束**（`src/agent/extensions/codemode.ts`）：单次结果最多 16,000 字符（脚本的 `// @options` 不能调高）；脚本 `image()` 产生的图片替换为固定文本，session 里永远不存 base64。
+- **残余风险**：wasm 引擎漏洞；VM 每次最多 256 MB，同进程最多 2 个 worker（`PI_CODEMODE_MAX_WORKERS`）。默认关闭。
 
 ## Telegram 控制命令
 

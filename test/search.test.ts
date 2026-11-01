@@ -1,36 +1,8 @@
-// Security boundaries of the model-facing tools: run_js cannot reach the host realm, and
-// search never fetches a non-public target or leaks queries/URLs/keys into telemetry.
+// Security boundary of the search tool: it never fetches a non-public target or leaks
+// queries/URLs/keys into telemetry, and long pages stay readable page by page.
 
 import { expect, test } from "bun:test";
-import { BWRAP, runJs, sandboxCommand } from "../src/tools/run-js.ts";
 import { runTinyFishTool, validatePublicHttpUrl } from "../src/tools/search.ts";
-
-test("run_js exposes no host globals", async () => {
-	const r = await runJs("[typeof process, typeof require, typeof Bun, typeof fetch].join(',')");
-	expect(r.ok).toBe(true);
-	expect(r.output).toContain("undefined,undefined,undefined,undefined");
-});
-
-// Real payloads against the real sandbox; do not weaken them.
-for (const vector of [
-	'console.log.constructor("return typeof process")()',
-	'this.constructor.constructor("return typeof process")()',
-	'(async function(){}).constructor("return typeof process")()',
-	'new Function("return typeof process")()',
-	'eval("typeof process")',
-]) {
-	test(`run_js escape vector is blocked: ${vector}`, async () => {
-		const r = await runJs(vector);
-		expect(r.ok).toBe(false);
-		expect(r.output).not.toContain('"object"');
-	});
-}
-
-test("run_js bounds runaway loops and output", async () => {
-	expect((await runJs("while(true){}")).ok).toBe(false);
-	const flood = await runJs("for (let i = 0; i < 1000; i++) console.log('x'.repeat(100)); 'done'");
-	expect(flood.output.length).toBeLessThanOrEqual(4096 + 20);
-}, 15000);
 
 test("search accepts only public HTTP(S) targets and never fetches the rest", async () => {
 	expect(validatePublicHttpUrl("https://[2001:4860:4860::8888]/").hostname).toBe("2001:4860:4860::8888");
@@ -109,30 +81,3 @@ test("search pages through a long fetched page without refetching it", async () 
 	expect(joined).toBe(text);
 	expect(calls).toBe(1);
 });
-
-// Defense in depth below the vm: even raw code (no vm) inside the confinement must not see the
-// project, .env or the network. Only runs where bubblewrap exists (production Linux hosts).
-test.skipIf(!BWRAP)(
-	"run_js confinement hides the project and the network from raw code",
-	async () => {
-		const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
-		const { tmpdir } = await import("node:os");
-		const { join, resolve } = await import("node:path");
-		const dir = mkdtempSync(join(tmpdir(), "runjs-confine-"));
-		try {
-			const probe = `const fs = require("node:fs");
-let file = "hidden"; try { fs.readFileSync(${JSON.stringify(resolve("package.json"))}); file = "visible"; } catch {}
-let net = "blocked"; try { await fetch("http://1.1.1.1", { signal: AbortSignal.timeout(2000) }); net = "open"; } catch {}
-console.log(JSON.stringify({ file, net }));`;
-			writeFileSync(join(dir, "wrapper.mjs"), probe);
-			writeFileSync(join(dir, "code.js"), "");
-			const { command, args } = sandboxCommand(process.execPath, dir);
-			const child = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "ignore" });
-			const out = await new Response(child.stdout).text();
-			expect(JSON.parse(out.trim())).toEqual({ file: "hidden", net: "blocked" });
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	},
-	15000,
-);

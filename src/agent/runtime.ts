@@ -35,9 +35,8 @@ import {
 	REPLY_RECOVERY_PROMPT,
 	SHARED_PROTOCOL,
 } from "./prompt.ts";
-import { TOOL_DEFS, toolProtocolHash, type SendParams, type SearchParams } from "./tools.ts";
+import { TOOL_DEFS, TOOL_EXPOSURE, toolProtocolHash, type SendParams, type SearchParams } from "./tools.ts";
 import { runTinyFishTool } from "../tools/search.ts";
-import { runJs } from "../tools/run-js.ts";
 import { contextMediaRefs, createContextImageResolver, ensureContextMedia } from "../media/context-media.ts";
 import { isVisionMedia, type MediaDownloadApi } from "../media/local-cache.ts";
 import { ensureVision, type VisionExecutor, type VisionUpdateSink } from "../media/vision.ts";
@@ -88,6 +87,9 @@ import {
 	buildCompactionContent,
 	isTelegramContextDetails,
 	makeAssistantPersistencePolicyExtension,
+	makeCodemodeExtension,
+	CODEMODE_DECLARATION_TOKENS,
+	CODEMODE_FINGERPRINT_ENTRY,
 	makeCachePayloadObserverExtension,
 	makeTelegramCompactionExtension,
 	makeTelegramContextExtension,
@@ -141,7 +143,6 @@ const ACTIVITY_RAW_EVENT_KINDS = new Set([
 	"tool_result",
 	"tool_search",
 	"tool_fetch",
-	"tool_run_js",
 	"markdown_sent",
 	"plain_fallback",
 	"send",
@@ -380,6 +381,7 @@ export class BotRuntime {
 			label: "Send",
 			description: TOOL_DEFS[0].description,
 			parameters: TOOL_DEFS[0].parameters,
+			exposure: TOOL_EXPOSURE.send,
 			execute: async (_toolCallId: string, params: SendParams) => {
 				return await this.executeSend(params);
 			},
@@ -389,26 +391,13 @@ export class BotRuntime {
 			label: "Search",
 			description: TOOL_DEFS[1].description,
 			parameters: TOOL_DEFS[1].parameters,
+			exposure: TOOL_EXPOSURE.search,
 			execute: async (_toolCallId: string, params: SearchParams) => {
 				const result = await runTinyFishTool(this.config.tinyfishApiKey, params);
 				this.recordEvent(result.event.kind, result.event.payload);
 				return {
 					content: [{ type: "text" as const, text: result.content }],
 					details: result.details,
-				};
-			},
-		};
-		const runJsTool = {
-			name: "run_js",
-			label: "Run JS",
-			description: TOOL_DEFS[2].description,
-			parameters: TOOL_DEFS[2].parameters,
-			execute: async (_toolCallId: string, params: { code: string }) => {
-				const result = await runJs(params.code);
-				this.recordEvent("tool_run_js", { ok: result.ok, durationMs: result.durationMs });
-				return {
-					content: [{ type: "text" as const, text: result.output || "(no output)" }],
-					details: { ok: result.ok, durationMs: result.durationMs },
 				};
 			},
 		};
@@ -429,14 +418,18 @@ export class BotRuntime {
 		// Pi's trigger formula is contextTokens > contextWindow - reserveTokens, so reserve = window - threshold.
 		// Tool order is cache-visible protocol: never reorder (docs/cache.md, REQ-TEST-0001 R2).
 		// Per-bot tool toggles (REQ-CONF-0001): filter the fixed-order tool list. send off
-		// means the bot cannot speak in-group (observer-only); search/run_js off saves tokens.
-		const activeTools = [sendTool, searchTool, runJsTool].filter((t) =>
-			t.name === "send" ? this.bot.tools.send : t.name === "search" ? this.bot.tools.search : this.bot.tools.runJs,
+		// means the bot cannot speak in-group (observer-only); search/codemode off saves tokens.
+		const activeTools = [sendTool, searchTool].filter((t) =>
+			t.name === "send" ? this.bot.tools.send : this.bot.tools.search,
 		);
-		this.toolsHash = toolProtocolHash(activeTools);
-		this.staticPrefixTokenEstimate = estimateProviderTokensUpperBound(
-			`${systemPrompt}\n${JSON.stringify(activeTools.map(({ name, description, parameters }) => ({ name, description, parameters })))}`,
-		);
+		// Pi renders the codemode declaration from the callable tools; it is pinned by the Pi
+		// version and these tools, both already in the fingerprint.
+		const declaredTools = this.bot.tools.codemode ? [...activeTools, CODEMODE_FINGERPRINT_ENTRY] : activeTools;
+		this.toolsHash = toolProtocolHash(declaredTools);
+		this.staticPrefixTokenEstimate =
+			estimateProviderTokensUpperBound(
+				`${systemPrompt}\n${JSON.stringify(activeTools.map(({ name, description, parameters }) => ({ name, description, parameters })))}`,
+			) + (this.bot.tools.codemode ? CODEMODE_DECLARATION_TOKENS : 0);
 		this.contextFingerprintInput = {
 			piVersion: PI_VERSION,
 			provider: this.bot.provider,
@@ -454,7 +447,7 @@ export class BotRuntime {
 			stickerCatalogSnapshotSha256: stickerCatalogSnapshotHash(this.db, this.bot.id, this.bot.stickerSets),
 			mediaMode: this.config.media.mode,
 			extensionOrder: TELEGRAM_EXTENSION_ORDER,
-			tools: activeTools.map((tool) => ({
+			tools: declaredTools.map((tool) => ({
 				name: tool.name,
 				description: tool.description,
 				parameters: tool.parameters,
@@ -506,6 +499,7 @@ export class BotRuntime {
 			makeCachePayloadObserverExtension(payloadKey, (observation) => {
 				this.pendingPayloadObservation = observation;
 			}),
+			...(this.bot.tools.codemode ? [makeCodemodeExtension()] : []),
 			makeAssistantPersistencePolicyExtension(
 				(text) => {
 					this.recordEvent("assistant_text", { text });
@@ -543,6 +537,7 @@ export class BotRuntime {
 				}),
 				resourceLoader: loader,
 				noTools: "builtin",
+				...(this.bot.tools.codemode ? { tools: ["+codemode"] } : {}),
 				customTools: activeTools,
 			});
 			const streamFunction = session.agent.streamFunction;
@@ -1251,7 +1246,7 @@ export class BotRuntime {
 			maxSuffixTokens: this.bot.maxSuffixTokens,
 			outputReserve: Math.min(4096, this.model.maxTokens),
 			reasoningReserve: this.bot.reasoningEffort === "off" ? 0 : DEFAULT_REASONING_RESERVE,
-			toolFollowupReserve: this.bot.tools.search || this.bot.tools.runJs ? DEFAULT_TOOL_FOLLOWUP_RESERVE : 2048,
+			toolFollowupReserve: this.bot.tools.search || this.bot.tools.codemode ? DEFAULT_TOOL_FOLLOWUP_RESERVE : 2048,
 		});
 		const packed = packMessageEvents(
 			this.db,

@@ -65,12 +65,12 @@ export default defineConfig({
 ## 工具
 
 ```ts
-tools: { send: true, search: false, run_js: false }
+tools: { send: true, search: false, codemode: false }
 ```
 
 - `send`：在群里发言、发 sticker、点 reaction。关掉就是只看不说的观察 bot。
 - `search`：联网搜索或读取一个公开网页（TinyFish），需要在 `.env` 加 `tiny_fish_api_key`。不会自动打开群里的每个链接，也不能访问内网地址。
-- `run_js`：在沙箱里跑小段 JavaScript 做精确计算，默认关闭。Linux 上装了 bubblewrap（`bwrap`）时，代码在隔离环境里运行，看不到项目文件和网络；建议开启前先安装。
+- `codemode`：让 bot 写 JavaScript 脚本（Pi 原生 QuickJS 沙箱）做精确计算，或在脚本里批量调用其他工具、过滤结果再回答，默认关闭。脚本没有文件系统和网络，也不能替 bot 发言。
 
 ## 图片和视频
 

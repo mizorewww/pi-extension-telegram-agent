@@ -54,7 +54,7 @@ export interface TelegramBotConfigInput extends SharedConfigInput {
 	persona_path: string;
 	/** Probability for unaddressed human messages; all bots together must total <= 1. */
 	routing_p?: number;
-	tools?: { send?: boolean; search?: boolean; run_js?: boolean };
+	tools?: { send?: boolean; search?: boolean; codemode?: boolean };
 	sticker_sets?: readonly string[];
 }
 
@@ -106,7 +106,7 @@ export interface BotConfig {
 	providerRetries: number;
 	maxSuffixTokens: number;
 	maxMessageTokens: number;
-	tools: { send: boolean; search: boolean; runJs: boolean };
+	tools: { send: boolean; search: boolean; codemode: boolean };
 	stickerSets: string[];
 }
 
@@ -198,7 +198,7 @@ const MEDIA_RULES: Record<string, Rule> = {
 	max_per_turn: range(0, 16, true),
 	concurrency: range(1, 16, true),
 };
-const TOOL_RULES: Record<string, Rule> = { send: boolean, search: boolean, run_js: boolean };
+const TOOL_RULES: Record<string, Rule> = { send: boolean, search: boolean, codemode: boolean };
 const ROOT_KEYS = new Set([...Object.keys(ROOT_RULES), "group_peer_id", "media", "telegram_admins", "bots"]);
 const BOT_KEYS = new Set([
 	...Object.keys(BOT_RULES),
@@ -361,7 +361,7 @@ function validate(rootDir: string, raw: Raw, env: Record<string, string>, identi
 			if (isObject(bot.tools)) {
 				checkKeys(errors, `${at}.tools.`, bot.tools, new Set(Object.keys(TOOL_RULES)));
 				checkFields(errors, `${at}.tools.`, bot.tools, TOOL_RULES);
-			} else errors.push(`[config] ${at}.tools: expected object {send?, search?, run_js?}`);
+			} else errors.push(`[config] ${at}.tools: expected object {send?, search?, codemode?}`);
 		}
 		if (
 			bot.sticker_sets !== undefined &&
@@ -459,7 +459,7 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 			providerRetries: setting("provider_retries", 2),
 			maxSuffixTokens: setting("max_suffix_tokens", 12_000),
 			maxMessageTokens: setting("max_message_tokens", 4_096),
-			tools: { send: tools.send !== false, search: tools.search === true, runJs: tools.run_js === true },
+			tools: { send: tools.send !== false, search: tools.search === true, codemode: tools.codemode === true },
 			stickerSets: [...((bot.sticker_sets as string[] | undefined) ?? [])],
 		};
 	});

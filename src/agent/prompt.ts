@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 27; // v27: search url paging (offset) and 4k-token pages
+export const CACHE_SCHEMA_VERSION = 28; // v28: Pi-native codemode replaces run_js
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
@@ -11,12 +11,12 @@ export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
 export interface EnabledTools {
 	send: boolean;
 	search: boolean;
-	runJs: boolean;
+	codemode: boolean;
 }
 
 const TOOL_SUMMARIES = [
 	["search", "联网搜索，也可读取一个公开网页"],
-	["run_js", "运行小型计算"],
+	["codemode", "写 JavaScript 脚本做精确计算，或在脚本里批量调用其他工具并过滤结果"],
 	["send", "唯一的公开发言通道，也能对某条消息点 reaction 表态"],
 ] as const;
 const COUNT = ["零", "一", "两", "三"] as const;
@@ -24,7 +24,7 @@ const COUNT = ["零", "一", "两", "三"] as const;
 /** Describe only the tools this bot really has, so it never claims or calls a missing one. */
 export function toolCapabilityDeclaration(tools: EnabledTools): string {
 	const enabled = TOOL_SUMMARIES.filter(([name]) =>
-		name === "search" ? tools.search : name === "run_js" ? tools.runJs : tools.send,
+		name === "search" ? tools.search : name === "codemode" ? tools.codemode : tools.send,
 	);
 	const list = enabled.map(([name, summary]) => `${name}（${summary}）`).join("、");
 	const intro = enabled.length > 0 ? `你有${COUNT[enabled.length]}个工具：${list}。` : "你没有可用工具。";
