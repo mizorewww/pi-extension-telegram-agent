@@ -8,6 +8,7 @@ import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { guardProviderCall } from "../src/agent/provider-guard.ts";
+import { createReplyObligation } from "../src/db/reply-obligations.ts";
 import { BotRuntime } from "../src/agent/runtime.ts";
 import type { AppConfig, BotConfig } from "../src/config.ts";
 import type { BotApi } from "../src/telegram/api.ts";
@@ -455,3 +456,21 @@ for (const failure of ["auth", "overflow", "persistent_transport"] as const) {
 		}
 	});
 }
+
+test("tg_post sends interim messages without answering: the obligation and turn outcome stay open", async () => {
+	const { rt, db } = setup();
+	insertMessage(db, 9100, "@小雪 帮我查一下");
+	createReplyObligation(db, BOT_ID, CHAT_ID, 9100);
+	(rt as any).turnSendOutcome = "none";
+	(rt as any).interimPostsThisTurn = 0;
+	(rt as any).visibleMessageIds.add(9100);
+	const before = obligationCount(db);
+	expect(before).toBe(1);
+	const first = await (rt as any).executeInterimPost({ message: "我去查一下～", reply_to: 9100 });
+	expect(first.sent).toHaveLength(1);
+	await (rt as any).executeInterimPost({ message: "还在翻资料" });
+	await expect((rt as any).executeInterimPost({ message: "第三条" })).rejects.toThrow("at most 2");
+	expect((rt as any).turnSendOutcome).toBe("none");
+	expect(obligationCount(db)).toBe(before);
+	db.close();
+});

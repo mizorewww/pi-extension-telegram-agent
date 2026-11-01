@@ -63,7 +63,7 @@ import {
 import { MessageQueryError, queryMessages, type MessageQuery } from "../tools/messages.ts";
 import { runTinyFishTool } from "../tools/search.ts";
 import { contextMediaRefs, createContextImageResolver, ensureContextMedia } from "../media/context-media.ts";
-import { downloadSource } from "../media/local-cache.ts";
+import { downloadSource, MEDIA_DOWNLOAD_MAX_BYTES } from "../media/local-cache.ts";
 import { WorkBox } from "../sandbox/box.ts";
 import { TaskError, type TaskManager } from "../tasks/manager.ts";
 import { isVisionMedia, type MediaDownloadApi } from "../media/local-cache.ts";
@@ -177,6 +177,10 @@ function structured<T extends object>(value: T) {
 	};
 }
 
+/** Interim tg_post messages a turn may send before its final send. */
+const INTERIM_POSTS_PER_TURN = 2;
+const INTERIM_POST_MAX_CHARS = 500;
+
 /** view_image calls that may attach images within one turn. */
 const VIEW_IMAGE_MAX_PER_TURN = 4;
 
@@ -192,6 +196,7 @@ const ACTIVITY_RAW_EVENT_KINDS = new Set([
 	"tool_sh_exec",
 	"file_sent",
 	"tool_tg_download",
+	"tool_tg_post",
 	"box_reset",
 	"task_started",
 	"markdown_sent",
@@ -329,6 +334,7 @@ export class BotRuntime {
 	private telemetryHmacKey = "";
 	private staticPrefixTokenEstimate = 0;
 	private viewedImagesThisTurn = 0;
+	private interimPostsThisTurn = 0;
 	private readonly box: WorkBox | null;
 	private readonly tasks: TaskManager | null;
 	private pendingPayloadObservation: ProviderPayloadObservation | null = null;
@@ -494,7 +500,13 @@ export class BotRuntime {
 				}
 			},
 		};
-		const [, downloadDef, execDef, resetDef] = CODEMODE_TOOL_DEFS;
+		const [, downloadDef, execDef, resetDef, postDef] = CODEMODE_TOOL_DEFS;
+		const postTool = {
+			...postDef,
+			exposure: "codemode" as const,
+			execute: async (_toolCallId: string, params: { message: string; reply_to?: number }) =>
+				structured(await this.executeInterimPost(params)),
+		};
 		const boxTools = this.box
 			? [
 					{
@@ -527,7 +539,9 @@ export class BotRuntime {
 					},
 				]
 			: [];
-		const scriptTools = this.bot.tools.codemode ? [messagesTool, ...boxTools] : [];
+		const scriptTools = this.bot.tools.codemode
+			? [messagesTool, ...boxTools, ...(this.bot.tools.send ? [postTool] : [])]
+			: [];
 		const catalogModel = this.modelRuntime.getModel(this.bot.provider, this.bot.model);
 		if (!catalogModel) throw new Error(`model not found: ${this.bot.provider}/${this.bot.model}`);
 		const model = { ...catalogModel, contextWindow: Math.min(catalogModel.contextWindow, this.config.contextWindow) };
@@ -1184,8 +1198,8 @@ export class BotRuntime {
 		return { summary, usage: result.usage };
 	}
 
-	private async executeSend(params: SendParams) {
-		const result = await executeAgentSend(params, {
+	private sendContext(stopTyping: boolean): Parameters<typeof executeAgentSend>[1] {
+		return {
 			db: this.db,
 			api: this.api,
 			botId: this.bot.id,
@@ -1200,10 +1214,14 @@ export class BotRuntime {
 			onSent: (raw) => this.sentMessageSink?.(raw),
 			recordEvent: (kind, payload) => this.recordEvent(kind, payload),
 			stopTyping: () => {
-				this.typingLease.stop();
+				if (stopTyping) this.typingLease.stop();
 			},
 			recordDuration: (durationMs) => this.recordSendDuration(durationMs),
-		});
+		};
+	}
+
+	private async executeSend(params: SendParams) {
+		const result = await executeAgentSend(params, this.sendContext(true));
 		// Both successful sends and degraded terminal outcomes forbid an automatic resend.
 		// A reaction-only turn created no message, so a direct address is still owed a reply.
 		if ("outcome" in result.details) {
@@ -1359,6 +1377,7 @@ export class BotRuntime {
 
 		this.pendingInputMetrics = emptyInputMetrics();
 		this.viewedImagesThisTurn = 0;
+		this.interimPostsThisTurn = 0;
 		if (this.config.media.mode === "context") {
 			await this.ensureBatchContextMedia([...mandatory, ...normal], obligationIds);
 		} else {
@@ -1957,6 +1976,25 @@ export class BotRuntime {
 		};
 	}
 
+	/**
+	 * tg_post: one short interim message from a script ("我去查一下") through the same irreversible
+	 * send boundary. It neither ends the turn nor settles a reply obligation; the final send does.
+	 */
+	private async executeInterimPost(params: { message: string; reply_to?: number }): Promise<{ sent: number[] }> {
+		if (this.interimPostsThisTurn >= INTERIM_POSTS_PER_TURN)
+			throw new Error(`tg_post failed: at most ${INTERIM_POSTS_PER_TURN} interim posts per turn; answer with send`);
+		const message = params.message?.trim() ?? "";
+		if (!message || message.length > INTERIM_POST_MAX_CHARS)
+			throw new Error(`tg_post failed: message must be 1-${INTERIM_POST_MAX_CHARS} characters`);
+		this.interimPostsThisTurn++;
+		const result = await executeAgentSend(
+			{ message, ...(params.reply_to != null ? { reply_to: params.reply_to } : {}) },
+			this.sendContext(false),
+		);
+		this.recordEvent("tool_tg_post", { sent: result.details.sent.length });
+		return { sent: [...result.details.sent] };
+	}
+
 	/** The task tool: start, steer, cancel or list this bot's background tasks. */
 	private async executeTask(params: TaskParams): Promise<string> {
 		const tasks = this.tasks!;
@@ -2066,14 +2104,20 @@ export class BotRuntime {
 			)
 			.get(chatId, messageId) as { media: string | null; first_seen_by: string } | null;
 		const media = row?.media
-			? (JSON.parse(row.media) as { kind: string; file_unique_id: string; file_id: string })
+			? (JSON.parse(row.media) as { kind: string; file_unique_id: string; file_id: string; file_size?: number })
 			: null;
 		if (!row || !media) throw new Error("tg_download failed: no attachment on that message");
+		const tooBig =
+			"tg_download failed: the file is larger than the 20 MB Telegram lets bots download; ask for a smaller file or a link";
+		if ((media.file_size ?? 0) > MEDIA_DOWNLOAD_MAX_BYTES) throw new Error(tooBig);
 		const mapped = downloadSource(this.db, this.api, this.bot.id, media.file_unique_id, this.botApis);
 		const source = mapped ?? { api: this.botApis.get(row.first_seen_by), fileId: media.file_id };
 		if (!source.api) throw new Error("tg_download failed: file_id_unavailable");
-		const file = await source.api.getFile(source.fileId);
-		if (!file.file_path) throw new Error("tg_download failed: telegram_file_unavailable (over 20 MB?)");
+		const file = await source.api.getFile(source.fileId).catch((error: unknown) => {
+			if (error instanceof Error && /file is too big/i.test(error.message)) throw new Error(tooBig);
+			throw error;
+		});
+		if (!file.file_path) throw new Error("tg_download failed: telegram_file_unavailable");
 		const bytes = await source.api.downloadFile(file.file_path);
 		const extension = /\.[A-Za-z0-9]{1,8}$/.exec(file.file_path)?.[0] ?? "";
 		const path = await this.box!.writeFile(`inbox/${messageId}${extension}`, bytes);

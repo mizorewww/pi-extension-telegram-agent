@@ -265,6 +265,20 @@ export const CODEMODE_TOOL_DEFS = [
 		parameters: Type.Object({}, { additionalProperties: false }),
 		outputSchema: Type.Object({ reset: Type.Boolean() }),
 	},
+	{
+		name: "tg_post",
+		label: "Interim post",
+		description:
+			"Post one short interim message to the group right now while the script keeps working, e.g. 我去查一下～ before a slow search, shell job or batch of calls. At most 2 per turn. It does not end the turn and is not the answer: after the script returns you still give the real answer with send. Skip it when the work takes only a few seconds.",
+		parameters: Type.Object(
+			{
+				message: Type.String({ minLength: 1, maxLength: 500, description: "Short Markdown message" }),
+				reply_to: Type.Optional(Type.Integer({ description: "A #id visible in your context" })),
+			},
+			{ additionalProperties: false },
+		),
+		outputSchema: Type.Object({ sent: Type.Array(Type.Integer(), { description: "Sent message ids" }) }),
+	},
 ] as const;
 
 /** The send declaration for a bot with a work box: the same tool plus `files`. */

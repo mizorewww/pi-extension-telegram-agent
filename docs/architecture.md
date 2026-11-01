@@ -94,12 +94,13 @@ Telegram create 不可回滚，所以：
 
 ## 工具
 
-系统提示的「可用工具」只描述 bot 实际开启的工具及其用法（`src/agent/prompt.ts` 的 `toolCapabilityDeclaration`），并给出源代码仓库地址供 bot 阅读自己的实现。模型可见的声明按固定顺序为 `send`、`search`、`view_image`（hybrid 模式）、`task`（`tools.tasks`），再加 Pi 渲染的 `codemode`（cache 可见）。`src/agent/tools.ts` 是各工具说明与暴露方式（`TOOL_EXPOSURE`）的唯一权威。
+系统提示的「可用工具」只描述 bot 实际开启的工具及其用法，每个工具下附经过真实运行的示例（`src/agent/tool-examples.md`，改动后跑 `scripts/e2e-examples.ts`）（`src/agent/prompt.ts` 的 `toolCapabilityDeclaration`），并给出源代码仓库地址供 bot 阅读自己的实现。模型可见的声明按固定顺序为 `send`、`search`、`view_image`（hybrid 模式）、`task`（`tools.tasks`），再加 Pi 渲染的 `codemode`（cache 可见）。`src/agent/tools.ts` 是各工具说明与暴露方式（`TOOL_EXPOSURE`）的唯一权威。
 
 - `send` 是 `model-only`：只能由模型直接调用，codemode 脚本调不到，保证“每轮唯一一次 send、成功即结束”。
 - `search(query | url [, offset])`：TinyFish；query 最多 5 条短结果；url 只接受公网 HTTP(S)（本地预检 userinfo、localhost、私网、link-local），整页（≤200k 字符）在内存缓存 15 分钟，每次返回从 `offset` 起约 4k token 的一页并给出下一页 offset，包在“不可信网页内容”边界里。日志不记录 query、URL 路径或正文。脚本里也可调用。
 - `codemode`：Pi 原生（`createCodemodeExtension`，`mode: "on"`、`models: false`），见下节威胁模型。声明文本由 Pi 按可调用工具渲染，fingerprint 以 Pi 版本 + 工具列表锁定。
 - `tg_messages`（`exposure: "codemode"`，只有脚本能调）：只读检索本群 canonical 历史（`src/tools/messages.ts`），按 id / 时间 / 发送者 / 回复 / 媒体类型 / 子串过滤（3 字以上走 FTS5 trigram 索引，可按 relevance 排序；更短的回退 LIKE），每次 ≤500 行、正文 ≤4000 字，带 `next_before_id`/`next_after_id` 分页；返回固定 DTO（声明为 `outputSchema`），不暴露 SQL 与表结构；排除 `telegram_control_messages` 与其他 chat。bot 收不到 Telegram 删除事件，已删除的消息仍可能被检索到。
+- `tg_post`（`exposure: "codemode"`，开了 send 就注册）：脚本里先发一条 ≤500 字的中间消息（例如"我去查一下"）再继续干活。走与 send 相同的发送边界（预检、结果未知不重发、可见集合），但不结束本轮、不改变本轮发送结果、不结清回复义务，最后仍要 send；每轮最多 2 条。
 - `tg_download` / `sh_exec` / `sh_reset`（`exposure: "codemode"`，`tools.sandbox` 开启时注册）：在 bot 的工作区容器里拷入 Telegram 附件、执行命令、清空工作区，见下节威胁模型与 [runbooks/sandbox.md](runbooks/sandbox.md)。
 - 没有调用 send 的 assistant 文本只写本地事件和 TUI，session 里用固定 `[no_send]` 代替。
 
