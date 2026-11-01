@@ -1,14 +1,14 @@
 # 设计决策与事故记录
 
-历次 review 中仍然有效、且不看代码容易做错的结论。每条写清“做了什么、为什么”。逐次审查的完整过程在 git 历史里（2026-08 至 2026-09 的 `docs/engineering/code-review-*.md`）。新的长期结论直接加到这里，不再新建单次 review 文件。
+仍然有效、且不看代码容易做错的结论。每条写清“做了什么、为什么”；过程记录留在 git 历史，新的长期结论直接加到这里。
 
 ## Pi 集成
 
 - **`streamFunction` 包装是官方注入形态。** `Agent.streamFunction` 是公开可变字段；`createAgentSession()` 不接受 streamFn，只能事后包一层来注入 `cacheRetention`、timeout 和 provider watchdog。升级 Pi 必须验证这一包装仍生效（`src/agent/runtime.ts`）。
 - **扩展抛异常时 Pi 会退回默认摘要器。** 所以 `tg-compaction` 的任何失败都返回 `{ cancel: true }`，绝不 throw（`handleBeforeCompact`）。
 - **图片预算必须在 Pi 准备压缩之前换算。** 文字小于预算时 Pi 在触发 `session_before_compact` 之前就返回，钩子来不及；所以在 `agent_end` / `compact()` 前临时调整 `keepRecentTokens`。
-- **Pi 1.0.4 起** `COMPACTION_SUMMARY_PREFIX` 不再导出（本地常量），`context` handler 不再收到 system message，扩展的 `Image` 组件由 Pi 宿主负责把非 PNG 转成 Kitty 可用格式。
-- **Pi 1.4.0 起** `before_agent_start` 也会在 `sendMessage(..., { triggerTurn: true })` 启动的 run 上触发（事件按 `messageType` 区分）；本仓库只经 `session.prompt()` 启动 turn，`tg-context` handler 不读事件字段，语义不变。
+- **升级 Pi 时复核的行为差异。** `COMPACTION_SUMMARY_PREFIX` 不再导出（`src/agent/extensions/cache-observer.ts` 的本地常量）；`context` handler 收不到 system message；扩展的 `Image` 组件由 Pi 宿主把非 PNG 转成 Kitty 可用格式；`before_agent_start` 也会在 `sendMessage(..., { triggerTurn: true })` 启动的 run 上触发，本仓库只经 `session.prompt()` 启动 turn，`tg-context` handler 不读事件字段。
+- **脚本执行用 Pi 原生 codemode，不自建沙箱。** 自建的 `run_js`（子进程 + bubblewrap）已删除；QuickJS VM 的边界由 Pi 维护，本仓库只加宿主侧约束（结果上限、脚本图片不进 session、`send` 为 model-only）。需要真实命令行时走每 bot 的 rootless Docker 工作区，而不是放宽 VM。
 - **bot session 不加载项目或用户 extension**（`noExtensions`），shared `ModelRuntime` 只加载用户级已安装的 provider extension 以获得模型目录与认证。
 
 ## 正确性边界
