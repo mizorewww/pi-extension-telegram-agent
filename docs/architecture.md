@@ -20,7 +20,7 @@ Telegram ── poller × N ──┐
 1. **Ingest**（`src/telegram/poller.ts`、`ingest.ts`）：每个 bot 一个 `getUpdates` 循环。raw update、canonical `messages` 行、不可变 `message_events` delta、`pending_telegram_dispatch` 与 offset 在**一个事务**里提交。只接受配置的群（`groupChatId = -100<peer>`）。多个 bot 收到同一条消息只保留一份 canonical；更旧的 edit 不回写。
 2. **交接**：poller 先把 pending handoff 交给 routing/control 回调，回调成功才删除；失败或重启后先重放 handoff 再拉新 update。
 3. **Route**（`src/agent/router.ts`）：优先级 @mention > reply > 配置名称 > 概率；每一级扫完全部 bot 才进入下一级。概率 = `HMAC(router_secret, chatId:messageId)` 落入按配置顺序累加的 `routing_p` 桶（Σ≤1）。bot 发的消息默认不触发，例外只有 `/fire`（见下节）。概率目标 busy 或在 cooldown 时直接跳过，**不改投**别的 bot。`routing_claims` 保证同一条消息对同一 bot 只启动一次。
-4. **Turn**（`src/agent/runtime.ts`）：每 bot 串行状态机 `idle → flushing → idle`，在途触发只合并为一次 pending。一轮 flush：
+4. **Turn**（`src/agent/runtime.ts`）：每 bot 串行状态机 `idle → flushing → idle`，在途触发只合并为一次 pending；但人类在 provider 回合进行中直接点名时，新事件立即打包成一批，用 Pi `sendCustomMessage(…, { deliverAs: "steer" })` 插进正在跑的回合（当前工具调用结束后、下一次模型调用前送达）。插入时不提交任何状态：回合结束先清空 Pi 队列里没送达的批次，再按 session 里实际落地的批次推进 cursor、结清它们带来的义务，没落地的留给下一轮正常打包。一轮 flush：
    - 按 cursor 有界读取近期 event（≤256）和直接点名的回复义务（≤64），义务优先打包；
    - 按 `media.mode` 准备媒体；
    - 打包成一条 `telegram_context_v2` custom message，经 Pi `session.prompt()` 发出；

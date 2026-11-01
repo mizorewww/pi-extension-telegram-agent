@@ -115,6 +115,7 @@ function setup(publicSend = true): Harness {
 		settingsManager: SettingsManager.inMemory(),
 		sessionManager,
 		getContextUsage: () => null,
+		clearQueue: () => ({ steering: [], followUp: [] }),
 		prompt: async () => {
 			const details = (rt as any).pendingTurnContext;
 			if (!details) throw new Error("unexpected repair turn");
@@ -492,3 +493,70 @@ test("a slow vision description never holds the reply past the short wait", asyn
 	expect(Date.now() - started).toBeLessThan(5_000);
 	db.close();
 }, 10_000);
+
+for (const delivered of [true, false]) {
+	test(`a mention during a turn is steered in and ${delivered ? "answered in the same turn" : "kept for the next turn when Pi never delivers it"}`, async () => {
+		const { rt, db } = setup();
+		const session = (rt as any).session;
+		const queued: any[] = [];
+		const providerTexts: string[] = [];
+		let midTurn = true;
+		session.isStreaming = false;
+		session.sendCustomMessage = async (message: any) => void queued.push(message);
+		session.clearQueue = () => {
+			queued.length = 0;
+			return { steering: [], followUp: [] };
+		};
+		session.prompt = async () => {
+			const details = (rt as any).pendingTurnContext;
+			if (!details) throw new Error("unexpected repair turn");
+			session.sessionManager.appendCustomMessageEntry("telegram_context_v2", details.providerText, false, details);
+			providerTexts.push(details.providerText);
+			if (midTurn) {
+				midTurn = false;
+				session.isStreaming = true;
+				// A second human mention arrives while the model is still working.
+				insertMessage(db, 9302, "@小雪 顺便也看看这个");
+				rt.trigger("explicit", { reason: "explicit", chatId: CHAT_ID, messageId: 9302 });
+				await (rt as any).activeTurn.steering;
+				expect(queued).toHaveLength(1);
+				expect(queued[0].content).toContain("#9302");
+				if (delivered) {
+					for (const message of queued.splice(0))
+						session.sessionManager.appendCustomMessageEntry(
+							message.customType,
+							message.content,
+							false,
+							message.details,
+						);
+				}
+				session.isStreaming = false;
+			}
+			const result = await (rt as any).executeSend({ message: "fixture reply", reply_to: delivered ? 9302 : 9301 });
+			session.sessionManager.appendMessage({
+				role: "toolResult",
+				toolName: "send",
+				toolCallId: `send-${providerTexts.length}`,
+				content: result.content,
+				details: result.details,
+				isError: false,
+				timestamp: Date.now(),
+			});
+		};
+		insertMessage(db, 9301, "@小雪 帮我查一下");
+		rt.trigger("explicit", { reason: "explicit", chatId: CHAT_ID, messageId: 9301 });
+		await (rt as any).flushPromise;
+		while ((rt as any).flushing) await new Promise((resolve) => setTimeout(resolve, 5));
+		if (delivered) {
+			// One send settled both addresses, and the steered message was never packed again.
+			expect(obligationCount(db)).toBe(0);
+			expect(providerTexts).toHaveLength(1);
+		} else {
+			// The dropped steer leaves #9302 owed; the next turn packs it as an ordinary batch.
+			expect(providerTexts).toHaveLength(2);
+			expect(providerTexts[1]).toContain("#9302");
+			expect(obligationCount(db)).toBe(0);
+		}
+		db.close();
+	});
+}

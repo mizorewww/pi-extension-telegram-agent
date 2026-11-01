@@ -125,6 +125,7 @@ import {
 	makeCachePayloadObserverExtension,
 	makeTelegramCompactionExtension,
 	makeTelegramContextExtension,
+	TELEGRAM_CONTEXT_TYPE,
 	TELEGRAM_CONTEXT_VERSION,
 	TELEGRAM_EXTENSION_ORDER,
 	contextImageBytes,
@@ -175,6 +176,22 @@ function structured<T extends object>(value: T) {
 		details: {},
 		structuredContent: value as unknown as JsonValue,
 	};
+}
+
+/** Suffix budget for one batch steered into a running turn. */
+const STEER_TOKEN_BUDGET = 4_000;
+
+/** Message ids made visible by batches steered into the turn that started at `turnHighWater`. */
+function steeredVisibleIds(entries: readonly SessionEntry[], turnHighWater: number): Set<number> {
+	const ids = new Set<number>();
+	for (const entry of entries)
+		if (
+			entry.type === "custom_message" &&
+			isTelegramContextDetails(entry.details) &&
+			entry.details.consumedSeq > turnHighWater
+		)
+			for (const id of entry.details.visibleMessageIds) ids.add(id);
+	return ids;
 }
 
 /** How long a turn waits for new media descriptions before replying without them. */
@@ -343,6 +360,8 @@ export class BotRuntime {
 	private staticPrefixTokenEstimate = 0;
 	private viewedImagesThisTurn = 0;
 	private interimPostsThisTurn = 0;
+	/** The provider turn in flight: new direct addresses are steered into it (steerDirectAddress). */
+	private activeTurn: { steeredThrough: number; steering: Promise<void> } | null = null;
 	private readonly box: WorkBox | null;
 	private readonly tasks: TaskManager | null;
 	private pendingPayloadObservation: ProviderPayloadObservation | null = null;
@@ -1280,6 +1299,8 @@ export class BotRuntime {
 			return "coalesced";
 		}
 		if (this.flushing) {
+			// A human addressing the bot mid-turn reaches the running turn now instead of waiting.
+			if (directReplyPending && this.activeTurn) this.steerDirectAddress();
 			// re-entrant trigger while a flush is in flight (e.g. slow media download):
 			// coalesce into pendingTrigger; the loop picks it up (burst merge, R1)
 			this.pendingTrigger = true;
@@ -1506,9 +1527,11 @@ export class BotRuntime {
 		await this.checkContextImageBudget(details);
 		for (const messageId of packed.visibleMessageIds) this.visibleMessageIds.add(messageId);
 		this.pendingTurnContext = details;
+		this.activeTurn = { steeredThrough: highWater, steering: Promise.resolve() };
 		try {
 			await this.session.prompt(TELEGRAM_TURN_PROMPT, { expandPromptTemplates: false });
 		} catch (error) {
+			await this.endSteering();
 			this.reconcileContextStateFromSession();
 			throw error;
 		} finally {
@@ -1532,6 +1555,7 @@ export class BotRuntime {
 				`${REPLY_RECOVERY_PROMPT}${delivered.map((obligation) => `#${obligation.messageId}`).join(", ")}`,
 			);
 		}
+		await this.endSteering();
 		log.info("agent_runtime", "provider_turn_settled", {
 			bot_id: this.bot.id,
 			trigger_message_id: this.currentTriggerMessageId,
@@ -1539,7 +1563,15 @@ export class BotRuntime {
 			provider_calls: this.providerCallsInRun,
 			send_outcome: this.turnSendOutcome,
 		});
-		const activeState = contextStateFromEntries(this.session.sessionManager.buildContextEntries(), highWater);
+		const turnEntries = this.session.sessionManager.buildContextEntries();
+		const activeState = contextStateFromEntries(turnEntries, highWater);
+		// Batches steered into this turn that actually landed in the session move the cursor and
+		// carry their own direct addresses; queued ones that never landed were dropped above.
+		const steeredIds = steeredVisibleIds(turnEntries, highWater);
+		highWater = activeState.consumedSeq;
+		if (steeredIds.size > 0)
+			for (const obligation of listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN))
+				if (steeredIds.has(obligation.messageId) && !delivered.includes(obligation)) delivered.push(obligation);
 		// Provider completion is not Telegram delivery. Unknown/partial commits are terminal;
 		// failure or silence without any remote outcome stays owed, without an unbounded loop.
 		const replyPending = this.turnSendOutcome === "none";
@@ -1985,6 +2017,79 @@ export class BotRuntime {
 			],
 			details,
 		};
+	}
+
+	/**
+	 * Steer new direct addresses into the running turn as a regular Telegram batch. Nothing is
+	 * committed here: the turn's end reads which steered batches landed in the session (Pi delivers
+	 * steering after the current tool calls) and drops the ones still queued.
+	 */
+	private steerDirectAddress(): void {
+		const turn = this.activeTurn;
+		if (!turn || !this.session) return;
+		turn.steering = turn.steering.then(async () => {
+			if (this.activeTurn !== turn || !this.session?.isStreaming) return;
+			const chatId = this.config.groupChatId;
+			const through = messageEventHighWater(this.db, chatId);
+			if (through <= turn.steeredThrough) return;
+			const owed = new Set(
+				listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN).map((o) => o.messageId),
+			);
+			const consumedControl = consumedControlMessageIds(this.db, chatId);
+			const events = eventsForBot(
+				listRecentMessageEvents(this.db, chatId, turn.steeredThrough, through, MAX_EVENT_SCAN),
+				this.bot.id,
+			).filter(
+				(event) =>
+					!consumedControl.has(event.messageId) &&
+					!(event.kind === "message" && this.visibleMessageIds.has(event.messageId)),
+			);
+			if (!events.some((event) => owed.has(event.messageId))) return;
+			const packed = packMessageEvents(
+				this.db,
+				events.filter((event) => owed.has(event.messageId)),
+				events.filter((event) => !owed.has(event.messageId)),
+				STEER_TOKEN_BUDGET,
+				{ visibleIds: new Set() },
+				this.bot.maxMessageTokens,
+				this.config.media.mode === "context"
+					? { refs: (id) => contextMediaRefs(this.db, id), maxImages: this.config.media.maxPerTurn }
+					: undefined,
+			);
+			if (!packed.text.trim()) return;
+			const details: TelegramContextDetails = {
+				version: TELEGRAM_CONTEXT_VERSION,
+				consumedSeq: through,
+				providerText: packed.text,
+				blocks: buildTelegramContextBlocks(packed.segments),
+				stickerCandidates: "",
+				visibleMessageIds: packed.visibleMessageIds,
+				events: packed.events.map((event) => ({
+					ingestSeq: event.ingestSeq,
+					kind: event.kind,
+					chatId: event.chatId,
+					messageId: event.messageId,
+					fullMessageVisible: event.kind === "message" || event.kind === "edit",
+				})),
+			};
+			// reply_to may target the new messages as soon as the model can see them.
+			for (const id of packed.visibleMessageIds) this.visibleMessageIds.add(id);
+			await this.session.sendCustomMessage(
+				{ customType: TELEGRAM_CONTEXT_TYPE, content: details.providerText, display: false, details },
+				{ deliverAs: "steer" },
+			);
+			turn.steeredThrough = through;
+			log.info("agent_runtime", "turn_steered", { bot_id: this.bot.id, input_events: packed.events.length });
+		});
+	}
+
+	/** Close steering for the turn and drop batches Pi never delivered; the next flush reads them. */
+	private async endSteering(): Promise<void> {
+		const turn = this.activeTurn;
+		if (!turn) return;
+		await turn.steering.catch(() => {});
+		this.activeTurn = null;
+		this.session?.clearQueue();
 	}
 
 	/**
