@@ -5,6 +5,7 @@ import type { TelegramMessageEntity } from "./markdown.ts";
 
 const API_BASE = "https://api.telegram.org";
 const CALL_TIMEOUT_MS = 10_000;
+const UPLOAD_TIMEOUT_MS = 120_000;
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 const CHAT_ACTION_TIMEOUT_MS = 3500;
 // headroom on top of the long-poll window so the server-side timeout fires first
@@ -58,21 +59,26 @@ export class BotApi {
 			body: JSON.stringify(params),
 			signal,
 		});
-		let body: ApiResponse<T>;
-		try {
-			body = (await res.json()) as ApiResponse<T>;
-		} catch {
-			// intermediaries can answer with HTML/text (e.g. 502 pages); keep the HTTP status
-			throw new TelegramApiError(res.status, `non-JSON response (HTTP ${res.status})`, null, "non_json");
-		}
-		if (!body.ok) {
-			throw new TelegramApiError(
-				body.error_code ?? res.status,
-				body.description ?? "unknown",
-				body.parameters?.retry_after ?? null,
-			);
-		}
-		return body.result as T;
+		return await parseApiResponse<T>(res);
+	}
+
+	/** Multipart call for uploads; `files` are attached under their field names. */
+	async upload<T = unknown>(
+		method: string,
+		params: Record<string, unknown>,
+		files: readonly UploadFile[],
+		timeoutMs: number = UPLOAD_TIMEOUT_MS,
+	): Promise<T> {
+		const form = new FormData();
+		for (const [key, value] of Object.entries(params))
+			form.append(key, typeof value === "string" ? value : JSON.stringify(value));
+		for (const file of files) form.append(file.field, new Blob([file.bytes]), file.name);
+		const res = await fetch(`${API_BASE}/bot${this.token}/${method}`, {
+			method: "POST",
+			body: form,
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+		return await parseApiResponse<T>(res);
 	}
 
 	getMe(): Promise<{ id: number; username: string; first_name: string; is_bot: boolean }> {
@@ -180,6 +186,51 @@ export class BotApi {
 		if (!res.ok) throw new TelegramApiError(res.status, `file download failed: ${filePath}`);
 		return new Uint8Array(await res.arrayBuffer());
 	}
+
+	/** One photo or document, or an album of 2-10 of the same kind. Returns the sent messages. */
+	async sendFiles(
+		chatId: number,
+		kind: "photo" | "document",
+		files: readonly Omit<UploadFile, "field">[],
+		replyToMessageId?: number,
+	): Promise<Record<string, unknown>[]> {
+		const reply = replyToMessageId ? { reply_parameters: { message_id: replyToMessageId } } : {};
+		if (files.length === 1) {
+			const method = kind === "photo" ? "sendPhoto" : "sendDocument";
+			const params = { chat_id: chatId, [kind]: "attach://f0", ...reply };
+			return [await this.upload<Record<string, unknown>>(method, params, [{ ...files[0]!, field: "f0" }])];
+		}
+		const media = files.map((_, index) => ({ type: kind, media: `attach://f${index}` }));
+		return await this.upload<Record<string, unknown>[]>(
+			"sendMediaGroup",
+			{ chat_id: chatId, media, ...reply },
+			files.map((file, index) => ({ ...file, field: `f${index}` })),
+		);
+	}
+}
+
+export interface UploadFile {
+	field: string;
+	name: string;
+	bytes: Uint8Array;
+}
+
+async function parseApiResponse<T>(res: Response): Promise<T> {
+	let body: ApiResponse<T>;
+	try {
+		body = (await res.json()) as ApiResponse<T>;
+	} catch {
+		// intermediaries can answer with HTML/text (e.g. 502 pages); keep the HTTP status
+		throw new TelegramApiError(res.status, `non-JSON response (HTTP ${res.status})`, null, "non_json");
+	}
+	if (!body.ok) {
+		throw new TelegramApiError(
+			body.error_code ?? res.status,
+			body.description ?? "unknown",
+			body.parameters?.retry_after ?? null,
+		);
+	}
+	return body.result as T;
 }
 
 // The fixed ReactionTypeEmoji enum (https://core.telegram.org/bots/api#reactiontypeemoji,

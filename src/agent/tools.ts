@@ -6,11 +6,17 @@
 import { Type } from "@earendil-works/pi-ai";
 import { sha256Short } from "./prompt.ts";
 
+export interface SendFile {
+	path: string;
+	as?: "photo" | "document" | "auto";
+}
+
 export interface SendParams {
 	message?: string;
 	sticker?: string;
 	reply_to?: number;
 	reaction?: string;
+	files?: SendFile[];
 }
 
 export interface ViewImageParams {
@@ -32,7 +38,7 @@ export type SendComponentOutcome = "committed" | "rejected" | "unknown";
 export interface SendDegradedDetails {
 	sent: number[];
 	outcome: SendDegradedOutcome;
-	failed_component: "message" | "sticker";
+	failed_component: "message" | "sticker" | "file";
 	failed_outcome: SendComponentOutcome;
 	stage: "telegram_create" | "canonical_persist" | "local_effect";
 	category: string;
@@ -235,6 +241,34 @@ export const CODEMODE_TOOL_DEFS = [
 		outputSchema: Type.Object({ reset: Type.Boolean() }),
 	},
 ] as const;
+
+/** The send declaration for a bot with a work box: the same tool plus `files`. */
+export function sendToolWithFiles() {
+	const send = TOOL_DEFS[0];
+	return {
+		...send,
+		description: `${send.description}有工作区时也可以用 files 发送 /work 里的图片或文件，可以单独发，也可以和文字合并成同一次 send。`,
+		parameters: Type.Object({
+			...send.parameters.properties,
+			files: Type.Optional(
+				Type.Array(
+					Type.Object(
+						{
+							path: Type.String({ description: "工作区里的文件路径，/work 下的绝对路径或相对 /work 的路径" }),
+							as: Type.Optional(
+								Type.Union([Type.Literal("auto"), Type.Literal("photo"), Type.Literal("document")], {
+									description: "auto（默认）：≤10 MB 的 jpg/png/webp 作为图片发送，其余作为文件；document 保留原图质量",
+								}),
+							),
+						},
+						{ additionalProperties: false },
+					),
+					{ minItems: 1, maxItems: 10, description: "最多 10 个；多张图片合成一个相册。文件 ≤50 MB" },
+				),
+			),
+		}),
+	};
+}
 
 interface ProviderToolProtocol {
 	name: string;

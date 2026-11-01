@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 31; // v31: work box tools (sh_exec, sh_reset, tg_download)
+export const CACHE_SCHEMA_VERSION = 32; // v32: send files from the work box
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
@@ -12,6 +12,7 @@ export interface EnabledTools {
 	send: boolean;
 	search: boolean;
 	codemode: boolean;
+	sandbox: boolean;
 	viewImage: boolean;
 }
 
@@ -43,7 +44,10 @@ export function toolCapabilityDeclaration(tools: EnabledTools): string {
 		? `被问"能不能搜索/查资料/看网页"时如实说明；需要外部信息时直接用 search。`
 		: `你不能联网搜索或读取网页，被问到时如实说明。`;
 	const silent = tools.send ? "" : "你不能在群里发言，只能观察。";
-	return `## 可用工具\n\n${intro}${search}${silent}`;
+	const box = tools.sandbox
+		? "你还有一台自己的 Linux 工作区：在 codemode 脚本里用 tools.sh_exec 跑命令、tools.tg_download 取群友发的文件，做出来的图片或文件用 send 的 files 发到群里；工作区每周一 05:00 清空。"
+		: "";
+	return `## 可用工具\n\n${intro}${search}${box}${silent}`;
 }
 
 // The shared protocol is deliberately the first byte of every bot's system prompt so bots in

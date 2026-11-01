@@ -3,11 +3,15 @@ import type { BotApi } from "../telegram/api.ts";
 import { isReactionEmoji } from "../telegram/api.ts";
 import { fileIdForBot } from "../media/local-cache.ts";
 import { log } from "../observability/log.ts";
+import { BoxError, type WorkBox } from "../sandbox/box.ts";
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 import {
 	degradedSendResult,
 	successfulSendResult,
 	type SendComponentOutcome,
 	type SendDegradedOutcome,
+	type SendFile,
 	type SendParams,
 } from "./tools.ts";
 import {
@@ -28,6 +32,8 @@ interface AgentSendContext {
 	visibleMessageIds: ReadonlySet<number>;
 	/** The group's narrowed reaction set; null when every standard reaction is allowed. */
 	allowedReactions: ReadonlySet<string> | null;
+	/** The bot's work box; `files` are only accepted when it has one. */
+	box: WorkBox | null;
 	triggerMessageId: number | null;
 	recordPublicSend(): void;
 	markVisible(ids: number[]): void;
@@ -38,10 +44,50 @@ interface AgentSendContext {
 }
 
 interface SendFailure {
-	failed_component: "message" | "sticker";
+	failed_component: "message" | "sticker" | "file";
 	failed_outcome: SendComponentOutcome;
 	stage: "telegram_create" | "canonical_persist" | "local_effect";
 	category: string;
+}
+
+const PHOTO_MAX_BYTES = 10 * 1024 * 1024;
+const DOCUMENT_MAX_BYTES = 50 * 1024 * 1024;
+const PHOTO_EXTENSION = /\.(jpe?g|png|webp)$/i;
+
+interface PreparedFiles {
+	photos: { name: string; bytes: Uint8Array }[];
+	documents: { name: string; bytes: Uint8Array }[];
+}
+
+/**
+ * Copy every requested file out of the box before anything is sent, so a missing or oversized
+ * file is a retryable error instead of a half-delivered send.
+ */
+async function prepareFiles(files: readonly SendFile[] | undefined, box: WorkBox | null): Promise<PreparedFiles> {
+	const prepared: PreparedFiles = { photos: [], documents: [] };
+	if (!files || files.length === 0) return prepared;
+	if (!box) throw new Error("files need a work box, and this bot has none");
+	if (files.length > 10) throw new Error("send accepts at most 10 files");
+	for (const file of files) {
+		let copy: Awaited<ReturnType<WorkBox["copyOut"]>>;
+		try {
+			copy = await box.copyOut(file.path, DOCUMENT_MAX_BYTES);
+		} catch (error) {
+			throw new Error(`file ${file.path}: ${error instanceof BoxError ? error.message : "copy failed"}`);
+		}
+		try {
+			const name = basename(copy.hostPath);
+			const bytes = new Uint8Array(readFileSync(copy.hostPath));
+			const photoCapable = PHOTO_EXTENSION.test(name) && copy.size <= PHOTO_MAX_BYTES;
+			if (file.as === "photo" && !photoCapable)
+				throw new Error(`file ${file.path}: photos must be jpg/png/webp up to 10 MB; use as: "document"`);
+			const asPhoto = file.as === "photo" || ((file.as ?? "auto") === "auto" && photoCapable);
+			(asPhoto ? prepared.photos : prepared.documents).push({ name, bytes });
+		} finally {
+			copy.cleanup();
+		}
+	}
+	return prepared;
 }
 
 /** Own the entire irreversible send boundary, including every observer and finalizer. */
@@ -75,13 +121,13 @@ function preflight(
 		});
 		throw new Error(message);
 	};
-	if (!params.message && !params.sticker && !params.reaction)
-		reject("empty_payload", "send requires at least one of message, sticker or reaction");
+	if (!params.message && !params.sticker && !params.reaction && !params.files?.length)
+		reject("empty_payload", "send requires at least one of message, sticker, files or reaction");
 	if (params.reaction != null && params.reply_to == null)
 		reject("reaction_without_target", "reaction requires reply_to: the reaction lands on the replied message");
 	if (params.reaction != null && !isReactionEmoji(params.reaction, context.allowedReactions)) {
 		// Decoration must not cost a whole extra provider turn: drop it when there is content.
-		if (!params.message && !params.sticker)
+		if (!params.message && !params.sticker && !params.files?.length)
 			reject(
 				"invalid_reaction_emoji",
 				`invalid reaction emoji: ${params.reaction} (use one this group allows${context.allowedReactions ? `: ${[...context.allowedReactions].join(" ")}` : ", e.g. 👍 ❤️ 🔥 🤣 🎉"})`,
@@ -116,22 +162,40 @@ function preflight(
 
 async function sendAttempt(requested: SendParams, context: AgentSendContext) {
 	const { params, stickerFileId } = preflight(requested, context);
+	let files: PreparedFiles;
+	try {
+		files = await prepareFiles(params.files, context.box);
+	} catch (error) {
+		log.warn("agent_send", "preflight_failed", {
+			bot_id: context.botId,
+			category: "file_unavailable",
+			trigger_message_id: context.triggerMessageId,
+		});
+		throw error;
+	}
 	log.info("agent_send", "started", {
 		bot_id: context.botId,
 		has_message: Boolean(params.message),
 		has_sticker: Boolean(params.sticker),
 		has_reaction: params.reaction != null,
 		has_reply: params.reply_to != null,
+		files: files.photos.length + files.documents.length,
 		trigger_message_id: context.triggerMessageId,
 	});
 	const chatId = context.chatId;
-	const primaryComponent = params.sticker && !params.message ? "sticker" : "message";
+	const primaryComponent = params.message
+		? "message"
+		: params.files?.length
+			? "file"
+			: params.sticker
+				? "sticker"
+				: "message";
 	const sent: number[] = [];
 	const failures: SendFailure[] = [];
 	let reactedTo: number | null = null;
 
 	/** After a remote commit, local bookkeeping is best effort: a failure degrades, never resends. */
-	const local = async (component: "message" | "sticker", category: string, effect: () => void) => {
+	const local = async (component: SendFailure["failed_component"], category: string, effect: () => void) => {
 		try {
 			await retrySqliteBusy(effect);
 		} catch (error) {
@@ -145,7 +209,7 @@ async function sendAttempt(requested: SendParams, context: AgentSendContext) {
 		}
 	};
 	const committed = async (
-		component: "message" | "sticker",
+		component: SendFailure["failed_component"],
 		raw: Record<string, unknown>,
 		persistFailure: unknown,
 		eventKind?: string,
@@ -208,7 +272,7 @@ async function sendAttempt(requested: SendParams, context: AgentSendContext) {
 		return degradedSendResult({ sent: [...sent], outcome: degraded, ...primary });
 	};
 	/** Only a deterministic rejection before any commit may go back to the model as a retryable error. */
-	const createFailed = async (component: "message" | "sticker", error: unknown) => {
+	const createFailed = async (component: SendFailure["failed_component"], error: unknown) => {
 		const failure = classifyTelegramCreateFailure(error);
 		if (failure.outcome === "rejected" && sent.length === 0) {
 			try {
@@ -246,6 +310,27 @@ async function sendAttempt(requested: SendParams, context: AgentSendContext) {
 				error.cause,
 				error.transport === "formatted" ? "markdown_sent" : "plain_fallback",
 			);
+		}
+	}
+	// Files follow the text; only the first created message carries the reply.
+	for (const [kind, group] of [
+		["photo", files.photos],
+		["document", files.documents],
+	] as const) {
+		if (group.length === 0) continue;
+		let raws: Record<string, unknown>[];
+		try {
+			raws = await context.api.sendFiles(chatId, kind, group, sent.length === 0 ? params.reply_to : undefined);
+		} catch (error) {
+			return await createFailed("file", error);
+		}
+		for (const raw of raws) {
+			try {
+				await persistSentMessageWithRetry(context.db, context.botId, raw, "file", context.emitMediaUpdates);
+				await committed("file", raw, null, "file_sent");
+			} catch (error) {
+				await committed("file", raw, (error as SentMessagePersistenceError).cause, "file_sent");
+			}
 		}
 	}
 	if (stickerFileId) {

@@ -254,6 +254,7 @@ test("/fire routes persisted sibling sends locally, once, never to the sender or
 				api: apiFor(botId) as unknown as BotApi,
 				botId,
 				chatId,
+				box: null,
 				emitMediaUpdates: false,
 				visibleMessageIds: new Set(),
 				allowedReactions: null,

@@ -67,3 +67,41 @@ test("weekly reset fires once after each Monday 05:00 and never on first sight",
 	await runWeeklyBoxReset(db, boxes, new Date(2026, 10, 2, 5, 20));
 	expect(resets).toBe(1);
 });
+
+test("send with a missing box file fails before anything reaches Telegram", async () => {
+	const { executeAgentSend } = await import("../src/agent/send.ts");
+	const db = new Database(":memory:");
+	db.exec(readFileSync("src/db/schema.sql", "utf8"));
+	let creates = 0;
+	const api = new Proxy({}, { get: () => async () => void creates++ });
+	const docker: DockerRunner = async (args) => ({
+		code: args[0] === "inspect" ? 0 : 1,
+		stdout: new TextEncoder().encode(args[0] === "inspect" ? "true" : ""),
+		stderr: "",
+		timedOut: false,
+	});
+	const noop = () => {};
+	await expect(
+		executeAgentSend(
+			{ message: "here you go", files: [{ path: "out/missing.png" }] },
+			{
+				db,
+				api: api as never,
+				botId: "A",
+				chatId: -1001,
+				emitMediaUpdates: false,
+				visibleMessageIds: new Set(),
+				allowedReactions: null,
+				box: new WorkBox("A", CONFIG, docker),
+				triggerMessageId: null,
+				recordPublicSend: noop,
+				markVisible: noop,
+				onSent: noop,
+				recordEvent: noop,
+				stopTyping: noop,
+				recordDuration: noop,
+			},
+		),
+	).rejects.toThrow("out/missing.png");
+	expect(creates).toBe(0);
+});

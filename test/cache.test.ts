@@ -18,7 +18,7 @@ import {
 	REPLY_RECOVERY_PROMPT,
 	toolCapabilityDeclaration,
 } from "../src/agent/prompt.ts";
-import { CODEMODE_TOOL_DEFS, TOOL_DEFS, toolProtocolHash } from "../src/agent/tools.ts";
+import { CODEMODE_TOOL_DEFS, sendToolWithFiles, TOOL_DEFS, toolProtocolHash } from "../src/agent/tools.ts";
 import { batchStickerCandidates, stickerCatalogPromptBlock } from "../src/media/sticker-catalog.ts";
 import {
 	NO_SEND_MARKER,
@@ -31,12 +31,13 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 31,
+	schemaVersion: 32,
 	systemZhTemplate: "2e5bf4023481",
 	systemEnTemplate: "692c40e98b9c",
 	eventSerialize: "a05c0584eb08",
 	tools: "3bd9368f55d6",
 	codemodeTools: "b982c9c0ace3",
+	sendWithFiles: "d888994aa0b7",
 	compactionPrompt: "04da95f62da0",
 	multimodalCompaction: "e2da2b8b68fa",
 	replyRecovery: "4fc7e277e338",
@@ -74,7 +75,7 @@ function contextMessage(id: number, providerText: string, stickerCandidates = ""
 
 test("prompt, tool and protocol hashes are stable", () => {
 	expect(CACHE_SCHEMA_VERSION).toBe(GOLDEN.schemaVersion);
-	const allTools = { send: true, search: true, codemode: true, viewImage: false };
+	const allTools = { send: true, search: true, codemode: true, sandbox: false, viewImage: false };
 	expect(sha256Short(buildSystemPrompt(readFileSync("personas/template.zh.md", "utf8"), allTools))).toBe(
 		GOLDEN.systemZhTemplate,
 	);
@@ -82,12 +83,19 @@ test("prompt, tool and protocol hashes are stable", () => {
 		GOLDEN.systemEnTemplate,
 	);
 	// A bot is only ever told about the tools it really has.
-	const sendOnly = toolCapabilityDeclaration({ send: true, search: false, codemode: false, viewImage: false });
+	const sendOnly = toolCapabilityDeclaration({
+		send: true,
+		search: false,
+		codemode: false,
+		sandbox: false,
+		viewImage: false,
+	});
 	expect(sendOnly).toContain("你有一个工具：send");
 	expect(sendOnly).not.toContain("search（");
 	expect(sendOnly).toContain("你不能联网搜索");
 	expect(toolProtocolHash(TOOL_DEFS)).toBe(GOLDEN.tools);
 	expect(toolProtocolHash(CODEMODE_TOOL_DEFS)).toBe(GOLDEN.codemodeTools);
+	expect(toolProtocolHash([sendToolWithFiles()])).toBe(GOLDEN.sendWithFiles);
 	expect(sha256Short(COMPACTION_SUMMARY_PROMPT)).toBe(GOLDEN.compactionPrompt);
 	expect(sha256Short(REPLY_RECOVERY_PROMPT)).toBe(GOLDEN.replyRecovery);
 	expect(sha256Short(TELEGRAM_TURN_PROMPT)).toBe(GOLDEN.telegramTurn);

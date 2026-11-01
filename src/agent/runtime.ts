@@ -52,6 +52,7 @@ import {
 	CODEMODE_TOOL_DEFS,
 	TOOL_DEFS,
 	TOOL_EXPOSURE,
+	sendToolWithFiles,
 	toolProtocolHash,
 	type SendParams,
 	type SearchParams,
@@ -183,6 +184,7 @@ const ACTIVITY_RAW_EVENT_KINDS = new Set([
 	"tool_messages",
 	"tool_view_image",
 	"tool_sh_exec",
+	"file_sent",
 	"tool_tg_download",
 	"box_reset",
 	"markdown_sent",
@@ -422,11 +424,12 @@ export class BotRuntime {
 		const systemPrompt = buildSystemPrompt(persona, this.bot.tools, stickerCatalog);
 		this.systemHash = sha256Short(systemPrompt);
 
+		const sendDef = this.box ? sendToolWithFiles() : TOOL_DEFS[0];
 		const sendTool = {
 			name: "send",
 			label: "Send",
-			description: TOOL_DEFS[0].description,
-			parameters: TOOL_DEFS[0].parameters,
+			description: sendDef.description,
+			parameters: sendDef.parameters,
 			exposure: TOOL_EXPOSURE.send,
 			execute: async (_toolCallId: string, params: SendParams) => {
 				return await this.executeSend(params);
@@ -1168,6 +1171,7 @@ export class BotRuntime {
 			emitMediaUpdates: this.config.media.mode !== "context",
 			visibleMessageIds: this.visibleMessageIds,
 			allowedReactions: this.allowedReactions,
+			box: this.box,
 			triggerMessageId: this.currentTriggerMessageId,
 			recordPublicSend: () => this.recordPublicSend(),
 			markVisible: (ids) => this.markVisible(ids),

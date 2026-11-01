@@ -75,8 +75,9 @@ provider 没有返回 cache 用量时，若同一 cache cohort（provider/api/mo
 
 ## 版本记录
 
-当前：**31**。更早的版本见 git 历史。
+当前：**32**。更早的版本见 git 历史。
 
+- **v32**：带工作区的 bot 的 `send` 声明多出 `files`（golden `sendWithFiles`），系统提示多一句工作区说明；没有工作区的 bot 字节不变。
 - **v31**：codemode 脚本工具新增 `tg_download`、`sh_exec`、`sh_reset`（`tools.sandbox` 开启时注册；fingerprint 只含实际注册的脚本工具）。
 - **v30**：新增 `media.mode: "hybrid"` 与 model-only `view_image` 工具（`TOOL_DEFS` 第三项）；view_image 结果的图片只在 `context` 投影时由引用物化。
 - **v29**：codemode 脚本可调用 `tg_messages`（声明含 `outputSchema`，计入 `toolProtocolHash` 与 golden `codemodeTools`）；系统提示的 codemode 摘要写明可检索历史。

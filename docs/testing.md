@@ -34,7 +34,7 @@ bun run scripts/e2e-compaction.ts --bot <id>   # 通过公开 control 入口压�
 | `provider-guard.test.ts` | 请求创建/消费 deadline 中止且不重试；HTTP 413 进入 Pi overflow 恢复。 |
 | `codemode.test.ts` | codemode 脚本没有 host 能力、调不到 `send`、只能调用可调用工具；结果有宿主上限，脚本图片不进 session。 |
 | `messages.test.ts` | `tg_messages` 只读本群：不返回控制消息与其他 chat，分页无缝，LIKE 通配符被转义。 |
-| `sandbox.test.ts` | 工作区容器参数始终带隔离 flag、不挂宿主机目录、不传 env；路径（含容器内软链接解析结果）不能离开 `/work`；每周清空每个边界只触发一次、首次见到不清空。 |
+| `sandbox.test.ts` | 工作区容器参数始终带隔离 flag、不挂宿主机目录、不传 env；路径（含容器内软链接解析结果）不能离开 `/work`；每周清空每个边界只触发一次、首次见到不清空；`send` 的文件缺失时在任何 Telegram create 之前失败。 |
 | `search.test.ts` | search 只访问公网 HTTP(S)，遥测不含 query/URL/正文/key；长页分页可完整读完且不重复抓取。 |
 | `daemon-control.test.ts` | 进程归属识别（含空格路径）、拒绝其他部署与无法验证的 pid。 |
 | `network-isolation.test.ts` | `network-guard.ts` preload 机械拒绝外网，即使存在真实 `.env`。 |

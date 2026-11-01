@@ -24,7 +24,7 @@ export interface MarkdownTextSendApi extends TextSendApi {
 	): Promise<Record<string, unknown>>;
 }
 
-export type SentMessageTransport = "plain" | "formatted" | "plain_fallback" | "sticker";
+export type SentMessageTransport = "plain" | "formatted" | "plain_fallback" | "sticker" | "file";
 
 export class SentMessagePersistenceError extends Error {
 	constructor(
