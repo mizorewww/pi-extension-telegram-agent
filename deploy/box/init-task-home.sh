@@ -1,26 +1,35 @@
 #!/bin/sh
 # Create or refresh the task Pi home volume tg-pihome-<bot> (docs/runbooks/sandbox.md).
-# Secrets are read from the host's existing config and streamed straight into the volume;
-# nothing is written to disk outside it and nothing is printed.
-#   usage: deploy/box/init-task-home.sh <bot_id> [image]
+# Secrets are read from files on the host and streamed straight into the volume; nothing is
+# written to disk outside it and nothing is printed.
+#   usage: TASK_LLM_BASE_URL=https://host/v1 TASK_LLM_KEY_FILE=path [TASK_LLM_MODEL=swe-2] \
+#          deploy/box/init-task-home.sh <bot_id> [image]
+# The key file holds the bare key or a *KEY=value line (e.g. AUTH_KEY=...). The provider is named
+# "devin" so workflows can say devin/<model>; ollama-cloud is copied from ~/.pi/agent/auth.json.
 set -eu
 BOT="$1"
 IMAGE="${2:-tg-box:2}"
 : "${DOCKER_HOST:=unix:///run/tgbox/docker.sock}"
 export DOCKER_HOST
-PROXY_ENV="$HOME/.config/devin-openai-proxy/env"
+: "${TASK_LLM_BASE_URL:?set TASK_LLM_BASE_URL to the OpenAI-compatible base URL}"
+: "${TASK_LLM_KEY_FILE:?set TASK_LLM_KEY_FILE to a file holding the API key}"
 PI_AUTH="$HOME/.pi/agent/auth.json"
 
-python3 - "$PROXY_ENV" "$PI_AUTH" <<'PY' | docker run --rm -i --user 0 -v "tg-pihome-$BOT:/pi-agent" "$IMAGE" \
+python3 - "$TASK_LLM_BASE_URL" "$TASK_LLM_KEY_FILE" "${TASK_LLM_MODEL:-swe-2}" "$PI_AUTH" <<'PY' | docker run --rm -i --user 0 -v "tg-pihome-$BOT:/pi-agent" "$IMAGE" \
   sh -c 'tar -x -C /pi-agent && chown -R 1000:1000 /pi-agent && chmod 700 /pi-agent && chmod 600 /pi-agent/*.json'
 import io, json, sys, tarfile
-proxy_env, pi_auth = sys.argv[1], sys.argv[2]
-key = next(l.split("=", 1)[1].strip() for l in open(proxy_env) if l.startswith("AUTH_KEY="))
-ollama = json.load(open(pi_auth)).get("ollama-cloud")
+base_url, key_file, model, pi_auth = sys.argv[1:5]
+lines = [l.strip() for l in open(key_file) if l.strip() and not l.startswith("#")]
+named = [l.split("=", 1)[1].strip() for l in lines if "=" in l and l.split("=", 1)[0].endswith("KEY")]
+key = named[0] if named else lines[0]
+try:
+    ollama = json.load(open(pi_auth)).get("ollama-cloud")
+except FileNotFoundError:
+    ollama = None
 files = {
     "settings.json": {
         "defaultProvider": "devin",
-        "defaultModel": "swe-2",
+        "defaultModel": model,
         "defaultThinkingLevel": "high",
         "defaultTools": ["+codemode"],
         "packages": ["/opt/pi-packages/node_modules/pi-subagents", "/opt/pi-packages/node_modules/pi-ollama-cloud"],
@@ -28,11 +37,11 @@ files = {
     "models.json": {
         "providers": {
             "devin": {
-                "baseUrl": "https://devin.mizore.blog/v1",
+                "baseUrl": base_url,
                 "api": "openai-completions",
                 "apiKey": key,
                 "models": [{
-                    "id": "swe-2", "name": "SWE-2", "reasoning": True, "input": ["text", "image"],
+                    "id": model, "name": model, "reasoning": True, "input": ["text", "image"],
                     "contextWindow": 262144, "maxTokens": 32768,
                     "thinkingLevelMap": {"off": None, "minimal": None, "low": None, "medium": "medium",
                                           "high": "high", "xhigh": "max", "max": "max"},

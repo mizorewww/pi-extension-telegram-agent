@@ -51,11 +51,14 @@ DOCKER_HOST=unix:///run/tgbox/docker.sock docker build -t tg-box:2 /tmp/tgbox-bu
 
 ### 任务凭证卷
 
-任务容器把 `tg-pihome-<bot>` 挂成 Pi 的 agent 目录。脚本从主机现有配置读取 swe-2 代理 key（`~/.config/devin-openai-proxy/env`，通过 `https://devin.mizore.blog/v1` 访问）和 ollama-cloud key（`~/.pi/agent/auth.json`），直接流进卷里，不落盘、不打印：
+任务容器把 `tg-pihome-<bot>` 挂成 Pi 的 agent 目录。脚本把任务用的 OpenAI 兼容模型（provider 名为 `devin`，工作流里写 `devin/<model>`）和主机 `~/.pi/agent/auth.json` 里的 ollama-cloud key 直接流进卷里，不落盘、不打印：
 
 ```bash
-deploy/box/init-task-home.sh <bot_id> tg-box:2
+TASK_LLM_BASE_URL=https://<你的代理>/v1 TASK_LLM_KEY_FILE=<key 文件> [TASK_LLM_MODEL=swe-2] \
+  deploy/box/init-task-home.sh <bot_id> tg-box:2
 ```
+
+key 文件里放裸 key，或一行名字以 KEY 结尾的 `NAME=value`（例如 `AUTH_KEY=…`）。不要把 Devin CLI 的 OAuth 凭证复制进任务卷：两份 refresh token 各自刷新可能互相作废，把主 bot 的认证一起弄掉；用一个 OpenAI 兼容代理（例如自建的 devin-openai-proxy）提供模型。
 
 换 key 或改模型设置后重跑即可。工作流目录要在主机上（例如 `rsync -a ~/pi-tasks/ <host>:pi-tasks/`）。
 
