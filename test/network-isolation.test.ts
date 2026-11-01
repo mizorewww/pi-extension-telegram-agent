@@ -1,3 +1,5 @@
+// The test preload blocks every external fetch, so `bun test` can never make a paid call.
+
 import { expect, test } from "bun:test";
 
 test("bun test rejects paid/external fetches even when real credentials exist", async () => {

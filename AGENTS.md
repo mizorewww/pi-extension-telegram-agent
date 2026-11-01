@@ -6,19 +6,18 @@
 
 - **极简，最少机制**：一套设计，不留兼容层。Breaking change 随时可以做，只要求迁移干净、一步到位。
 - **Pi 原生优先**：动手前先查 `node_modules/@earendil-works` 各包导出了什么；Pi 能做的事不自造轮子（结论见 `docs/engineering/decisions.md`）。
-- **不花冤枉钱**：能用确定性代码解决的不花 LLM token；任何功能先评估 cache hit 率与每 turn 新增 token（`docs/cache.md`、`docs/engineering/development-guide.md`）。
+- **不花冤枉钱**：能用确定性代码解决的不花 LLM token；任何功能先评估 cache hit 率与每 turn 新增 token（`docs/cache.md`）。
 - 删代码优先于加抽象；防御代码只防真实可能的分支。
 
 ## 2. 仓库地图
 
 - `docs/index.md` — 文档总索引
-- `docs/project.md` — 目标、哲学、术语、部署边界
+- `docs/project.md` — 三个世界、行为约束、术语、部署边界
 - `docs/architecture.md` — 消息路径、发送边界、上下文、媒体、控制命令、IPC
 - `docs/cache.md` — provider 可见字节、fingerprint、改动流程（CACHE_SCHEMA_VERSION）
 - `docs/data-model.md` — SQLite schema 与保留期
 - `docs/telemetry.md` — 用量字段与公式
-- `docs/testing.md` — 测试守卫与规范命令
-- `docs/engineering/development-guide.md` — 开发流程、文档与提交规范
+- `docs/testing.md` — 验证漏斗与规范命令
 - `docs/engineering/debugging-guide.md` — 诊断报告、证据梯、日志契约
 - `docs/engineering/decisions.md` — 长期有效的设计取舍与生产事故（新结论加在这里）
 - `docs/runbooks/daemon.md` — 启停、systemd、部署、故障恢复
@@ -50,7 +49,7 @@
 
 ## 5. 测试规则
 
-- 鼓励 TDD：新行为先写失败测试再实现。脚手架测试在功能稳定后必须删除——`test/` 只保留护长期 invariant / 安全边界的守卫，清单见 `docs/testing.md`。
+- 鼓励 TDD：新行为先写失败测试再实现。脚手架测试在功能稳定后必须删除——`test/` 只保留护长期 invariant / 安全边界的守卫，每个文件开头一行注释写清它守什么。
 - 能确定性复现的 bug 必须有回归测试；agent 行为测可观察轨迹与结果，不断言 prompt 字符串。
 - `bun test` 零外网、零付费调用，由 `bunfig.toml` 的 test preload 机械保证。
 

@@ -1,3 +1,5 @@
+// Process ownership: the controller only ever signals this deployment's own daemon pids.
+
 import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

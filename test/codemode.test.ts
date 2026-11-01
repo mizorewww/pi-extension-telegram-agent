@@ -1,5 +1,6 @@
-// Codemode boundary: scripts get no host capabilities, cannot call send, cannot persist images,
-// and their output is bounded by the host whatever the script's options line asks for.
+// Codemode boundary: scripts get no host capabilities and reach only callable tools, a send inside
+// a script does not end the turn, scripts never persist images, and Pi delivers steered messages
+// after the running tool call.
 
 import { createAssistantMessageEventStream, Type } from "@earendil-works/pi-ai";
 import { expect, test } from "bun:test";
