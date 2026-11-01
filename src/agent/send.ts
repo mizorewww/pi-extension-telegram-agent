@@ -29,7 +29,6 @@ interface AgentSendContext {
 	botId: string;
 	chatId: number;
 	emitMediaUpdates: boolean;
-	visibleMessageIds: ReadonlySet<number>;
 	/** The group's narrowed reaction set; null when every standard reaction is allowed. */
 	allowedReactions: ReadonlySet<string> | null;
 	/** The bot's work box; `files` are only accepted when it has one. */
@@ -139,21 +138,20 @@ function preflight(
 		});
 		params = { ...params, reaction: undefined };
 	}
-	// A reaction alone needs no context: any real message of this group may receive it.
-	const reactionOnly = params.reaction != null && !params.message && !params.sticker && !params.files?.length;
-	const reactable =
-		reactionOnly &&
+	// Any real message of this group may be replied to or reacted on, including old ones found
+	// with tg_messages; only an id that does not exist (an invented one) is refused.
+	const exists =
+		params.reply_to == null ||
 		context.db
 			.query(
 				`SELECT 1 FROM messages m WHERE m.chat_id = ? AND m.message_id = ?
 				   AND NOT EXISTS (SELECT 1 FROM telegram_control_messages c
 				                    WHERE c.chat_id = m.chat_id AND c.message_id = m.message_id)`,
 			)
-			.get(context.chatId, params.reply_to ?? 0) != null;
-	if (params.reply_to != null && !context.visibleMessageIds.has(params.reply_to) && !reactable)
-		reject("reply_not_visible", "messaging.reply_not_visible", {
+			.get(context.chatId, params.reply_to) != null;
+	if (!exists)
+		reject("reply_unknown", `reply_to #${params.reply_to} is not a message of this group; use a real #id`, {
 			reply_to: params.reply_to,
-			visible_count: context.visibleMessageIds.size,
 		});
 	// Resolve the sticker before sending anything: a late failure would make the model retry
 	// and double-send the text.

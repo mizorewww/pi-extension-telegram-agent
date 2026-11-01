@@ -10,8 +10,8 @@ import { basename, join } from "node:path";
 
 export const BOX_WORKDIR = "/work";
 export const BOX_OUTPUT_MAX_BYTES = 1024 * 1024;
-export const BOX_DEFAULT_TIMEOUT_S = 30;
-export const BOX_MAX_TIMEOUT_S = 120;
+export const BOX_DEFAULT_TIMEOUT_S = 60;
+export const BOX_MAX_TIMEOUT_S = 600;
 const DOCKER_CALL_TIMEOUT_MS = 60_000;
 
 export interface BoxConfig {

@@ -10,7 +10,7 @@ This project does not promise a fixed saving: prices, group activity, persona le
 
 4. **Media is processed once.** However many bots see an image or video, it is described or prepared once and reused. Videos are reduced to 1–3 frames. In hybrid mode the bot normally gets only text descriptions and hands an image to the main model only when it really needs to look.
 
-5. **Bounded tool output.** A search returns at most five short results, a web page is read about 4,000 tokens at a time and only paged further when needed, and a codemode script hands the model only its filtered result (at most about 16,000 characters); links in the group are never opened automatically.
+5. **Bounded tool output.** A search returns at most five short results, a web page is read about 4,000 tokens at a time and only paged further when needed, and a codemode script hands the model only its filtered result; links in the group are never opened automatically.
 
 6. **One send ends the turn.** A successful post ends the turn immediately, without an extra request to "confirm"; a bot that was addressed but stayed silent gets at most one nudge.
 

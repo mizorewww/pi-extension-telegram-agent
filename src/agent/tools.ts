@@ -97,14 +97,14 @@ export const TOOL_DEFS = [
 			reply_to: Type.Optional(
 				Type.Number({
 					description:
-						"直接回应某条消息时填当前可见消息行 # 后的数字 id；reaction 也点在这条消息上。不得猜测或使用引用片段中的旧 id。主动发言且不使用 reaction 时省略。",
+						"回应某条消息时填它 # 后的数字 id：上下文里的、被引用的、用 tg_messages 检索到的本群消息都可以，不得编造；reaction 也点在这条消息上。主动发言且不使用 reaction 时省略。",
 				}),
 			),
 			reaction: Type.Optional(
 				Type.String({
 					maxLength: 16,
 					description:
-						"对 reply_to 消息点一个 Telegram reaction 表态（只点 reaction、不发文字时，reply_to 可以是本群任意一条消息，包括检索到的旧消息）（如 👍、❤️、🔥、🤣、🎉），仅限 Telegram 支持的 reaction emoji，其他 emoji 会报错；必须搭配 reply_to。不必回复时单独用它表示态度，也可与 message 合并边回复边表态；被 @、被回复或被点名时不能用它代替必须的文字回应。",
+						"对 reply_to 消息点一个 Telegram reaction 表态（如 👍、❤️、🔥、🤣、🎉），仅限 Telegram 支持的 reaction emoji，其他 emoji 会报错；必须搭配 reply_to。不必回复时单独用它表示态度，也可与 message 合并边回复边表态；被 @、被回复或被点名时不能用它代替必须的文字回应。",
 				}),
 			),
 		}),
@@ -163,7 +163,7 @@ export const CODEMODE_TOOL_DEFS = [
 		parameters: Type.Object(
 			{
 				ids: Type.Optional(
-					Type.Array(Type.Integer(), { minItems: 1, maxItems: 200, description: "Exact message ids" }),
+					Type.Array(Type.Integer(), { minItems: 1, maxItems: 1000, description: "Exact message ids" }),
 				),
 				since: Type.Optional(Type.String({ description: "ISO date/time, inclusive" })),
 				until: Type.Optional(Type.String({ description: "ISO date/time, exclusive" })),
@@ -185,7 +185,6 @@ export const CODEMODE_TOOL_DEFS = [
 				text_contains: Type.Optional(
 					Type.String({
 						minLength: 1,
-						maxLength: 200,
 						description: "Case-insensitive substring of text or caption; 3+ characters use the full-text index",
 					}),
 				),
@@ -194,7 +193,7 @@ export const CODEMODE_TOOL_DEFS = [
 						description: "relevance ranks by text_contains (3+ characters) and has no paging cursor",
 					}),
 				),
-				limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, default: 100 })),
+				limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 2000, default: 100 })),
 			},
 			{ additionalProperties: false },
 		),
@@ -212,7 +211,7 @@ export const CODEMODE_TOOL_DEFS = [
 						alias: Nullable(Type.String({ description: "u<N> alias for users without username" })),
 						is_bot: Type.Boolean(),
 					}),
-					text: Nullable(Type.String({ description: "Text or caption, at most 4000 characters" })),
+					text: Nullable(Type.String({ description: "Text or caption" })),
 					reply_to: Nullable(Type.Integer()),
 					quote: Nullable(Type.String()),
 					forwarded: Type.Boolean(),
@@ -249,11 +248,11 @@ export const CODEMODE_TOOL_DEFS = [
 		name: "sh_exec",
 		label: "Shell",
 		description:
-			"Run a shell command in your own Linux work box (Debian; python3 with Pillow/numpy/requests, node/npm, ffmpeg, imagemagick, poppler-utils, jq, git, curl, CJK fonts; network on). Working directory and $HOME live under /work; files there persist until the weekly reset, and send can post them with files. The root filesystem is read-only, so install extras with pip install --user or npm install -g. Output is stdout+stderr combined. Each call is a fresh sh in /work (no state between calls except files); keep work under 120 s per call, and hand longer jobs to a background task if you have one.",
+			"Run a shell command in your own Linux work box (Debian; python3 with Pillow/numpy/requests, node/npm, ffmpeg, imagemagick, poppler-utils, jq, git, curl, CJK fonts; network on). Working directory and $HOME live under /work; files there persist until the weekly reset, and send can post them with files. The root filesystem is read-only, so install extras with pip install --user or npm install -g. Output is stdout+stderr combined. Each call is a fresh sh in /work (no state between calls except files); for work longer than a few minutes use job.",
 		parameters: Type.Object(
 			{
 				command: Type.String({ minLength: 1, description: "Passed to sh -c in /work" }),
-				timeout_s: Type.Optional(Type.Integer({ minimum: 1, maximum: 120, default: 30 })),
+				timeout_s: Type.Optional(Type.Integer({ minimum: 1, maximum: 600, default: 60 })),
 			},
 			{ additionalProperties: false },
 		),
@@ -280,7 +279,7 @@ export const JOB_TOOL_DEF = {
 	name: "job",
 	label: "Job",
 	description:
-		"在后台运行一段 codemode 脚本（同样的 JavaScript 和 tools.*，但没有 send、task、job：结果由你在它回来后发出），立刻返回 job id，不占用聊天。适合几分钟的批量活：处理一批图片或文件、几十次检索或搜索、长时间跑命令。脚本的 return / text() 输出（最多约 16000 字符）会以 [job jN 完成 ↪ #id] 出现在群消息里，到时你必须把结果回复给发起人；失败会以 [job jN 失败] 出现。启动后同一轮用 send 告诉发起人你在做。几秒能完成的事直接用 codemode。",
+		"在后台运行一段 codemode 脚本（同样的 JavaScript 和 tools.*，但没有 send、task、job：结果由你在它回来后发出），立刻返回 job id，不占用聊天。适合几分钟的批量活：处理一批图片或文件、几十次检索或搜索、长时间跑命令。脚本的 return / text() 输出会以 [job jN 完成 ↪ #id] 出现在群消息里，到时你必须把结果回复给发起人；失败会以 [job jN 失败] 出现。启动后同一轮用 send 告诉发起人你在做。几秒能完成的事直接用 codemode。",
 	parameters: Type.Object(
 		{
 			title: Type.String({ minLength: 1, maxLength: 80, description: "简短标题，结果里会带上" }),

@@ -5,13 +5,12 @@
 
 import type { Database } from "bun:sqlite";
 import { CodemodeSandbox, type CodemodeTool } from "@earendil-works/pi-codemode";
-import { CODEMODE_MAX_OUTPUT_CHARS } from "../agent/extensions/codemode.ts";
 import { getDaemonState, setDaemonState } from "../db/db.ts";
 import { appendNoteEvent, type NotePayload } from "../db/message-events.ts";
 import { log } from "../observability/log.ts";
 
-export const JOB_TIMEOUT_MS = 15 * 60_000;
-export const MAX_RUNNING_JOBS = 2;
+export const JOB_TIMEOUT_MS = 60 * 60_000;
+export const MAX_RUNNING_JOBS = 4;
 
 export interface JobDeps {
 	db: Database;
@@ -58,12 +57,8 @@ export class JobRunner {
 				]
 					.join("\n")
 					.trim();
-				const bounded =
-					output.length > CODEMODE_MAX_OUTPUT_CHARS
-						? `${output.slice(0, CODEMODE_MAX_OUTPUT_CHARS)}\n[job output truncated by host limit]`
-						: output;
-				if (result.ok) this.finish(id, "done", `${title}\n${bounded || "(no output)"}`);
-				else this.finish(id, "failed", `${title}\n${bounded}\nScript error: ${result.error.message}`.trim());
+				if (result.ok) this.finish(id, "done", `${title}\n${output || "(no output)"}`);
+				else this.finish(id, "failed", `${title}\n${output}\nScript error: ${result.error.message}`.trim());
 			})
 			.catch((error: unknown) => this.finish(id, "failed", `${title}\n${(error as Error).message}`))
 			.finally(() => void sandbox.close());

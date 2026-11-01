@@ -80,8 +80,9 @@ provider 没有返回 cache 用量时，若同一 cache cohort（provider/api/mo
 
 ## 版本记录
 
-当前：**40**。更早的版本见 git 历史。
+当前：**41**。更早的版本见 git 历史。
 
+- **v41**：工具说明与提示词去掉各种数字上限（view_image 每轮张数、codemode 输出字数、job 并发与时长、tg_messages 行数与正文长度、sh_exec 时长）；`reply_to` 只要求是本群真实存在的消息。
 - **v40**：提示词不再写 send 次数上限（代码里只留 20 条消息的防死循环保护，reaction 不计）；send 的 reaction 说明与 send 指南写明只点 reaction 时可以点本群任意消息；新增批量点 reaction 的脚本示例。
 - **v39**：`send`、`task`、`job` 改为 direct（脚本里可调用，脚本里的 send 不结束本轮，每轮最多 3 次），删除 `tg_post`；工具指南去掉"每轮一次 send""十几秒才打招呼"等互相冲突的规则，示例改为每个工具都用脚本串起来。
 - **v38**：model-only `job` 工具（golden `jobTool`，`TOOL_DEFS` 之后、Pi codemode 之前）与 `[job jN …]` note；共享协议与工具指南相应增加。

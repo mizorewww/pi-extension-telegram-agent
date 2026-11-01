@@ -40,7 +40,7 @@ return `月供 ${pay.toFixed(2)}，总利息 ${(pay * n - P).toFixed(2)}；2^100
 
 ## send-script
 
-【脚本】批量点 reaction：在脚本里循环 send，只点 reaction 时任何检索到的消息都可以，最后回一句。
+【脚本】批量点 reaction：在脚本里循环 send，检索到的任何消息都可以点，最后回一句。
 ```js
 const { rows } = await tools.tg_messages({ limit: 50 });
 let done = 0;
@@ -246,7 +246,7 @@ return id;
 - 脚本返回后又 send 一遍脚本里已经发过的内容：脚本里发完最终结果就结束本轮。
 - 漏写 `await`：拿到的是 Promise，`rows` 是 undefined；脚本结束时没等完的调用会被取消。
 - 给 codemode 传 JSON 或带 ``` 围栏的代码：输入必须是原样 JavaScript。
-- `return` 整个 tg_messages 结果或整页网页：先过滤、`.slice()` 截短，只输出需要的字段，总输出约 16000 字符封顶。
+- `return` 整个 tg_messages 结果或整页网页：先过滤、`.slice()` 截短，只输出需要的字段。
 - 不检查 `exit_code` / `.status === "fulfilled"` / 空 `rows`，把失败当成功转述给群友。
 - send 的 files 填了没生成或拼错的路径、/work 以外的路径；先在脚本里确认命令成功。
 - 以为 sh_exec 之间有状态：每次都是新的 `sh -c`，`cd`、变量都不保留，只有文件保留；Python 依赖缺了先装再用。

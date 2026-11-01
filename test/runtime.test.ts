@@ -457,7 +457,7 @@ for (const failure of ["auth", "overflow", "persistent_transport"] as const) {
 	});
 }
 
-test("reactions are uncounted and reach any group message; posting stays capped and visible-only", async () => {
+test("replies and reactions reach any real group message; reactions are uncounted, posting is capped", async () => {
 	const { rt, db } = setup();
 	const reacted: number[] = [];
 	(rt as any).api.setMessageReaction = async (_chat: number, messageId: number) => {
@@ -468,9 +468,12 @@ test("reactions are uncounted and reach any group message; posting stays capped 
 	(rt as any).sendsThisTurn = 0;
 	for (let id = 9400; id < 9430; id++) await (rt as any).executeSend({ reply_to: id, reaction: "🌭" }, false);
 	expect(reacted).toHaveLength(30);
-	// A text reply still needs a message the bot can actually see.
-	await expect((rt as any).executeSend({ message: "hi", reply_to: 9400 }, false)).rejects.toThrow("reply_not_visible");
-	for (let i = 0; i < 20; i++) await (rt as any).executeSend({ message: `m${i}` }, false);
+	// An old message found in history can be replied to; an invented id cannot.
+	await (rt as any).executeSend({ message: "hi", reply_to: 9400 }, false);
+	await expect((rt as any).executeSend({ message: "hi", reply_to: 99999 }, false)).rejects.toThrow(
+		"not a message of this group",
+	);
+	for (let i = 0; i < 19; i++) await (rt as any).executeSend({ message: `m${i}` }, false);
 	await expect((rt as any).executeSend({ message: "one more" })).rejects.toThrow("runaway loop");
 	db.close();
 });

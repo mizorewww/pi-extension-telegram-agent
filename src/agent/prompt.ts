@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-export const CACHE_SCHEMA_VERSION = 40; // v40: no send limit in the prompt; reactions reach any group message
+export const CACHE_SCHEMA_VERSION = 41; // v41: limits removed from tool texts; reply_to accepts any real group message
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
@@ -83,7 +83,7 @@ function toolGuides(tools: EnabledTools): string[] {
 	const scripted = tools.codemode && tools.send;
 	if (tools.send)
 		guides.push(
-			`### send\n\n- 群里只看得到 send 发出的内容；你的普通文字输出群友看不到。\n- 直接调用 send 会结束本轮。${scripted ? "在 codemode 脚本里调用 send 不会结束本轮，所以可以在一个脚本里先回一句、再干活、最后发结果，也可以循环调用（比如批量点 reaction）。" : ""}\n- 发文字时 reply_to 只能填上下文里真实出现过的 #id；只点 reaction 时可以是本群任意一条消息（包括用 tg_messages 检索到的）；reaction 必须搭配 reply_to；sticker 只用目录或〔系统附注〕里的 short_id。${tools.sandbox ? "\n- files 把工作区里的文件发到群里：图片（≤10 MB 的 jpg/png/webp）合成相册，其他文件（≤50 MB）作为文档；路径写 /work 下的绝对路径。" : ""}${examples("send", ...(scripted ? ["send-script"] : []))}`,
+			`### send\n\n- 群里只看得到 send 发出的内容；你的普通文字输出群友看不到。\n- 直接调用 send 会结束本轮。${scripted ? "在 codemode 脚本里调用 send 不会结束本轮，所以可以在一个脚本里先回一句、再干活、最后发结果，也可以循环调用（比如批量点 reaction）。" : ""}\n- reply_to 填本群真实存在的 #id（上下文里的、被引用的、用 tg_messages 检索到的都行），不要编造；reaction 必须搭配 reply_to；sticker 只用目录或〔系统附注〕里的 short_id。${tools.sandbox ? "\n- files 把工作区里的文件发到群里：图片（≤10 MB 的 jpg/png/webp）合成相册，其他文件（≤50 MB）作为文档；路径写 /work 下的绝对路径。" : ""}${examples("send", ...(scripted ? ["send-script"] : []))}`,
 		);
 	if (tools.search)
 		guides.push(
@@ -91,7 +91,7 @@ function toolGuides(tools: EnabledTools): string[] {
 		);
 	if (tools.viewImage)
 		guides.push(
-			`### view_image\n\n- 平时图片、sticker、视频只以文字描述出现（[media_update #id] [图片: 描述]）。描述不够回答问题、图片本身就是话题、或有人让你看时，用 view_image 打开对应 #id 的原图（视频给 1-3 帧）。\n- 任何 #id 都行，包括被回复的旧消息和检索到的历史消息；每轮最多 4 张；看过的不要重复看。${examples("view_image")}`,
+			`### view_image\n\n- 平时图片、sticker、视频只以文字描述出现（[media_update #id] [图片: 描述]）。描述不够回答问题、图片本身就是话题、或有人让你看时，用 view_image 打开对应 #id 的原图（视频给 1-3 帧）。\n- 任何 #id 都行，包括被回复的旧消息和检索到的历史消息；看过的不要重复看。${examples("view_image")}`,
 		);
 	if (tools.codemode) {
 		const callable = [
@@ -105,7 +105,7 @@ function toolGuides(tools: EnabledTools): string[] {
 			.filter(Boolean)
 			.join("、");
 		guides.push(
-			`### codemode\n\n- 输入是一段 JavaScript（不是 JSON、不加代码块围栏），跑在 QuickJS 沙箱里：没有网络、文件系统和计时器，只能用 \`await tools.<名字>(参数)\` 调用工具。脚本里能用：${callable}。多个独立调用用 Promise.allSettled 并行。${scripted ? '\n- 被点名后要查资料、读源码、跑命令或处理文件时，用一个脚本做：先 send 一句（如"我去查一下"），再干活；结果可以在脚本里直接 send，也可以 return 出来看过再 send。能直接回答的就直接 send，不用写脚本。' : ""}\n- 在脚本里过滤、截取，只用 text() 或 return 输出需要的部分，最多约 16000 字符；image() 的输出会被丢弃。${scripted && tools.search ? examples("codemode") : ""}${tools.send ? examples("tg_messages") : ""}`,
+			`### codemode\n\n- 输入是一段 JavaScript（不是 JSON、不加代码块围栏），跑在 QuickJS 沙箱里：没有网络、文件系统和计时器，只能用 \`await tools.<名字>(参数)\` 调用工具。脚本里能用：${callable}。多个独立调用用 Promise.allSettled 并行。${scripted ? '\n- 被点名后要查资料、读源码、跑命令或处理文件时，用一个脚本做：先 send 一句（如"我去查一下"），再干活；结果可以在脚本里直接 send，也可以 return 出来看过再 send。能直接回答的就直接 send，不用写脚本。' : ""}\n- 在脚本里过滤、截取，只用 text() 或 return 输出需要的部分；image() 的输出会被丢弃。${scripted && tools.search ? examples("codemode") : ""}${tools.send ? examples("tg_messages") : ""}`,
 		);
 	}
 	if (tools.sandbox)
@@ -118,7 +118,7 @@ function toolGuides(tools: EnabledTools): string[] {
 		);
 	if (scripted)
 		guides.push(
-			`### job\n\n- 几分钟的批量活（处理一批图片或文件、几十次检索或搜索、长时间跑命令）用 job 放到后台：code 是一段 codemode 脚本，可以用除 send、task、job 以外的工具，调用后立刻返回 job id。启动的同时告诉发起人。\n- 结果以 [job jN 完成 ↪ #id] 回来时必须回复发起人；失败会以 [job jN 失败] 出现。每个 bot 同时最多 2 个，最长 15 分钟。${examples("job")}`,
+			`### job\n\n- 几分钟的批量活（处理一批图片或文件、几十次检索或搜索、长时间跑命令）用 job 放到后台：code 是一段 codemode 脚本，可以用除 send、task、job 以外的工具，调用后立刻返回 job id。启动的同时告诉发起人。\n- 结果以 [job jN 完成 ↪ #id] 回来时必须回复发起人；失败会以 [job jN 失败] 出现。${examples("job")}`,
 		);
 	if (tools.send || tools.codemode) guides.push(commonMistakes(tools));
 	return guides;

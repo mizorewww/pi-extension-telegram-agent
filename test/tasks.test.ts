@@ -216,15 +216,14 @@ test("background jobs report done, failed or interrupted on the requester's mess
 	expect(notes()[1]).toMatchObject({ id: 11, phase: "failed" });
 	expect(notes()[1]!.text).toContain("boom");
 
-	jobs.start(12, "一", "return await tools.hold({})");
-	jobs.start(13, "二", "return await tools.hold({})");
-	expect(() => jobs.start(14, "三", "return 1")).toThrow("already running");
+	for (const origin of [12, 13, 14, 15]) jobs.start(origin, "等待", "return await tools.hold({})");
+	expect(() => jobs.start(16, "太多", "return 1")).toThrow("already running");
 	jobs.stopAll();
 	expect(
 		notes()
 			.filter((note) => note.phase === "interrupted")
 			.map((note) => note.id),
-	).toEqual([12, 13]);
-	expect(wakes).toEqual([10, 11, 12, 13]);
+	).toEqual([12, 13, 14, 15]);
+	expect(wakes).toEqual([10, 11, 12, 13, 14, 15]);
 	release();
 }, 30_000);

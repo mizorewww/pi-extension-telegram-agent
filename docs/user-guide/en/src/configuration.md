@@ -111,7 +111,7 @@ tasks: { workflows: { search: "~/pi-tasks/search" }, max_running: 2, timeout_min
 |---|---|---|
 | `"off"` (default) | text placeholders such as `[photo]` only | nothing |
 | `"context"` | images and video frames go straight to the main model | a main model with image input |
-| `"hybrid"` | a vision model (`media.vision_model`) describes each new image or video once as text, shared by all bots; when a description is not enough, the bot calls `view_image` to open one message's actual image or video frames (up to 4 per turn), including replied-to or searched older messages | a main model with image input |
+| `"hybrid"` | a vision model (`media.vision_model`) describes each new image or video once as text, shared by all bots; when a description is not enough, the bot calls `view_image` to open one message's actual image or video frames, including replied-to or searched older messages | a main model with image input |
 
 Which one: with many images or a tight budget, use `hybrid`, which pays only for text descriptions until the bot really needs to look; use `context` if the main model should see every image directly.
 

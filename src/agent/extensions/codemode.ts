@@ -6,10 +6,7 @@
 
 import { createCodemodeExtension, type InlineExtension } from "@earendil-works/pi-coding-agent";
 
-/** Host-side cap on one codemode result, whatever the script's options line asks for. */
-export const CODEMODE_MAX_OUTPUT_CHARS = 16_000;
 export const CODEMODE_IMAGE_OMITTED = "[image omitted: codemode output is text only]";
-const TRUNCATED_MARKER = "\n[codemode output truncated by host limit]";
 
 const codemode = createCodemodeExtension({ mode: "on", models: false });
 
@@ -34,27 +31,12 @@ export function makeCodemodeExtension(): InlineExtension {
 			codemode(pi);
 			pi.on("tool_result", (event) => {
 				if (event.toolName !== "codemode" || event.parentToolCallId) return;
-				let budget = CODEMODE_MAX_OUTPUT_CHARS;
-				let changed = false;
-				const content = event.content.flatMap((block) => {
-					if (block.type === "image") {
-						changed = true;
-						return [{ type: "text" as const, text: CODEMODE_IMAGE_OMITTED }];
-					}
-					if (budget <= 0) {
-						changed = true;
-						return [];
-					}
-					if (block.text.length <= budget) {
-						budget -= block.text.length;
-						return [block];
-					}
-					changed = true;
-					const text = `${block.text.slice(0, budget)}${TRUNCATED_MARKER}`;
-					budget = 0;
-					return [{ type: "text" as const, text }];
-				});
-				return changed ? { content } : undefined;
+				if (!event.content.some((block) => block.type === "image")) return;
+				return {
+					content: event.content.map((block) =>
+						block.type === "image" ? { type: "text" as const, text: CODEMODE_IMAGE_OMITTED } : block,
+					),
+				};
 			});
 		},
 	};

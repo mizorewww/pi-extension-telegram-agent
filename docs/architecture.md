@@ -44,7 +44,7 @@ Telegram ── poller × N ──┐
 
 ### 后台脚本（job）
 
-- `job({ title, code, for_message? })`（codemode 与 send 都开时注册）：把一段 codemode 脚本放到回合之外运行（`src/tasks/jobs.ts`，Pi `CodemodeSandbox`，与 codemode 同一组脚本工具，但没有 send、task、job），立刻返回 `jN`。结果（输出 ≤16,000 字符）写成 `source: "job"` 的 note（`[job jN 完成 ↪ #id]` / `[job jN 失败]`），在发起消息上产生回复义务并唤醒 bot，复用任务的投递路径。每 bot 同时 ≤2 个、每个 ≤15 分钟；daemon 停止时正在跑的 job 写 interrupted note 并产生义务，重启后 bot 会告诉发起人。job 不跨重启续跑（脚本没有可恢复的状态）。
+- `job({ title, code, for_message? })`（codemode 与 send 都开时注册）：把一段 codemode 脚本放到回合之外运行（`src/tasks/jobs.ts`，Pi `CodemodeSandbox`，与 codemode 同一组脚本工具，但没有 send、task、job），立刻返回 `jN`。结果（输出 ≤16,000 字符）写成 `source: "job"` 的 note（`[job jN 完成 ↪ #id]` / `[job jN 失败]`），在发起消息上产生回复义务并唤醒 bot，复用任务的投递路径。每 bot 同时 ≤4 个、每个 ≤60 分钟（只防失控，不写进提示词）；daemon 停止时正在跑的 job 写 interrupted note 并产生义务，重启后 bot 会告诉发起人。job 不跨重启续跑（脚本没有可恢复的状态）。
 
 ## 任务威胁模型
 
@@ -63,7 +63,7 @@ Telegram ── poller × N ──┐
 
 Telegram create 不可回滚，所以：
 
-- 发送前做完所有本地校验（发文字时 `reply_to` 必须在上下文中可见，只点 reaction 时可以是本群任意一条非控制消息；sticker 必须有本 bot 的 `file_id`、reaction 只允许 Telegram 固定集合，群组限制了 reaction 时再与启动时 `getChat.available_reactions` 取交集）。带内容的 send 遇到无效 reaction 时丢弃 reaction 继续发；只点 reaction 才报错。
+- 发送前做完所有本地校验（`reply_to` 必须是本群真实存在的非控制消息，上下文外的旧消息也可以，编造的 id 被拒绝；sticker 必须有本 bot 的 `file_id`、reaction 只允许 Telegram 固定集合，群组限制了 reaction 时再与启动时 `getChat.available_reactions` 取交集）。带内容的 send 遇到无效 reaction 时丢弃 reaction 继续发；只点 reaction 才报错。
 - 只有 Telegram 确定性的 4xx 拒绝（且之前没有任何提交）才把错误还给模型重试。超时、断线、429、5xx、非 JSON 一律算结果未知，返回固定 `no_retry` 并结束本轮。
 - 提交后的本地记账（canonical 写库、可见性、广播、事件）失败只降级为 `committed`，不重发；SQLite busy 有 25/100/250 ms 有界重试。
 - `files`（只有带工作区的 bot 声明）：发送前先把全部文件从工作区拷出（容器内 `realpath` 后必须仍在 `/work`），任何文件缺失、过大或类型不符都在第一次 create 之前报错；顺序为文字 → 图片（≤10 MB 的 jpg/png/webp，多张合成相册）→ 文件（≤50 MB）→ sticker，只有第一条 create 带 `reply_to`。
@@ -86,7 +86,7 @@ Telegram create 不可回滚，所以：
 
 - **off（默认）**：只有文字占位。
 - **context（opt-in）**：不调用视觉模型，图片/抽帧直接作为 image block 交错进主模型上下文，派生文件记录在 `media.context_files`。每轮最多 `media.max_per_turn` 张，每张按 1,100 token 计入预算，超出降级为文字占位。主模型必须支持图片输入，否则启动失败（`image_input_unsupported`）。
-- **hybrid**（推荐）：视觉模型（`media.vision_model`）为每个媒体生成一次文字描述，按 `file_unique_id` 持久化在 `media.vision` 并跨 bot 复用；描述作为 `media_update` delta 追加，主模型看到文字。每轮最多 `media.max_per_turn` 个、全局并发 `media.concurrency`；一轮最多等 2.5 秒，没赶上的描述在后台继续，之后以 `media_update` 进入下一轮（需要时 bot 用 view_image 直接看原图）。另注册 `view_image({message_id})`（model-only）。它复用 context 模式的 `ensureContextMedia` 准备图片，结果 content 只有该消息的渲染行，`details` 只存文件引用 `{messageId, images}`；`context` 投影时才把文件读成 image block（与 context 模式同一 resolver，session 不存 base64）。被查看的消息计入可见集合（可被 `reply_to`、文件不被清理），图片计入 `context_image_budget_bytes`、压缩前的每张 1,100 token 换算和摘要输入。每轮最多 4 张。主模型必须支持图片输入。
+- **hybrid**（推荐）：视觉模型（`media.vision_model`）为每个媒体生成一次文字描述，按 `file_unique_id` 持久化在 `media.vision` 并跨 bot 复用；描述作为 `media_update` delta 追加，主模型看到文字。每轮最多 `media.max_per_turn` 个、全局并发 `media.concurrency`；一轮最多等 2.5 秒，没赶上的描述在后台继续，之后以 `media_update` 进入下一轮（需要时 bot 用 view_image 直接看原图）。另注册 `view_image({message_id})`（model-only）。它复用 context 模式的 `ensureContextMedia` 准备图片，结果 content 只有该消息的渲染行，`details` 只存文件引用 `{messageId, images}`；`context` 投影时才把文件读成 image block（与 context 模式同一 resolver，session 不存 base64）。被查看的消息计入可见集合（可被 `reply_to`、文件不被清理），图片计入 `context_image_budget_bytes`、压缩前的每张 1,100 token 换算和摘要输入。主模型必须支持图片输入。
 - 下载严格把 `file_id` 与拥有它的那个 bot 的 Bot API 配对；回复 bot 没有 mapping 时可用其他已配置 bot 的。
 - 本地文件是可再生缓存：成功压缩后，所有已配置 bot 都不再引用（不可见、无待回复、无未消费 event）的文件按 ≤256 个一批删除；媒体行、描述、short id 与 file mapping 保留。
 
@@ -103,7 +103,7 @@ Telegram create 不可回滚，所以：
 - `send` 既能直接调用也能在 codemode 脚本里调用：直接调用成功即结束本轮；脚本里的调用不结束本轮（Pi 只认顶层调用的 terminate），所以一个脚本可以先回一句、干活、再发结果，同时不停 typing。发出内容（文字 / sticker / 文件）的 send 每轮最多 20 次（`MAX_SENDS_PER_TURN`），只防脚本死循环刷屏，不写进提示词；只点 reaction 不计数。`task`、`job` 同样可在脚本里调用；`view_image` 是 model-only，因为脚本输出会丢弃图片。
 - `search(query | url [, offset])`：TinyFish；query 最多 5 条短结果；url 只接受公网 HTTP(S)（本地预检 userinfo、localhost、私网、link-local），整页（≤200k 字符）在内存缓存 15 分钟，每次返回从 `offset` 起约 4k token 的一页并给出下一页 offset，包在“不可信网页内容”边界里。日志不记录 query、URL 路径或正文。脚本里也可调用。
 - `codemode`：Pi 原生（`createCodemodeExtension`，`mode: "on"`、`models: false`），见下节威胁模型。声明文本由 Pi 按可调用工具渲染，fingerprint 以 Pi 版本 + 工具列表锁定。
-- `tg_messages`（`exposure: "codemode"`，只有脚本能调）：只读检索本群 canonical 历史（`src/tools/messages.ts`），按 id / 时间 / 发送者 / 回复 / 媒体类型 / 子串过滤（3 字以上走 FTS5 trigram 索引，可按 relevance 排序；更短的回退 LIKE），每次 ≤500 行、正文 ≤4000 字，带 `next_before_id`/`next_after_id` 分页；返回固定 DTO（声明为 `outputSchema`），不暴露 SQL 与表结构；排除 `telegram_control_messages` 与其他 chat。bot 收不到 Telegram 删除事件，已删除的消息仍可能被检索到。
+- `tg_messages`（`exposure: "codemode"`，只有脚本能调）：只读检索本群 canonical 历史（`src/tools/messages.ts`），按 id / 时间 / 发送者 / 回复 / 媒体类型 / 子串过滤（3 字以上走 FTS5 trigram 索引，可按 relevance 排序；更短的回退 LIKE），每次 ≤2000 行（按 id 取 ≤1000 个），带 `next_before_id`/`next_after_id` 分页；返回固定 DTO（声明为 `outputSchema`），不暴露 SQL 与表结构；排除 `telegram_control_messages` 与其他 chat。bot 收不到 Telegram 删除事件，已删除的消息仍可能被检索到。
 - `tg_download` / `sh_exec` / `sh_reset`（`exposure: "codemode"`，`tools.sandbox` 开启时注册）：在 bot 的工作区容器里拷入 Telegram 附件、执行命令、清空工作区，见下节威胁模型与 [runbooks/sandbox.md](runbooks/sandbox.md)。
 - 没有调用 send 的 assistant 文本只写本地事件和 TUI，session 里用固定 `[no_send]` 代替。
 
@@ -111,14 +111,14 @@ Telegram create 不可回滚，所以：
 
 - **威胁**：群成员或网页内容通过 prompt injection 让 bot 执行任意 JS。
 - **边界**：脚本跑在 Pi 的 QuickJS（wasm）VM 里，位于独立 worker 线程；VM 的唯一出口是被注册为可调用的工具，没有 Node API、文件系统、网络、计时器。可调用工具 = 激活的 `direct` 工具（含 send、task、job）+ `codemode` 暴露的工具；脚本发消息受每轮 20 条的防死循环上限约束，`view_image` 是 model-only。
-- **宿主侧约束**（`src/agent/extensions/codemode.ts`）：单次结果最多 16,000 字符（脚本的 `// @options` 不能调高）；脚本 `image()` 产生的图片替换为固定文本，session 里永远不存 base64。
+- **宿主侧约束**（`src/agent/extensions/codemode.ts`）：脚本 `image()` 产生的图片替换为固定文本，session 里永远不存 base64；输出长度沿用 Pi 的 `max_output_tokens`（默认 10,000 token）。
 - **残余风险**：wasm 引擎漏洞；VM 每次最多 256 MB，同进程最多 2 个 worker（`PI_CODEMODE_MAX_WORKERS`）。默认关闭。
 
 ## 沙箱威胁模型
 
 - **威胁**：群成员（被信任）或网页内容通过 prompt injection 让 bot 在工作区执行任意命令。
 - **边界**：每个 bot 一个常驻容器 `tg-box-<bot>`（`src/sandbox/box.ts`），由独立用户 `tgbox` 的 rootless Docker 运行；daemon 用户只在 `tgbox` 组里能访问其 socket，不在 `docker` 组。容器以 uid 1000、`--cap-drop ALL`、`no-new-privileges`、只读根文件系统、`/tmp` tmpfs、内存/CPU/pids 上限运行；唯一挂载是命名卷 `tg-work-<bot>:/work`，不挂宿主机目录，不传任何 env（只有 `HOME=/work/.home`），容器里没有凭证。默认开网（rootless slirp4netns，`--disable-host-loopback`，访问不到宿主机 loopback 上的服务）。
-- **出入**：只经 docker exec 的 stdin/stdout 传字节。拷出前在容器内 `realpath`，结果必须仍在 `/work` 下且是普通文件；输出 ≤1 MiB，单条命令 ≤120 s（容器内 `timeout -s KILL` + 宿主侧 deadline）。
+- **出入**：只经 docker exec 的 stdin/stdout 传字节。拷出前在容器内 `realpath`，结果必须仍在 `/work` 下且是普通文件；输出 ≤1 MiB，单条命令 ≤600 s（容器内 `timeout -s KILL` + 宿主侧 deadline）。
 - **残余风险**：容器逃逸得到的是 `tgbox` 的 subuid 映射身份，读不到 daemon 用户的 `.env`；出网可以被用来访问公网服务。工作区每周一 05:00 清空，也可以 `/box reset` 或 `sh_reset`。
 
 ## Telegram 控制命令

@@ -256,7 +256,6 @@ test("/fire routes persisted sibling sends locally, once, never to the sender or
 				chatId,
 				box: null,
 				emitMediaUpdates: false,
-				visibleMessageIds: new Set(),
 				allowedReactions: null,
 				triggerMessageId: null,
 				recordPublicSend: noop,

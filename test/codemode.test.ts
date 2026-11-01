@@ -13,11 +13,7 @@ import {
 	SettingsManager,
 	type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
-import {
-	CODEMODE_IMAGE_OMITTED,
-	CODEMODE_MAX_OUTPUT_CHARS,
-	makeCodemodeExtension,
-} from "../src/agent/extensions/codemode.ts";
+import { CODEMODE_IMAGE_OMITTED, makeCodemodeExtension } from "../src/agent/extensions/codemode.ts";
 import { TOOL_DEFS, TOOL_EXPOSURE } from "../src/agent/tools.ts";
 
 const model = {
@@ -152,9 +148,7 @@ test("a send inside a script posts without ending the turn", async () => {
 	expect(result.modelCalls).toBe(2);
 }, 30_000);
 
-test("codemode output is bounded and never persists images", async () => {
-	const flood = await runScript('// @options: {"max_output_tokens": 1000000}\ntext("x".repeat(100000))');
-	expect(flood.text.length).toBeLessThanOrEqual(CODEMODE_MAX_OUTPUT_CHARS + 64);
+test("codemode output never persists images", async () => {
 	const pixel =
 		"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 	const picture = await runScript(`image("${pixel}")`);

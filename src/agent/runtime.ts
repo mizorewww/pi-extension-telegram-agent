@@ -207,9 +207,6 @@ const delay = (ms: number) =>
 		setTimeout(resolve, ms).unref?.();
 	});
 
-/** view_image calls that may attach images within one turn. */
-const VIEW_IMAGE_MAX_PER_TURN = 4;
-
 const ACTIVITY_RAW_EVENT_KINDS = new Set([
 	"assistant_text",
 	"thinking",
@@ -359,7 +356,6 @@ export class BotRuntime {
 	private contextFingerprint = "";
 	private telemetryHmacKey = "";
 	private staticPrefixTokenEstimate = 0;
-	private viewedImagesThisTurn = 0;
 	private sendsThisTurn = 0;
 	/** The provider turn in flight: new direct addresses are steered into it (steerDirectAddress). */
 	private activeTurn: { steeredThrough: number; steering: Promise<void> } | null = null;
@@ -1279,7 +1275,6 @@ export class BotRuntime {
 			botId: this.bot.id,
 			chatId: this.config.groupChatId,
 			emitMediaUpdates: this.config.media.mode !== "context",
-			visibleMessageIds: this.visibleMessageIds,
 			allowedReactions: this.allowedReactions,
 			box: this.box,
 			triggerMessageId: this.currentTriggerMessageId,
@@ -1461,7 +1456,6 @@ export class BotRuntime {
 		let normal = ordinaryEvents();
 
 		this.pendingInputMetrics = emptyInputMetrics();
-		this.viewedImagesThisTurn = 0;
 		this.sendsThisTurn = 0;
 		if (this.config.media.mode === "context") {
 			await this.ensureBatchContextMedia([...mandatory, ...normal], obligationIds);
@@ -2055,14 +2049,12 @@ export class BotRuntime {
 		if (!row) return fail("message_not_found");
 		const media = row.media ? (JSON.parse(row.media) as { file_unique_id?: unknown }) : null;
 		if (typeof media?.file_unique_id !== "string") return fail("no_image");
-		if (this.viewedImagesThisTurn >= VIEW_IMAGE_MAX_PER_TURN) return fail("turn_limit");
 		const prepared = await ensureContextMedia(this.db, this.api, this.bot.id, media.file_unique_id, {
 			cacheDir: join(this.config.dataDir, "media"),
 			botApis: this.botApis,
 			videoTranscoder: this.videoTranscoder,
 		});
 		if (!prepared.ok) return fail(prepared.outcome);
-		this.viewedImagesThisTurn++;
 		this.markVisible([row.message_id]);
 		this.recordEvent("tool_view_image", { ok: true, images: prepared.images.length });
 		const line = renderMessageLine(this.db, row, { visibleIds: new Set() });

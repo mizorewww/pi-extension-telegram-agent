@@ -5,10 +5,8 @@
 
 import type { Database } from "bun:sqlite";
 
-export const MAX_MESSAGE_ROWS = 500;
-export const MAX_MESSAGE_IDS = 200;
-const MAX_TEXT_CHARS = 4_000;
-const MAX_CONTAINS_CHARS = 200;
+export const MAX_MESSAGE_ROWS = 2_000;
+export const MAX_MESSAGE_IDS = 1_000;
 /** The trigram index only matches needles of at least three characters. */
 const INDEX_MIN_CHARS = 3;
 
@@ -59,12 +57,6 @@ function localDateTime(sec: number): string {
 	const d = new Date(sec * 1000);
 	const p = (n: number) => String(n).padStart(2, "0");
 	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
-
-function bounded(text: string | null): string | null {
-	if (text == null) return null;
-	const points = Array.from(text);
-	return points.length <= MAX_TEXT_CHARS ? text : `${points.slice(0, MAX_TEXT_CHARS).join("")}…`;
 }
 
 interface Row {
@@ -140,8 +132,7 @@ export function queryMessages(db: Database, chatId: number, query: MessageQuery)
 	let indexed: string | null = null;
 	if (query.text_contains !== undefined) {
 		const needle = typeof query.text_contains === "string" ? query.text_contains : "";
-		if (!needle || needle.length > MAX_CONTAINS_CHARS)
-			throw new MessageQueryError(`text_contains: expected 1-${MAX_CONTAINS_CHARS} characters`);
+		if (!needle) throw new MessageQueryError("text_contains: expected a non-empty string");
 		if (Array.from(needle).length >= INDEX_MIN_CHARS) {
 			// A quoted FTS5 phrase is a plain substring under the trigram tokenizer.
 			indexed = `"${needle.replaceAll('"', '""')}"`;
@@ -211,7 +202,7 @@ function toDto(row: Row): MessageDto {
 			alias: row.username ? null : row.alias,
 			is_bot: row.is_bot === 1,
 		},
-		text: bounded(row.text ?? row.caption),
+		text: row.text ?? row.caption,
 		reply_to: row.reply_to_message_id,
 		quote,
 		forwarded: row.forward_origin != null,
