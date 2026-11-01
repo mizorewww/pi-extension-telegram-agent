@@ -38,8 +38,8 @@ import {
 
 const GOLDEN = {
 	schemaVersion: 37,
-	systemZhTemplate: "f7fb480d98b0",
-	systemEnTemplate: "485b7145fa2e",
+	systemZhTemplate: "a7b8e8a16eea",
+	systemEnTemplate: "25e14bcb770f",
 	eventSerialize: "a05c0584eb08",
 	tools: "3bd9368f55d6",
 	codemodeTools: "bcc86b6c67ab",
