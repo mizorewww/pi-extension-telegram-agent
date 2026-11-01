@@ -107,9 +107,9 @@ export function inspectProviderContext(
 		bot.tools,
 		bot.stickerSets.length > 0 ? stickerCatalogPromptBlock(db, bot.id, bot.stickerSets) : "",
 	);
-	const tools = TOOL_DEFS.filter((tool) => (tool.name === "send" ? bot.tools.send : bot.tools.search)).map(
-		({ name, description, parameters }) => ({ name, description, parameters }),
-	);
+	const tools = TOOL_DEFS.filter((tool) =>
+		tool.name === "send" ? bot.tools.send : tool.name === "search" ? bot.tools.search : bot.tools.viewImage,
+	).map(({ name, description, parameters }) => ({ name, description, parameters }));
 	return {
 		source: "current_session_pre_adapter_projection",
 		exact_last_request: false,

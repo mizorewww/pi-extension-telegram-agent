@@ -27,12 +27,18 @@ import {
 	type SessionEntry,
 	type SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
-import { MIN_COMPACTION_RESERVE, type AppConfig, type BotConfig } from "../config.ts";
+import {
+	MIN_COMPACTION_RESERVE,
+	mediaNeedsImageInput,
+	mediaUsesVision,
+	type AppConfig,
+	type BotConfig,
+} from "../config.ts";
 import { getBotState, setBotState } from "../db/db.ts";
 import { BotApi, groupReactionAllowlist, TelegramApiError } from "../telegram/api.ts";
 import { TelegramTypingLease } from "../telegram/activity.ts";
 import { executeAgentSend } from "./send.ts";
-import { type MessageRow, TELEGRAM_SERIALIZER_VERSION } from "./serialize.ts";
+import { type MessageRow, renderMessageLine, TELEGRAM_SERIALIZER_VERSION } from "./serialize.ts";
 import {
 	buildSystemPrompt,
 	sha256Short,
@@ -49,6 +55,7 @@ import {
 	toolProtocolHash,
 	type SendParams,
 	type SearchParams,
+	type ViewImageParams,
 } from "./tools.ts";
 import { MessageQueryError, queryMessages, type MessageQuery } from "../tools/messages.ts";
 import { runTinyFishTool } from "../tools/search.ts";
@@ -105,6 +112,7 @@ import {
 	makeCodemodeExtension,
 	CODEMODE_DECLARATION_TOKENS,
 	CODEMODE_FINGERPRINT_ENTRY,
+	type ViewImageDetails,
 	makeCachePayloadObserverExtension,
 	makeTelegramCompactionExtension,
 	makeTelegramContextExtension,
@@ -151,6 +159,9 @@ const TELEGRAM_CONTEXT_COMMIT_TYPE = "telegram_context_commit_v2";
 const EPOCH_KEY = "context_epoch";
 const VISION_BATCH_CONCURRENCY = 2;
 
+/** view_image calls that may attach images within one turn. */
+const VIEW_IMAGE_MAX_PER_TURN = 4;
+
 const ACTIVITY_RAW_EVENT_KINDS = new Set([
 	"assistant_text",
 	"thinking",
@@ -159,6 +170,7 @@ const ACTIVITY_RAW_EVENT_KINDS = new Set([
 	"tool_search",
 	"tool_fetch",
 	"tool_messages",
+	"tool_view_image",
 	"markdown_sent",
 	"plain_fallback",
 	"send",
@@ -293,6 +305,7 @@ export class BotRuntime {
 	private contextFingerprint = "";
 	private telemetryHmacKey = "";
 	private staticPrefixTokenEstimate = 0;
+	private viewedImagesThisTurn = 0;
 	private pendingPayloadObservation: ProviderPayloadObservation | null = null;
 	private allowedReactions: ReadonlySet<string> | null = null;
 	private previousRequest: (PreviousProviderPayloadFingerprint & { cohort: string }) | null = null;
@@ -417,6 +430,14 @@ export class BotRuntime {
 				};
 			},
 		};
+		const viewImageTool = {
+			name: TOOL_DEFS[2].name,
+			label: TOOL_DEFS[2].label,
+			description: TOOL_DEFS[2].description,
+			parameters: TOOL_DEFS[2].parameters,
+			exposure: TOOL_EXPOSURE.view_image,
+			execute: async (_toolCallId: string, params: ViewImageParams) => await this.executeViewImage(params),
+		};
 		const messagesTool = {
 			...CODEMODE_TOOL_DEFS[0],
 			exposure: "codemode" as const,
@@ -454,8 +475,8 @@ export class BotRuntime {
 		// Tool order is cache-visible protocol: never reorder (docs/cache.md, REQ-TEST-0001 R2).
 		// Per-bot tool toggles (REQ-CONF-0001): filter the fixed-order tool list. send off
 		// means the bot cannot speak in-group (observer-only); search/codemode off saves tokens.
-		const activeTools = [sendTool, searchTool].filter((t) =>
-			t.name === "send" ? this.bot.tools.send : this.bot.tools.search,
+		const activeTools = [sendTool, searchTool, viewImageTool].filter((t) =>
+			t.name === "send" ? this.bot.tools.send : t.name === "search" ? this.bot.tools.search : this.bot.tools.viewImage,
 		);
 		// Pi renders the codemode declaration from the callable tools; it is pinned by the Pi
 		// version and these tools, both already in the fingerprint.
@@ -529,7 +550,7 @@ export class BotRuntime {
 			// text-only (vision descriptions render inside the serialized placeholders).
 			makeTelegramContextExtension(
 				() => this.pendingTurnContext,
-				this.config.media.mode === "context"
+				mediaNeedsImageInput(this.config.media.mode)
 					? createContextImageResolver(join(this.config.dataDir, "media"))
 					: undefined,
 			),
@@ -1260,6 +1281,7 @@ export class BotRuntime {
 		let normal = ordinaryEvents();
 
 		this.pendingInputMetrics = emptyInputMetrics();
+		this.viewedImagesThisTurn = 0;
 		if (this.config.media.mode === "context") {
 			await this.ensureBatchContextMedia([...mandatory, ...normal], obligationIds);
 		} else {
@@ -1491,7 +1513,7 @@ export class BotRuntime {
 
 	/** Check before appending the batch, including after a failed or restored turn. */
 	private async checkContextImageBudget(pending: TelegramContextDetails): Promise<void> {
-		if (!this.session || this.config.media.mode !== "context") return;
+		if (!this.session || !mediaNeedsImageInput(this.config.media.mode)) return;
 		const imageBytes = () =>
 			contextImageBytes(
 				this.session!.sessionManager.buildContextEntries(),
@@ -1610,7 +1632,7 @@ export class BotRuntime {
 		const catalog = this.modelRuntime.getModel(provider, modelId);
 		if (!catalog) return { ok: false, code: "unknown_model" };
 		if (!this.modelRuntime.hasConfiguredAuth(provider)) return { ok: false, code: "unauthenticated_provider" };
-		if (this.config.media.mode === "context" && !catalog.input.includes("image"))
+		if (mediaNeedsImageInput(this.config.media.mode) && !catalog.input.includes("image"))
 			return { ok: false, code: "image_input_unsupported" };
 		const reasoningEffort = clampThinkingLevel(catalog, this.bot.reasoningEffort);
 		if (provider === this.bot.provider && modelId === this.bot.model && reasoningEffort === this.bot.reasoningEffort)
@@ -1785,7 +1807,7 @@ export class BotRuntime {
 
 	/** Lazy vision: bounded per turn, with direct-reply events ordered before ordinary catch-up. */
 	private async ensureBatchVision(batch: readonly MessageEvent[], obligationIds: ReadonlySet<number>): Promise<void> {
-		if (this.config.media.mode !== "describe" || this.config.media.maxPerTurn <= 0) return;
+		if (!mediaUsesVision(this.config.media.mode) || this.config.media.maxPerTurn <= 0) return;
 		const described = this.db.query("SELECT vision FROM media WHERE file_unique_id = ?");
 		const pending = pendingMediaIds(
 			batch,
@@ -1818,6 +1840,44 @@ export class BotRuntime {
 		} catch {
 			this.recordEvent("error", { stage: "vision", category: "request_failed" });
 		}
+	}
+
+	/** view_image: prepare one message's image files and return refs; bytes join at projection. */
+	private async executeViewImage(params: ViewImageParams) {
+		const chatId = this.config.groupChatId;
+		const fail = (category: string): never => {
+			this.recordEvent("tool_view_image", { ok: false, category });
+			throw new Error(`view_image failed: ${category}`);
+		};
+		const row = this.db
+			.query(
+				`SELECT m.* FROM messages m
+				  WHERE m.chat_id = ? AND m.message_id = ?
+				    AND NOT EXISTS (SELECT 1 FROM telegram_control_messages c
+				                     WHERE c.chat_id = m.chat_id AND c.message_id = m.message_id)`,
+			)
+			.get(chatId, params.message_id) as MessageRow | null;
+		if (!row) return fail("message_not_found");
+		const media = row.media ? (JSON.parse(row.media) as { file_unique_id?: unknown }) : null;
+		if (typeof media?.file_unique_id !== "string") return fail("no_image");
+		if (this.viewedImagesThisTurn >= VIEW_IMAGE_MAX_PER_TURN) return fail("turn_limit");
+		const prepared = await ensureContextMedia(this.db, this.api, this.bot.id, media.file_unique_id, {
+			cacheDir: join(this.config.dataDir, "media"),
+			botApis: this.botApis,
+			videoTranscoder: this.videoTranscoder,
+		});
+		if (!prepared.ok) return fail(prepared.outcome);
+		this.viewedImagesThisTurn++;
+		this.markVisible([row.message_id]);
+		this.recordEvent("tool_view_image", { ok: true, images: prepared.images.length });
+		const line = renderMessageLine(this.db, row, { visibleIds: new Set() });
+		const details: ViewImageDetails = { messageId: row.message_id, images: prepared.images };
+		return {
+			content: [
+				{ type: "text" as const, text: `${line}\n[attached ${prepared.images.length} image(s) of #${row.message_id}]` },
+			],
+			details,
+		};
 	}
 
 	private markVisible(ids: readonly number[]): void {

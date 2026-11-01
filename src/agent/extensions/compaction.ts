@@ -11,12 +11,7 @@ import {
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { CONTEXT_IMAGE_TOKEN_ESTIMATE } from "../token-packer.ts";
-import {
-	isTelegramContextDetails,
-	projectTelegramContext,
-	TELEGRAM_CONTEXT_TYPE,
-	type TelegramContextImageResolver,
-} from "./context.ts";
+import { entryImageRefs, projectTelegramContext, type TelegramContextImageResolver } from "./context.ts";
 
 type SessionBeforeCompactResult = { cancel?: boolean; compaction?: CompactionResult };
 
@@ -54,8 +49,12 @@ export function buildCompactionContent(
 	};
 	text("<conversation>\n");
 	for (const message of projected) {
-		if (message.role === "user" && Array.isArray(message.content) && message.content.some((b) => b.type === "image")) {
-			text("[User]: ");
+		const withImages =
+			(message.role === "user" || message.role === "toolResult") &&
+			Array.isArray(message.content) &&
+			message.content.some((b) => b.type === "image");
+		if (withImages && Array.isArray(message.content)) {
+			text(message.role === "user" ? "[User]: " : "[Viewed image]: ");
 			for (const block of message.content) {
 				if (block.type === "text") text(block.text);
 				else if (block.type === "image") content.push(block);
@@ -68,11 +67,7 @@ export function buildCompactionContent(
 }
 
 function contextImageCount(entry: SessionEntry): number {
-	if (entry.type !== "custom_message" || entry.customType !== TELEGRAM_CONTEXT_TYPE) return 0;
-	if (!isTelegramContextDetails(entry.details)) return 0;
-	let count = 0;
-	for (const block of entry.details.blocks) if (block.type === "image") count++;
-	return count;
+	return entryImageRefs(entry).length;
 }
 
 /** Pi's own retained-window boundary: the previous compaction's kept start, else the branch start. */

@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 29; // v29: tg_messages history search for codemode scripts
+export const CACHE_SCHEMA_VERSION = 30; // v30: hybrid media mode with view_image
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
@@ -12,6 +12,7 @@ export interface EnabledTools {
 	send: boolean;
 	search: boolean;
 	codemode: boolean;
+	viewImage: boolean;
 }
 
 const TOOL_SUMMARIES = [
@@ -20,14 +21,21 @@ const TOOL_SUMMARIES = [
 		"codemode",
 		"写 JavaScript 脚本做精确计算，或在脚本里批量调用其他工具并过滤结果；脚本里的 tools.tg_messages 能检索本群全部历史消息，包括已不在你上下文里的",
 	],
+	["view_image", "查看某条消息的原图或视频帧；平时你只看到图片的文字描述"],
 	["send", "唯一的公开发言通道，也能对某条消息点 reaction 表态"],
 ] as const;
-const COUNT = ["零", "一", "两", "三"] as const;
+const COUNT = ["零", "一", "两", "三", "四"] as const;
 
 /** Describe only the tools this bot really has, so it never claims or calls a missing one. */
 export function toolCapabilityDeclaration(tools: EnabledTools): string {
 	const enabled = TOOL_SUMMARIES.filter(([name]) =>
-		name === "search" ? tools.search : name === "codemode" ? tools.codemode : tools.send,
+		name === "search"
+			? tools.search
+			: name === "codemode"
+				? tools.codemode
+				: name === "view_image"
+					? tools.viewImage
+					: tools.send,
 	);
 	const list = enabled.map(([name, summary]) => `${name}（${summary}）`).join("、");
 	const intro = enabled.length > 0 ? `你有${COUNT[enabled.length]}个工具：${list}。` : "你没有可用工具。";

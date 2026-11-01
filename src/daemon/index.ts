@@ -1,7 +1,7 @@
 // Daemon entry: long-running core. Owns SQLite, pollers, (later) agents, IPC server.
 // Started by `src/main.ts start` (detached) or directly with `bun run src/daemon/index.ts`.
 
-import { loadConfig } from "../config.ts";
+import { loadConfig, mediaNeedsImageInput, mediaUsesVision } from "../config.ts";
 import { openDb, getDaemonState, setDaemonState } from "../db/db.ts";
 import { BotApi } from "../telegram/api.ts";
 import { BotRuntime } from "../agent/runtime.ts";
@@ -50,10 +50,9 @@ if (mediaNeedsFrames && (!videoTranscoder.ffmpeg || !videoTranscoder.ffprobe)) {
 	});
 }
 // loadConfig already canonicalizes model references (config.ts), so values from config always parse.
-// The auxiliary visual model is only used in vision mode (the default); context mode feeds
+// The auxiliary visual model describes media in describe and hybrid modes; context mode feeds
 // images to the chat model directly.
-const visionMode = config.media.mode !== "context";
-const visualModel = config.media.mode === "describe" ? parsePiModelReference(config.media.visionModel)! : null;
+const visualModel = mediaUsesVision(config.media.mode) ? parsePiModelReference(config.media.visionModel)! : null;
 const chatModels = config.bots.map((bot) => ({
 	provider: bot.provider,
 	model: bot.model,
@@ -71,9 +70,9 @@ const { sharedModelRuntime, sharedVisionExecutor } = await (async () => {
 			...compactionModels,
 			...(visualModel ? [{ ...visualModel, purpose: "vision" }] : []),
 		]);
-		if (!visionMode) {
-			// Context media is attached as image blocks; a chat model without image input would
-			// silently degrade every photo/sticker/video to a bare placeholder, so fail fast.
+		if (mediaNeedsImageInput(config.media.mode)) {
+			// Context and hybrid media attach image blocks; a chat model without image input would
+			// silently degrade every viewed photo/sticker/video to a bare placeholder, so fail fast.
 			for (const bot of chatModels) {
 				const model = runtime.getModel(bot.provider, bot.model);
 				if (model && !model.input.includes("image")) {

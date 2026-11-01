@@ -13,6 +13,10 @@ export interface SendParams {
 	reaction?: string;
 }
 
+export interface ViewImageParams {
+	message_id: number;
+}
+
 export interface SearchParams {
 	query?: string;
 	url?: string;
@@ -38,7 +42,7 @@ export interface SendDegradedDetails {
  * How the model reaches each tool. `send` is model-only: a codemode script must never post, and
  * its terminate:true only ends a turn when the model itself calls it.
  */
-export const TOOL_EXPOSURE = { send: "model-only", search: "direct" } as const;
+export const TOOL_EXPOSURE = { send: "model-only", search: "direct", view_image: "model-only" } as const;
 
 /** Fixed tool order — never reorder (cache-visible). */
 export const TOOL_DEFS = [
@@ -100,6 +104,16 @@ export const TOOL_DEFS = [
 					}),
 				),
 			},
+			{ additionalProperties: false },
+		),
+	},
+	{
+		name: "view_image",
+		label: "View image",
+		description:
+			"Look at the actual image of one message: a photo, sticker, or 1-3 frames of a video/GIF. Your context normally has only a text description ([media_update #id]); call this when the description is not enough to answer, the image itself is the topic, or someone asks you to look. Works for any #id, including replied-to or searched messages no longer in context. The image stays in your context afterwards, so do not view the same message twice.",
+		parameters: Type.Object(
+			{ message_id: Type.Integer({ description: "The #id of a message with a photo, sticker, video or GIF" }) },
 			{ additionalProperties: false },
 		),
 	},

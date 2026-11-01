@@ -140,3 +140,43 @@ test("trimming a resumed session keeps Pi's provider context byte-identical", as
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("view_image results persist only references, project images byte-stably, and count everywhere", async () => {
+	const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const { contextImageBytes, projectTelegramContext } = await import("../src/agent/extensions/index.ts");
+	const { createContextImageResolver } = await import("../src/media/context-media.ts");
+	const { contextStateFromEntries } = await import("../src/agent/context-state.ts");
+	const dir = mkdtempSync(join(tmpdir(), "tg-view-image-"));
+	try {
+		writeFileSync(join(dir, "abc#ctx.jpg"), Buffer.alloc(1234, 7));
+		const manager = SessionManager.inMemory(dir);
+		manager.appendMessage({
+			role: "toolResult",
+			toolName: "view_image",
+			toolCallId: "call-1",
+			content: [{ type: "text", text: "[12:00:00] #42 Alice (@alice): look [图片]\n[attached 1 image(s) of #42]" }],
+			details: { messageId: 42, images: [{ name: "abc#ctx.jpg", mime: "image/jpeg" }] },
+			isError: false,
+			timestamp: 1,
+		});
+		const entries = manager.buildContextEntries();
+		// Persisted bytes never contain image data.
+		expect(JSON.stringify(entries)).not.toContain('"data":');
+		const resolve = createContextImageResolver(dir);
+		const messages = entries.flatMap((entry) => sessionEntryToContextMessages(entry));
+		const first = JSON.stringify(projectTelegramContext(messages, resolve));
+		const second = JSON.stringify(projectTelegramContext(messages, resolve));
+		expect(first).toBe(second);
+		expect(first).toContain('"type":"image"');
+		expect(contextImageBytes(entries, dir)).toBe(1234);
+		expect(contextStateFromEntries(entries).visible.has(42)).toBe(true);
+		// Without a resolver (text-only model) the result stays text.
+		expect(JSON.stringify(projectTelegramContext(messages))).not.toContain('"type":"image"');
+		// The retention budget charges the viewed image like a batch image.
+		expect(compactionTextBudget(entries, 1000)).toBeLessThan(1000);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

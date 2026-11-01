@@ -19,7 +19,17 @@ export const MIN_COMPACTION_RESERVE = 16_384;
 
 type CacheRetention = "none" | "short" | "long";
 /** "off": placeholders only; "describe": a vision model describes media as text; "context": images go to the main model. */
-type MediaMode = "off" | "describe" | "context";
+export type MediaMode = "off" | "describe" | "context" | "hybrid";
+
+/** Modes that attach image blocks for the chat model, which must then accept image input. */
+export function mediaNeedsImageInput(mode: MediaMode): boolean {
+	return mode === "context" || mode === "hybrid";
+}
+
+/** Modes whose context is text plus vision descriptions from media.vision_model. */
+export function mediaUsesVision(mode: MediaMode): boolean {
+	return mode === "describe" || mode === "hybrid";
+}
 
 /** Settings a bot inherits from the deployment level unless it overrides them. */
 interface SharedConfigInput {
@@ -106,7 +116,8 @@ export interface BotConfig {
 	providerRetries: number;
 	maxSuffixTokens: number;
 	maxMessageTokens: number;
-	tools: { send: boolean; search: boolean; codemode: boolean };
+	/** viewImage is not a toggle: it follows media.mode "hybrid". */
+	tools: { send: boolean; search: boolean; codemode: boolean; viewImage: boolean };
 	stickerSets: string[];
 }
 
@@ -193,7 +204,7 @@ const ROOT_RULES: Record<string, Rule> = {
 };
 const BOT_RULES: Record<string, Rule> = { ...SHARED_RULES, routing_p: range(0, 1) };
 const MEDIA_RULES: Record<string, Rule> = {
-	mode: oneOf("off", "describe", "context"),
+	mode: oneOf("off", "describe", "context", "hybrid"),
 	vision_model: modelRef,
 	max_per_turn: range(0, 16, true),
 	concurrency: range(1, 16, true),
@@ -459,7 +470,12 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 			providerRetries: setting("provider_retries", 2),
 			maxSuffixTokens: setting("max_suffix_tokens", 12_000),
 			maxMessageTokens: setting("max_message_tokens", 4_096),
-			tools: { send: tools.send !== false, search: tools.search === true, codemode: tools.codemode === true },
+			tools: {
+				send: tools.send !== false,
+				search: tools.search === true,
+				codemode: tools.codemode === true,
+				viewImage: mediaMode === "hybrid",
+			},
 			stickerSets: [...((bot.sticker_sets as string[] | undefined) ?? [])],
 		};
 	});

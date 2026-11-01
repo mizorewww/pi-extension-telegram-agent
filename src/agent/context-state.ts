@@ -9,7 +9,7 @@
 // re-adding it could never shrink the set (RC1 phantom visibility).
 
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { isTelegramContextDetails } from "./extensions/index.ts";
+import { isTelegramContextDetails, viewImageRefs } from "./extensions/index.ts";
 
 export interface ContextState {
 	consumedSeq: number;
@@ -33,6 +33,12 @@ export function contextStateFromEntries(entries: readonly SessionEntry[], initia
 			const details = entry.details as { consumedSeq?: unknown } | undefined;
 			if (Number.isSafeInteger(details?.consumedSeq))
 				consumedSeq = Math.max(consumedSeq, details!.consumedSeq as number);
+			continue;
+		}
+		// A viewed image puts its whole message (rendered line plus image) in context.
+		const viewed = entry.type === "message" ? viewImageRefs(entry.message) : null;
+		if (viewed) {
+			visible.add(viewed.messageId);
 			continue;
 		}
 		if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "send") {

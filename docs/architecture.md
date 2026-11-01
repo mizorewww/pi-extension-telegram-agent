@@ -65,11 +65,12 @@ Telegram create 不可回滚，所以：
 
 ## 媒体
 
-`media.mode` 决定媒体怎么到达模型。两种模式下语音、音频、非视频文件、TGS 动画贴纸都只有文字占位（Pi 只支持 image 内容块）。视频（含视频贴纸、GIF、video note）都用 `ffprobe`/`ffmpeg` 抽 1–3 帧；缺少 FFmpeg 时视频在下载前跳过，只留占位，不阻塞 daemon。
+`media.mode` 决定媒体怎么到达模型。所有模式下语音、音频、非视频文件、TGS 动画贴纸都只有文字占位（Pi 只支持 image 内容块）。视频（含视频贴纸、GIF、video note）都用 `ffprobe`/`ffmpeg` 抽 1–3 帧；缺少 FFmpeg 时视频在下载前跳过，只留占位，不阻塞 daemon。
 
 - **off（默认）**：只有文字占位。
 - **describe**：视觉模型（`media.vision_model`）为每个媒体生成一次文字描述，按 `file_unique_id` 持久化在 `media.vision` 并跨 bot 复用；描述作为 `media_update` delta 追加，主模型看到文字。每轮最多 `media.max_per_turn` 个、全局并发 `media.concurrency`。
 - **context（opt-in）**：不调用视觉模型，图片/抽帧直接作为 image block 交错进主模型上下文，派生文件记录在 `media.context_files`。每轮最多 `media.max_per_turn` 张，每张按 1,100 token 计入预算，超出降级为文字占位。主模型必须支持图片输入，否则启动失败（`image_input_unsupported`）。
+- **hybrid**：同 describe（描述以 `media_update` 进上下文），另注册 `view_image({message_id})`（model-only）。它复用 context 模式的 `ensureContextMedia` 准备图片，结果 content 只有该消息的渲染行，`details` 只存文件引用 `{messageId, images}`；`context` 投影时才把文件读成 image block（与 context 模式同一 resolver，session 不存 base64）。被查看的消息计入可见集合（可被 `reply_to`、文件不被清理），图片计入 `context_image_budget_bytes`、压缩前的每张 1,100 token 换算和摘要输入。每轮最多 4 张。主模型必须支持图片输入。
 - 下载严格把 `file_id` 与拥有它的那个 bot 的 Bot API 配对；回复 bot 没有 mapping 时可用其他已配置 bot 的。
 - 本地文件是可再生缓存：成功压缩后，所有已配置 bot 都不再引用（不可见、无待回复、无未消费 event）的文件按 ≤256 个一批删除；媒体行、描述、short id 与 file mapping 保留。
 

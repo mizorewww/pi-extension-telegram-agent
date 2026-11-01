@@ -81,6 +81,7 @@ tools: { send: true, search: false, codemode: false }
 | `"off"` (default) | media show up as text placeholders such as `[photo]` | none |
 | `"describe"` | a vision model (`media.vision_model`) describes each new image or video once as text, shared by all bots | none for the main model |
 | `"context"` | images and video frames go straight to the main model; no vision model is called | the main model must accept image input |
+| `"hybrid"` | like describe (text descriptions only), but the bot can call `view_image` to look at one message's actual image or video frames when it needs to, including replied-to or searched older messages | the main model must accept image input |
 
 `media.max_per_turn` caps media handled per turn (2 by default for describe, 4 for context) and `media.concurrency` caps parallel jobs (default 2). Voice, audio, ordinary files and TGS animated stickers are placeholders in every mode. Videos require FFmpeg on the host.
 

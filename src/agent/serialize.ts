@@ -126,7 +126,7 @@ function renderReply(db: Database, m: MessageRow, opts: SerializeOptions): strin
 }
 
 /** Render one message row (no date separator). */
-function renderMessageLine(db: Database, m: MessageRow, opts: SerializeOptions): string {
+export function renderMessageLine(db: Database, m: MessageRow, opts: SerializeOptions): string {
 	let line = `[${fmtTime(m.date)}] #${m.message_id} ${senderLabel(db, m)}${renderReply(db, m, opts)}`;
 	line += ":";
 	const body = m.text ?? m.caption ?? (m.media ? mediaPlaceholder(m.media) : "");

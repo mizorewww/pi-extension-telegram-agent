@@ -81,6 +81,7 @@ tools: { send: true, search: false, codemode: false }
 | `"off"`（默认） | 只显示 `[图片]` 这类文字占位 | 无 |
 | `"describe"` | 视觉模型（`media.vision_model`）把每张新图片/视频描述成文字一次，所有 bot 共用 | 主模型无要求 |
 | `"context"` | 图片和视频截帧直接交给主模型，不调用视觉模型 | 主模型必须支持图片输入 |
+| `"hybrid"` | 平时同 describe（只看文字描述）；bot 觉得需要时用 `view_image` 查看某条消息的原图或视频帧，被引用、被检索到的旧消息也能看 | 主模型必须支持图片输入 |
 
 `media.max_per_turn` 是每轮最多处理的媒体数（describe 默认 2、context 默认 4），`media.concurrency` 是并行处理数（默认 2）。语音、音频、普通文件、TGS 动画贴纸在所有模式下都只是文字占位。视频需要主机装有 FFmpeg。
 

@@ -79,6 +79,40 @@ export function isTelegramContextDetails(value: unknown): value is TelegramConte
 	);
 }
 
+export const VIEW_IMAGE_TOOL = "view_image";
+
+/** Persisted view_image result details: image references only, never bytes. */
+export interface ViewImageDetails {
+	messageId: number;
+	images: ContextMediaImage[];
+}
+
+function isViewImageDetails(value: unknown): value is ViewImageDetails {
+	if (!value || typeof value !== "object") return false;
+	const details = value as Partial<ViewImageDetails>;
+	return (
+		Number.isSafeInteger(details.messageId) &&
+		Array.isArray(details.images) &&
+		details.images.every((image) => isValidBlock({ type: "image", ...image }))
+	);
+}
+
+/** Image refs of a successful view_image tool result message, else null. */
+export function viewImageRefs(message: AgentMessage): ViewImageDetails | null {
+	if (message.role !== "toolResult" || message.toolName !== VIEW_IMAGE_TOOL || message.isError) return null;
+	return isViewImageDetails(message.details) ? message.details : null;
+}
+
+/** Image refs carried by one session entry: a Telegram batch or a view_image result. */
+export function entryImageRefs(entry: SessionEntry): readonly { name: string; mime: string }[] {
+	if (entry.type === "custom_message" && entry.customType === TELEGRAM_CONTEXT_TYPE) {
+		if (!isTelegramContextDetails(entry.details)) return [];
+		return entry.details.blocks.filter((block) => block.type === "image");
+	}
+	if (entry.type === "message") return viewImageRefs(entry.message)?.images ?? [];
+	return [];
+}
+
 /** File bytes per image occurrence in the active Pi context, before base64 encoding. */
 export function contextImageBytes(
 	entries: readonly SessionEntry[],
@@ -86,24 +120,15 @@ export function contextImageBytes(
 	pending?: TelegramContextDetails,
 ): number {
 	let bytes = 0;
-	const details: TelegramContextDetails[] = pending ? [pending] : [];
-	for (const entry of entries) {
-		if (
-			entry.type !== "custom_message" ||
-			entry.customType !== TELEGRAM_CONTEXT_TYPE ||
-			!isTelegramContextDetails(entry.details)
-		)
-			continue;
-		details.push(entry.details);
-	}
-	for (const detail of details) {
-		for (const block of detail.blocks) {
-			if (block.type !== "image") continue;
-			try {
-				bytes += statSync(join(mediaDir, block.name)).size;
-			} catch {
-				/* Missing files are also omitted by the provider projection. */
-			}
+	const refs = [
+		...(pending?.blocks.filter((block) => block.type === "image") ?? []),
+		...entries.flatMap((entry) => entryImageRefs(entry)),
+	];
+	for (const ref of refs) {
+		try {
+			bytes += statSync(join(mediaDir, ref.name)).size;
+		} catch {
+			/* Missing files are also omitted by the provider projection. */
 		}
 	}
 	return bytes;
@@ -146,6 +171,11 @@ export function projectTelegramContext(
 	includeStickerCandidates = true,
 ): AgentMessage[] {
 	return messages.flatMap((message): AgentMessage[] => {
+		const viewed = resolveImage ? viewImageRefs(message) : null;
+		if (viewed && message.role === "toolResult") {
+			const images = viewed.images.flatMap((ref) => resolveImage!(ref) ?? []);
+			return [{ ...message, content: [...message.content, ...images] }];
+		}
 		if (message.role === "toolResult" && message.toolName === "send") {
 			const details = message.details as { sent?: unknown; outcome?: unknown } | undefined;
 			const sent = Array.isArray(details?.sent)
