@@ -11,7 +11,7 @@ import type { Database } from "bun:sqlite";
 import type { MediaUpdatePayload, MessageEvent, NotePayload } from "../db/message-events.ts";
 import type { ReplySnapshot } from "../telegram/normalize.ts";
 
-export const TELEGRAM_SERIALIZER_VERSION = 6;
+export const TELEGRAM_SERIALIZER_VERSION = 7;
 
 const TASK_PHASE_LABEL: Record<NonNullable<NotePayload["phase"]>, string> = {
 	progress: "进展",
@@ -81,11 +81,29 @@ function senderLabel(db: Database, m: MessageRow): string {
 }
 
 /** Fixed text anchor for media; descriptions arrive later as media_update deltas, never inline. */
+function formatBytes(bytes: number): string {
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+	return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function mediaPlaceholder(mediaJson: string): string {
-	const media = JSON.parse(mediaJson) as { kind: string; sticker_emoji?: string };
+	const media = JSON.parse(mediaJson) as {
+		kind: string;
+		sticker_emoji?: string;
+		file_name?: string;
+		file_size?: number;
+		duration?: number;
+	};
 	if (media.kind === "sticker") return `[sticker${media.sticker_emoji ? " " + media.sticker_emoji : ""}]`;
 	if (media.kind === "photo") return "[图片]";
-	return `[${media.kind}]`;
+	// Name, size and length tell the bot whether an attachment is worth downloading.
+	const details = [
+		media.file_name ? `"${media.file_name.replaceAll('"', "'")}"` : "",
+		media.file_size ? formatBytes(media.file_size) : "",
+		media.duration ? `${media.duration}s` : "",
+	].filter(Boolean);
+	return `[${[media.kind, ...details].join(" ")}]`;
 }
 
 function fmtTime(dateSec: number): string {

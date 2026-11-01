@@ -52,6 +52,7 @@ tools:    send, search[, codemode]（按 bot 开关过滤，顺序不变；codem
 [17:31:55] #18453 Bob (u17) ↪ #18452: 文本
 [17:31:56] #18454 Bob (u17) ↪ #18455 @alice "被回复的正文": 看这个 [图片]
 [17:31:57] #18456 Bob (u17) ↪ #999999 (原消息不可见): 这个看不到
+[17:32:10] #18457 Bob (u17): 看看这个 [document "report.pdf" 1.2 MB]
 [message_edit #18453] 修改后的文本
 [message_metadata #18453] ↪ #18452
 [media_update #18453] [图片: 新的视觉描述]
@@ -79,8 +80,9 @@ provider 没有返回 cache 用量时，若同一 cache cohort（provider/api/mo
 
 ## 版本记录
 
-当前：**34**。更早的版本见 git 历史。
+当前：**35**。更早的版本见 git 历史。
 
+- **v35**：附件占位符带发送者给的文件名、大小与时长（`[document "report.pdf" 1.2 MB]`、`[voice 12s]`，serializer v7）；`tg_messages` 的 media 多出 `file_name` / `file_size`。
 - **v34**：系统提示的「可用工具」按开启的工具逐个给出用法（send / search / view_image / codemode / 工作区 / task），新增「你自己」一节（源代码仓库与阅读方式）；共享协议说明 `[message_edit]`、`[media_update]`、`[task …]`、`[系统]` 行的含义；脚本工具描述补充用法。
 - **v33**：后台任务：model-only `task` 工具（workflow 选项来自配置，golden `taskTool`）、`note` 事件 grammar（serializer v6）、系统提示的 task 摘要。
 - **v32**：带工作区的 bot 的 `send` 声明多出 `files`（golden `sendWithFiles`），系统提示多一句工作区说明；没有工作区的 bot 字节不变。

@@ -34,7 +34,7 @@ export interface MessageDto {
 	reply_to: number | null;
 	quote: string | null;
 	forwarded: boolean;
-	media: { kind: string; description: string | null } | null;
+	media: { kind: string; description: string | null; file_name: string | null; file_size: number | null } | null;
 }
 
 export interface MessageQueryResult {
@@ -80,6 +80,8 @@ interface Row {
 	quote: string | null;
 	forward_origin: string | null;
 	media_kind: string | null;
+	media_file_name: string | null;
+	media_file_size: number | null;
 	vision: string | null;
 }
 
@@ -151,7 +153,8 @@ export function queryMessages(db: Database, chatId: number, query: MessageQuery)
 		.query(
 			`SELECT m.message_id, m.date, m.edit_date, m.sender_id, m.display_name, m.username, a.alias, m.is_bot,
 			        m.text, m.caption, m.reply_to_message_id, m.quote, m.forward_origin,
-			        json_extract(m.media, '$.kind') AS media_kind, md.vision
+			        json_extract(m.media, '$.kind') AS media_kind, json_extract(m.media, '$.file_name') AS media_file_name,
+			        json_extract(m.media, '$.file_size') AS media_file_size, md.vision
 			 FROM messages m
 			 LEFT JOIN telegram_control_messages c ON c.chat_id = m.chat_id AND c.message_id = m.message_id
 			 LEFT JOIN aliases a ON a.chat_id = m.chat_id AND a.user_id = m.sender_id
@@ -199,6 +202,8 @@ function toDto(row: Row): MessageDto {
 		reply_to: row.reply_to_message_id,
 		quote,
 		forwarded: row.forward_origin != null,
-		media: row.media_kind ? { kind: row.media_kind, description } : null,
+		media: row.media_kind
+			? { kind: row.media_kind, description, file_name: row.media_file_name, file_size: row.media_file_size }
+			: null,
 	};
 }

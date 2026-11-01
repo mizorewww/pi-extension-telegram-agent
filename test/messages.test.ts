@@ -44,3 +44,39 @@ test("tg_messages pages without gaps and escapes LIKE wildcards", () => {
 	expect(queryMessages(d, CHAT, { text_contains: "%" }).rows.map((row) => row.id)).toEqual([27]);
 	expect(queryMessages(d, CHAT, { text_contains: "_" }).rows).toHaveLength(0);
 });
+
+test("attachments render with their sanitized file name, size and length", async () => {
+	const { normalizeMessage } = await import("../src/telegram/normalize.ts");
+	const { serializeMessageEvents } = await import("../src/agent/serialize.ts");
+	const d = db();
+	const row = normalizeMessage({
+		message_id: 90,
+		date: 1_754_600_090,
+		chat: { id: CHAT },
+		from: { id: 7, first_name: "Alice", username: "alice" },
+		document: { file_id: "f", file_unique_id: "u", file_name: 'report\n"final".pdf', file_size: 1_258_291 },
+	});
+	expect(row.media?.file_name).toBe('report "final".pdf');
+	const voice = normalizeMessage({
+		message_id: 91,
+		date: 1_754_600_091,
+		chat: { id: CHAT },
+		from: { id: 7, first_name: "Alice", username: "alice" },
+		voice: { file_id: "v", file_unique_id: "w", duration: 12 },
+	});
+	const text = serializeMessageEvents(
+		d,
+		[row, voice].map((message, i) => ({
+			ingestSeq: i + 1,
+			chatId: CHAT,
+			messageId: message.message_id,
+			revision: 0,
+			kind: "message" as const,
+			eventDate: message.date,
+			payload: { ...message, media: JSON.stringify(message.media) } as never,
+		})),
+		{ visibleIds: new Set() },
+	);
+	expect(text).toContain(`[document "report 'final'.pdf" 1.2 MB]`);
+	expect(text).toContain("[voice 12s]");
+});

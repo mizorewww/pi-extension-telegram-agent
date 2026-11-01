@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 34; // v34: per-tool usage guides, source repository, event line legend
+export const CACHE_SCHEMA_VERSION = 35; // v35: attachment name/size/length in placeholders
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";

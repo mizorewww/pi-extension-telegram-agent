@@ -204,6 +204,8 @@ export const CODEMODE_TOOL_DEFS = [
 						Type.Object({
 							kind: Type.String(),
 							description: Nullable(Type.String({ description: "Vision description, when one exists" })),
+							file_name: Nullable(Type.String({ description: "Sender's file name of a document, audio or video" })),
+							file_size: Nullable(Type.Integer({ description: "Bytes" })),
 						}),
 					),
 				}),

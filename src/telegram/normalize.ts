@@ -42,6 +42,11 @@ export interface MediaInfo {
 	height?: number;
 	sticker_set?: string;
 	sticker_emoji?: string;
+	/** Sender-chosen name of a document, audio or video; control characters stripped. */
+	file_name?: string;
+	file_size?: number;
+	/** Seconds, for voice, audio, video and video notes. */
+	duration?: number;
 }
 
 export function normalizeMessage(msg: any, editDate: number | null = null): CanonicalMessage {
@@ -108,6 +113,13 @@ function extractMedia(msg: any): MediaInfo | null {
 	for (const kind of ["animation", "video", "video_note", "document", "voice", "audio"] as const) {
 		const m = msg[kind];
 		if (m) {
+			const name =
+				typeof m.file_name === "string"
+					? m.file_name
+							.replace(/[\u0000-\u001f\u007f]+/g, " ")
+							.trim()
+							.slice(0, 120)
+					: "";
 			return {
 				kind,
 				file_unique_id: m.file_unique_id,
@@ -115,6 +127,9 @@ function extractMedia(msg: any): MediaInfo | null {
 				mime: m.mime_type,
 				width: m.width,
 				height: m.height,
+				...(name ? { file_name: name } : {}),
+				...(Number.isSafeInteger(m.file_size) ? { file_size: m.file_size } : {}),
+				...(Number.isSafeInteger(m.duration) ? { duration: m.duration } : {}),
 			};
 		}
 	}
