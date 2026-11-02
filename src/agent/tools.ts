@@ -248,7 +248,7 @@ export const CODEMODE_TOOL_DEFS = [
 		name: "sh_exec",
 		label: "Shell",
 		description:
-			"Run a shell command in your own Linux work box (Debian; python3 with Pillow/numpy/requests, uv/uvx, node/npm, ffmpeg, imagemagick, poppler-utils, jq, git, curl, Noto Sans CJK fonts; network on). Working directory and $HOME live under /work; files there persist until the weekly reset, and send can post them with files. The root filesystem is read-only, so prefer uv for Python environments: uv venv --system-site-packages /work/.venv, then uv pip install --python /work/.venv/bin/python <package> and run /work/.venv/bin/python. For projects use uv add / uv run in the project directory; use uvx for standalone Python tools. npm install -g writes under HOME. Output is stdout+stderr combined. Each call is a fresh sh in /work (no state between calls except files); for work longer than a few minutes use job.",
+			"Run a shell command in your own Linux work box (Debian; python3 with Pillow/numpy/requests, uv/uvx, node/npm, ffmpeg, imagemagick, poppler-utils, jq, git, curl, Noto Sans CJK fonts; network on). Working directory and $HOME live under /work; files there persist until the weekly reset, and send can post them with files. The root filesystem is read-only; install extras under /work. npm install -g writes under HOME. Output is stdout+stderr combined. Each call is a fresh sh in /work (no state between calls except files); for work longer than a few minutes use job.",
 		parameters: Type.Object(
 			{
 				command: Type.String({ minLength: 1, description: "Passed to sh -c in /work" }),

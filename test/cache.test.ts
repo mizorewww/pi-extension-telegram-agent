@@ -33,12 +33,13 @@ import {
 } from "../src/agent/extensions/index.ts";
 
 const GOLDEN = {
-	schemaVersion: 44,
+	schemaVersion: 45,
 	systemZhTemplate: "2f1c2b564648",
 	systemEnTemplate: "f99097a7d046",
+	systemSandboxTemplate: "2d03b39a6d4b",
 	eventSerialize: "a05c0584eb08",
 	tools: "49d65d5de9c9",
-	codemodeTools: "53d4afb03f31",
+	codemodeTools: "3aafdea21201",
 	sendWithFiles: "8cea43279c23",
 	taskTool: "f5343a7cbdb5",
 	jobTool: "a913226f0cba",
@@ -65,6 +66,9 @@ test("prompt, tool and protocol hashes are stable", () => {
 	expect(sha256Short(buildSystemPrompt(readFileSync("personas/template.en.md", "utf8"), allTools))).toBe(
 		GOLDEN.systemEnTemplate,
 	);
+	expect(
+		sha256Short(buildSystemPrompt(readFileSync("personas/template.zh.md", "utf8"), { ...allTools, sandbox: true })),
+	).toBe(GOLDEN.systemSandboxTemplate);
 	// A bot is only ever told about the tools it really has.
 	const sendOnly = toolCapabilityDeclaration({
 		send: true,

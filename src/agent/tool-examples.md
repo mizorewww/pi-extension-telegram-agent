@@ -168,11 +168,10 @@ await tools.send({ message: "字幕加好啦", reply_to: 5690, files: [{ path: "
 return "已发送";
 ```
 
-【脚本】画带中文的图表：matplotlib 没预装，先检查再装；数据直接内联成 Python 字面量。
+【脚本】画带中文的图表：matplotlib 没预装，用 uv 按需安装并运行；数据直接内联成 Python 字面量。
 ```js
 const data = { 小明: 120, 阿狸: 95, 雪球: 40 }; // 例如上面统计出的发言数
-const r = await tools.sh_exec({ timeout_s: 120, command: `python3 -c 'import matplotlib' 2>/dev/null || pip install --user -q matplotlib
-mkdir -p /work/out && python3 - <<'EOF'
+const r = await tools.sh_exec({ timeout_s: 120, command: `mkdir -p /work/out && uv run --no-project --with matplotlib python - <<'EOF'
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import font_manager as fm
