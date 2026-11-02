@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-export const CACHE_SCHEMA_VERSION = 45; // v45: uv guidance lives with the work box examples; chart uses uv run
+export const CACHE_SCHEMA_VERSION = 46; // v46: render Markdown math as images before sending
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
@@ -107,7 +107,7 @@ function toolGuides(tools: EnabledTools): string[] {
 	}
 	if (tools.sandbox)
 		guides.push(
-			`### 工作区\n\n- 你有一台自己的 Linux 机器，在脚本里用 sh_exec、tg_download、sh_reset 操作（说明见各工具）；/work 里的文件保留到每周一 05:00 自动清空。\n- Python 缺依赖时优先用 uv 按需安装：临时脚本用 \`uv run --no-project --with 包名 python ...\`，项目用 \`uv add\` / \`uv run\`，独立 Python CLI 用 \`uvx\`。\n- 做出来的东西用 send 的 files 直接发到群里，不要只描述你做了什么。${tools.send ? examples("工作区") : ""}`,
+			`### 工作区\n\n- 你有一台自己的 Linux 机器，在脚本里用 sh_exec、tg_download、sh_reset 操作（说明见各工具）；/work 里的文件保留到每周一 05:00 自动清空。\n- Python 缺依赖时优先用 uv 按需安装：临时脚本用 \`uv run --no-project --with 包名 python ...\`，项目用 \`uv add\` / \`uv run\`，独立 Python CLI 用 \`uvx\`。\n- 带 LaTeX 公式的 Markdown 按下面示例渲染成图片，再用 send 的 files 发；长推导拆成几张图，配一句简短说明。\n- 做出来的东西用 send 的 files 直接发到群里，不要只描述你做了什么。${tools.send ? examples("工作区") : ""}`,
 		);
 	if (tools.tasks)
 		guides.push(

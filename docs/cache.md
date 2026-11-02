@@ -29,7 +29,7 @@ provider prefix cache 是本项目的第一成本杠杆。本文是“哪些字�
 2. 跑 `bun test test/cache.test.ts`，确认失败的正是你预期改变的那几项 golden，再更新 expected；
 3. 部署后每个 bot 会新建 session（新 epoch），首个请求冷缓存，旧 session 文件保留。
 
-当前 schema v45：uv 使用建议放在 system prompt 的工作区指引，原有绘图示例用 `uv run --no-project --with matplotlib` 按需运行；工具描述只声明环境与执行机制。这是固定 prefix 的一次性变更，不给每轮追加动态提示。
+当前 schema v46：工作区指引建议将带 LaTeX 公式的 Markdown 渲染为图片后发送，并加入 Markdown-it + KaTeX → Chromium 截图 → send files 的完整示例。渲染依赖在工作区按需安装；这是固定 prefix 的一次性变更，不给每轮追加动态提示。
 
 golden 意外失败是报警：先查原因，不要直接改 expected。
 

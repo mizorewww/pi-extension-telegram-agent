@@ -186,6 +186,45 @@ ls -l /work/out/rank.png` });
 return r.exit_code === 0 ? r.output : `失败\n${r.output.slice(-2000)}`;
 ```
 
+【脚本】发带 LaTeX 公式的 Markdown：行内用 $...$、独立公式用 $$...$$；String.raw 保留反斜线。按需装渲染库，用已有 Chromium 截图后发送。
+```js
+const markdown = String.raw`# 二次方程的解
+
+对于 $ax^2+bx+c=0$（$a\ne0$），判别式为 $\Delta=b^2-4ac$。
+
+$$
+x_{1,2}=\frac{-b\pm\sqrt{\Delta}}{2a}
+$$
+
+- $\Delta>0$：两个不同的实根。
+- $\Delta=0$：两个相同的实根。
+- $\Delta<0$：没有实根。
+
+例如 **$x^2-3x+2=0$**，代入公式得到 $x_1=1$、$x_2=2$。`;
+const r = await tools.sh_exec({ timeout_s: 180, command: `set -e
+mkdir -p /work/math /work/out
+cd /work/math
+npm install --no-save --no-audit --no-fund markdown-it @mdit/plugin-katex katex >/dev/null
+cat > render.mjs <<'JS'
+import fs from "node:fs";
+import MarkdownIt from "markdown-it";
+import { katex } from "@mdit/plugin-katex";
+const html = new MarkdownIt().use(katex, { throwOnError: true }).render(${JSON.stringify(markdown)});
+if (html.includes("katex-error")) throw new Error("公式语法有误，修正后再渲染");
+fs.writeFileSync("note.html", '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="node_modules/katex/dist/katex.min.css"><style>body{margin:0;background:white;color:#18212f}article{box-sizing:border-box;width:880px;padding:40px;font:24px/1.7 "Noto Sans CJK SC","PingFang SC",sans-serif}h1{font-size:34px;margin:0 0 24px}p,ul{margin:20px 0}.katex-display{margin:28px 0}pre{white-space:pre-wrap}</style><article>' + html + '</article>');
+JS
+node render.mjs
+export AGENT_BROWSER_SESSION=math-render-$$ AGENT_BROWSER_ALLOW_FILE_ACCESS=true
+trap 'agent-browser close >/dev/null 2>&1' EXIT
+agent-browser open file:///work/math/note.html
+agent-browser set viewport 900 700 2
+agent-browser eval 'document.fonts.ready.then(() => true)'
+agent-browser screenshot article /work/out/math.png` });
+if (r.exit_code !== 0) return `失败\n${r.output.slice(-2000)}`;
+await tools.send({ message: "公式和推导在图里", reply_to: 9012, files: [{ path: "/work/out/math.png" }] });
+return "已发送";
+```
+
 【脚本】"你是怎么实现 X 的"：先回一句，拉源码再 rg，读完再回答（以读到的代码为准）。
 ```js
 await tools.send({ message: "我翻翻自己的源代码～", reply_to: 9012 });
