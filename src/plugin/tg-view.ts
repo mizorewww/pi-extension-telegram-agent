@@ -8,7 +8,7 @@ import {
 	type ThemeColor,
 } from "@earendil-works/pi-coding-agent";
 import * as Tui from "@earendil-works/pi-tui";
-import type { BotConfig } from "../../src/config.ts";
+import type { BotConfig } from "../config.ts";
 import type {
 	AgentActivity,
 	AgentActivityAssistantSection,
@@ -19,11 +19,11 @@ import type {
 	MsgItem,
 	RuntimeControlSnapshot,
 	TimelineItem,
-} from "../../src/ipc.ts";
-import { buildBotStatusView, formatUsdCost, renderBotStatusPlain } from "../../src/observability/status.ts";
-import { summarizeBotUsage } from "../../src/observability/usage.ts";
-import { readMediaImage, type MediaImage } from "../../src/plugin/timeline.ts";
-import { sanitize } from "../../src/sanitize.ts";
+} from "../ipc.ts";
+import { buildBotStatusView, formatUsdCost, renderBotStatusPlain } from "../observability/status.ts";
+import { summarizeBotUsage } from "../observability/usage.ts";
+import { sanitize } from "../sanitize.ts";
+import { readMediaImage, type MediaImage } from "./timeline.ts";
 
 const IDENTITY_COLORS = [
 	"accent",

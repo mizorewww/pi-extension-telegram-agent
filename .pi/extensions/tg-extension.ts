@@ -24,7 +24,7 @@ import {
 	telegramStatusLine,
 	telegramUsage,
 	type ToolPresentationHost,
-} from "./tg-view.ts";
+} from "../../src/plugin/tg-view.ts";
 
 export { activityComponent, itemComponent, statsText, telegramStatusLine, telegramUsage };
 
