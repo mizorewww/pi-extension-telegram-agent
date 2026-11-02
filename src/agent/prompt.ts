@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-export const CACHE_SCHEMA_VERSION = 43; // v43: batches start the turn; tool guides no longer repeat descriptions
+export const CACHE_SCHEMA_VERSION = 44; // v44: work box recommends uv environments and names Noto Sans CJK
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";

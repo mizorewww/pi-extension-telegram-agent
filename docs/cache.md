@@ -29,6 +29,8 @@ provider prefix cache 是本项目的第一成本杠杆。本文是“哪些字�
 2. 跑 `bun test test/cache.test.ts`，确认失败的正是你预期改变的那几项 golden，再更新 expected；
 3. 部署后每个 bot 会新建 session（新 epoch），首个请求冷缓存，旧 session 文件保留。
 
+当前 schema v44：工作区工具声明 uv/uvx 与 Noto Sans CJK，并建议在 `/work` 下用 uv 管理 Python 环境。这是固定工具描述的一次性 prefix 变更，不给每轮追加动态提示。
+
 golden 意外失败是报警：先查原因，不要直接改 expected。
 
 ## Provider payload 结构
