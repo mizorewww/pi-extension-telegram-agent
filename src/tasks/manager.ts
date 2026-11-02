@@ -189,6 +189,16 @@ export class TaskManager {
 		task.process.cancel();
 	}
 
+	/** /new discards the session tasks were launched under; cancel this bot's live tasks. */
+	cancelAllForBot(botId: string): void {
+		for (const [taskId, task] of [...this.live])
+			if (task.process.botId === botId) {
+				task.terminal = true;
+				this.setStatus(taskId, "cancelled");
+				task.process.cancel();
+			}
+	}
+
 	/** Daemon shutdown: stop the containers but keep the tasks resumable. */
 	stopAll(): void {
 		this.stopping = true;

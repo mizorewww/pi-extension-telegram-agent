@@ -149,6 +149,14 @@ const delay = (ms: number) =>
 		setTimeout(resolve, ms).unref?.();
 	});
 
+/** Bounded poll for a flag another in-flight operation clears in its own finally. */
+const waitForFlag = (off: () => boolean, ms: number): Promise<void> =>
+	new Promise((resolve) => {
+		const start = Date.now();
+		const poll = () => (off() || Date.now() - start >= ms ? resolve() : setTimeout(poll, 50).unref?.());
+		poll();
+	});
+
 export class BotRuntime {
 	private db: Database;
 	private bot: BotConfig;
@@ -185,6 +193,8 @@ export class BotRuntime {
 	/** Set by the irreversible send boundary, not by provider health or usage telemetry. */
 	private turnSendOutcome: "none" | "sent" | "unknown" = "none";
 	private lastControlCompact: RuntimeControlSnapshot["lastCompact"] = null;
+	/** While set, triggers only coalesce: the wedged turn is being aborted for /new. */
+	private resettingSession = false;
 	private readonly monotonicNow = () => performance.now();
 	private visibleMessageIds = new Set<number>();
 	private epoch = 1;
@@ -286,6 +296,19 @@ export class BotRuntime {
 		}
 		this.compactionModel = compactionModel;
 		this.compactionReasoning = compactionSelection.thinkingLevel;
+		// threshold - keepRecent must fit the summary model's window under the bytes/2
+		// estimate (ASCII worst case is ~2x real tokens), or every threshold compaction
+		// degrades to the chunked fallback instead of one call.
+		if (
+			(this.bot.compactionThreshold - this.bot.compactionKeepRecent) * 2 >
+			this.compactionModel.contextWindow - Math.min(4096, this.compactionModel.maxTokens) - 2048
+		)
+			log.warn("agent_runtime", "compaction_threshold_unreliable", {
+				bot_id: this.bot.id,
+				compaction_threshold: this.bot.compactionThreshold,
+				compaction_keep_recent: this.bot.compactionKeepRecent,
+				compaction_window: this.compactionModel.contextWindow,
+			});
 
 		const { activeTools, scriptTools, declaredTools, jobs } = buildBotRuntimeTools({
 			db: this.db,
@@ -697,13 +720,20 @@ export class BotRuntime {
 	/** Lifecycle state used by deterministic scheduling and the Telegram control plane. */
 	samplingState(now = this.monotonicNow()): "idle" | "busy" | "cooldown" | "stopping" {
 		if (this.stopping) return "stopping";
-		if (this.flushing || this.controlCompacting || this.controlChangingModel) return "busy";
+		if (this.flushing || this.controlCompacting || this.controlChangingModel || this.resettingSession) return "busy";
 		if (now < this.cooldownUntil) return "cooldown";
 		return "idle";
 	}
 
 	/** Called by the scheduler when this bot gets a response opportunity. */
 	trigger(source: TriggerSource = "explicit", routingTrigger?: RoutingTrigger): TriggerResult {
+		// A /new reset is aborting the current turn: don't steer work into the dying
+		// session — queue one wake-up for the fresh session instead.
+		if (this.resettingSession) {
+			this.pendingTrigger = true;
+			this.pendingTriggerMessageId = routingTrigger?.messageId ?? this.pendingTriggerMessageId;
+			return "coalesced";
+		}
 		// SHARED_PROTOCOL: explicit @mention, reply-to-bot, and configured-name keyword are all
 		// direct addresses that must reach the provider even when this trigger only coalesces.
 		// A `/fire` bot-triggered address is only an opportunity: no durable obligation to answer a bot.
@@ -792,7 +822,7 @@ export class BotRuntime {
 				this.pendingTrigger = false;
 				this.typingLease.start();
 				moreReplies = await this.flush();
-			} while ((this.pendingTrigger || moreReplies) && !this.stopping);
+			} while ((this.pendingTrigger || moreReplies) && !this.stopping && !this.resettingSession);
 		} finally {
 			this.typingLease.stop();
 		}
@@ -1155,15 +1185,49 @@ export class BotRuntime {
 		return { ok: false, code: stage };
 	}
 
-	/** Start an empty Pi session with the current model; the old session file stays on disk. */
+	/**
+	 * /new is the wedge escape hatch and must not queue behind the turn that wedged the
+	 * bot: stop background work, abort the in-flight run/retry/compaction, clear the old
+	 * session's reply obligations inside the swap commit, then reset the workspace. A
+	 * model swap already mid-commit is the only state we refuse to preempt.
+	 */
 	async newSessionForControl(): Promise<NewSessionResult> {
-		const blocked = this.controlBlocked();
-		if (blocked) return { ok: false, code: blocked };
-		const result = await this.replaceSessionForControl(this.model, this.bot.reasoningEffort);
-		if (result.ok) log.info("agent_runtime", "session_reset", { bot_id: this.bot.id, epoch: result.epoch });
-		else if (result.code === "failed")
-			log.warn("agent_runtime", "session_reset_failed", { bot_id: this.bot.id, category: "failed" });
-		return result;
+		if (this.stopping) return { ok: false, code: "stopping" };
+		if (!this.session) return { ok: false, code: "unavailable" };
+		if (this.resettingSession || this.controlChangingModel) return { ok: false, code: "busy" };
+		this.resettingSession = true;
+		try {
+			// Stop everything that could outlive the session or hold it busy.
+			this.jobs?.stopAll();
+			this.tasks?.cancelAllForBot(this.bot.id);
+			const session = this.session;
+			session.abortCompaction();
+			session.abortRetry();
+			if (this.controlCompacting) await waitForFlag(() => !this.controlCompacting, 10_000);
+			await Promise.race([session.abort().catch(() => {}), delay(15_000)]);
+			if (this.flushPromise) await Promise.race([this.flushPromise.catch(() => {}), delay(15_000)]);
+			// The dying flush may leave flags unset if it never emitted agent_settled.
+			this.running = false;
+			await this.endSteering().catch(() => {});
+			this.pendingTrigger = false;
+			this.pendingTriggerMessageId = null;
+			this.turnSendOutcome = "none";
+			const result = await this.replaceSessionForControl(this.model, this.bot.reasoningEffort);
+			if (result.ok) {
+				log.info("agent_runtime", "session_reset", { bot_id: this.bot.id, epoch: result.epoch });
+				try {
+					await this.resetBox("admin");
+				} catch {
+					log.warn("sandbox", "box_reset_failed", { bot_id: this.bot.id, category: "local_failure" });
+				}
+			} else if (result.code === "failed") {
+				log.warn("agent_runtime", "session_reset_failed", { bot_id: this.bot.id, category: "failed" });
+			}
+			return result;
+		} finally {
+			this.resettingSession = false;
+			this.rearmPendingTrigger();
+		}
 	}
 
 	private controlBlocked(): "stopping" | "unavailable" | "busy" | null {
@@ -1208,9 +1272,17 @@ export class BotRuntime {
 			hooks.beforeCommit?.();
 			const epoch = this.epoch + 1;
 			const committed = nextSession;
+			const chatId = this.config.groupChatId;
 			this.db.transaction(() => {
 				setBotState(this.db, this.bot.id, EPOCH_KEY, String(epoch));
-				replaceVisibleMessageIds(this.db, this.bot.id, this.config.groupChatId, epoch, []);
+				replaceVisibleMessageIds(this.db, this.bot.id, chatId, epoch, []);
+				// A fresh session cannot answer for bytes it never saw; drop the old
+				// session's obligations atomically with the swap.
+				removeReplyObligations(
+					this.db,
+					this.bot.id,
+					listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN),
+				);
 				setSessionManifest(this.db, {
 					botId: this.bot.id,
 					sessionId: committed.sessionId,
