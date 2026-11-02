@@ -13,7 +13,6 @@ import {
 } from "node:fs";
 import { basename, extname, join } from "node:path";
 
-export const MEDIA_CACHE_MAX_BYTES = 1024 * 1024;
 export const MEDIA_DOWNLOAD_MAX_BYTES = 20 * 1024 * 1024;
 
 export type StaticMediaMime = "image/jpeg" | "image/png" | "image/webp" | "image/gif";
@@ -141,32 +140,12 @@ export function downloadSource(
 	return null;
 }
 
-function isReadyPath(path: string | null, mimeForPath: (path: string) => unknown, maxBytes: number): boolean {
-	if (!path || !mimeForPath(path)) return false;
-	try {
-		const stat = statSync(path);
-		return stat.isFile() && stat.size > 0 && stat.size <= maxBytes;
-	} catch {
-		return false;
-	}
-}
-
-export function isDisplayReadyPath(path: string | null): boolean {
-	return isReadyPath(path, staticMediaMimeForPath, MEDIA_CACHE_MAX_BYTES);
-}
-
 /** Resolve a cache-relative source filename inside this deployment's media directory. */
 export function resolveMediaSourcePath(cacheDir: string, storedPath: string | null): string | null {
 	if (!storedPath || storedPath.includes("\0")) return null;
 	const filename = basename(storedPath);
 	if (!filename || filename === "." || filename === ".." || !sourceMediaMimeForPath(filename)) return null;
 	return join(cacheDir, filename);
-}
-
-/** Resolve only a display-ready static-image filename; video sources never enter IPC. */
-export function resolveMediaCachePath(cacheDir: string, storedPath: string | null): string | null {
-	const sourcePath = resolveMediaSourcePath(cacheDir, storedPath);
-	return sourcePath && staticMediaMimeForPath(sourcePath) ? sourcePath : null;
 }
 
 function readExisting(path: string): { bytes: Uint8Array; mimeType: SourceMediaMime; sourceExtension: string } | null {
@@ -218,13 +197,6 @@ export function dedupeInFlight<T>(inFlight: Map<string, Promise<T>>, key: string
 	const promise = work().finally(() => inFlight.delete(key));
 	inFlight.set(key, promise);
 	return promise;
-}
-
-let mediaReadySink: ((fileUniqueId: string, mediaPath: string) => void) | null = null;
-
-/** The daemon forwards each newly cached display image (vision or view_image fetched it) to the TUI. */
-export function setMediaReadySink(sink: (fileUniqueId: string, mediaPath: string) => void): void {
-	mediaReadySink = sink;
 }
 
 const inFlight = new Map<string, Promise<LocalMediaResult>>();
@@ -305,13 +277,6 @@ async function ensureLocalMediaInner(
 			}
 		}
 		return { ok: true, kind, bytes, mimeType, sourceExtension: extension, sourcePath: null };
-	}
-	if (isDisplayReadyPath(resolveMediaCachePath(cacheDir, sourcePath))) {
-		try {
-			mediaReadySink?.(fileUniqueId, sourcePath);
-		} catch {
-			// The TUI preview is best effort; the cached file is already durable.
-		}
 	}
 	return { ok: true, kind, bytes, mimeType, sourceExtension: extension, sourcePath };
 }

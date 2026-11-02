@@ -2,7 +2,7 @@
 
 [中文](README.md) · [English](README.en.md)
 
-让几个各有性格的 AI bot 长期住进你的 Telegram 群，像真实的群友一样聊天。它们跑在你自己的机器上，基于 [Pi](https://github.com/earendil-works/pi) agent，你在本机的 Pi 终端里观察和控制一切。
+让几个各有性格的 AI bot 长期住进你的 Telegram 群，像真实的群友一样聊天。它们跑在你自己的机器上，基于 [Pi](https://github.com/earendil-works/pi) SDK，直接在 Telegram 群内查看状态与控制。
 
 - **会聊天**：被 @ 时一定回应，偶尔主动接话，发 sticker、点 reaction，看得懂图片和视频。
 - **会干活**（按 bot 逐个开启）：联网搜索和读网页；写脚本精确计算、翻查群聊历史；在自己的 Linux 工作区里处理文件，把做好的图片和文件发回群里；把耗时的调研交给后台任务，做完再回复你。
@@ -19,10 +19,10 @@
 git clone https://github.com/mizorewww/pi-extension-telegram-agent.git
 cd pi-extension-telegram-agent
 bun install --frozen-lockfile
-bun run pi
+pi
 ```
 
-在打开的 Pi 里 `/login` 登录模型 provider、`/model` 选默认模型（凭据只保存在 Pi 里）。然后写配置并启动：
+在 Pi 里 `/login` 登录模型 provider、`/model` 选默认模型（凭据只保存在 Pi 里）。然后写配置并启动：
 
 ```bash
 cp telegram.config.example.ts telegram.config.ts   # 填群 ID 和 bot，每个字段都有注释
@@ -31,7 +31,7 @@ echo 'telegram_bot_token: <BotFather token>' > .env
 bun run start
 ```
 
-在 Pi 里 `/tg attach` 看群聊，去群里 @ 你的 bot 试试，或发 `/help` 看群内命令。详见[安装与首次配置](docs/user-guide/zh/src/getting-started.md)。
+去群里 @ 你的 bot 试试，或发 `/help`、`/status` 看群内命令与状态。详见[安装与首次配置](docs/user-guide/zh/src/getting-started.md)。
 
 ## 文档
 

@@ -1,35 +1,33 @@
-// Daemon entry: long-running core. Owns SQLite, pollers, bot runtimes and the IPC server.
+// Daemon entry: long-running core. Owns SQLite, pollers and bot runtimes.
 // Run as `bun run src/daemon/index.ts`, supervised by the systemd user unit (docs/runbooks/daemon.md).
 
-import { loadConfig } from "../config.ts";
-import { openDb, getDaemonState, setBotState, setDaemonState } from "../db/db.ts";
-import { BotApi } from "../telegram/api.ts";
-import { BotRuntime } from "../agent/runtime.ts";
-import { type BotIdentity, BotFire, MessageRouter } from "../agent/router.ts";
-import { IpcServer } from "./ipc-server.ts";
-import { acquirePidLock, releasePidLock } from "./pid.ts";
-import type { MessageRow } from "../agent/serialize.ts";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
+import { parsePiModelReference } from "../agent/model-ref.ts";
+import { createSharedModelRuntime, PiModelConfigurationError, piAuthSource } from "../agent/model-runtime.ts";
+import { BotFire, type BotIdentity, MessageRouter } from "../agent/router.ts";
+import { BotRuntime } from "../agent/runtime.ts";
+import type { MessageRow } from "../agent/serialize.ts";
+import { loadConfig } from "../config.ts";
+import { getDaemonState, openDb, setBotState, setDaemonState } from "../db/db.ts";
+import { applyRetention, pruneUnconfiguredBotState } from "../db/retention.ts";
+import { pruneUnreferencedMediaCache } from "../media/lifecycle.ts";
+import { inspectVideoTranscoder } from "../media/video-frames.ts";
+import { assertPiVisionExecutorReady, createPiVisionExecutor } from "../media/vision.ts";
+import { VisionScheduler } from "../media/vision-scheduler.ts";
+import { errorCategory, log } from "../observability/log.ts";
+import { BOX_RESET_CHECK_MS, runWeeklyBoxReset } from "../sandbox/schedule.ts";
+import { TaskManager } from "../tasks/manager.ts";
+import { BotApi } from "../telegram/api.ts";
 import {
-	parseTelegramControlCommand,
 	parseTelegramControlCallback,
+	parseTelegramControlCommand,
 	TelegramControlCommandService,
 } from "../telegram/control-command.ts";
 import { publishTelegramControlMenus, TelegramControlCoordinator } from "../telegram/control-integration.ts";
-import { createSharedModelRuntime, PiModelConfigurationError, piAuthSource } from "../agent/model-runtime.ts";
-import { parsePiModelReference } from "../agent/model-ref.ts";
-import { assertPiVisionExecutorReady, createPiVisionExecutor } from "../media/vision.ts";
-import { VisionScheduler } from "../media/vision-scheduler.ts";
-import { setMediaReadySink } from "../media/local-cache.ts";
 import type { IngestResult } from "../telegram/ingest.ts";
 import { Poller } from "../telegram/poller.ts";
-import { applyRetention, pruneUnconfiguredBotState } from "../db/retention.ts";
-import { errorCategory, log } from "../observability/log.ts";
-import { inspectVideoTranscoder } from "../media/video-frames.ts";
-import { pruneUnreferencedMediaCache } from "../media/lifecycle.ts";
-import { BOX_RESET_CHECK_MS, runWeeklyBoxReset } from "../sandbox/schedule.ts";
-import { TaskManager } from "../tasks/manager.ts";
+import { acquirePidLock, releasePidLock } from "./pid.ts";
 
 const rootDir = process.cwd();
 const config = loadConfig(rootDir);
@@ -152,7 +150,6 @@ const taskManager =
 				},
 				box: (botId) => runtimesForTasks.get(botId)?.workBox ?? null,
 				wake: (botId, originMessageId, owe) => runtimesForTasks.get(botId)?.wakeForTask(originMessageId, owe),
-				onNote: (botId, note) => runtimesForTasks.get(botId)?.recordNote(note),
 			})
 		: null;
 const botApis = new Map(config.bots.map((bot) => [bot.id, new BotApi(bot.token)] as const));
@@ -177,8 +174,6 @@ for (const bot of config.bots) {
 	await runtime.init();
 	runtimes.set(bot.id, runtime);
 }
-const botNames = new Map(config.bots.map((bot) => [bot.id, bot.name] as const));
-const botUserIds = new Map(identities.map((identity) => [identity.id, identity.userId] as const));
 runtimesForTasks = runtimes;
 await taskManager?.recover();
 
@@ -192,41 +187,16 @@ const router = new MessageRouter(
 	botFire,
 );
 
-// IPC server for TUI attach/detach
-let ipc!: IpcServer;
-/** Fetch the canonical message row and push it to attached TUIs; returns the row for follow-up side effects. */
-const broadcastMessageRow = (chatId: number, messageId: number): MessageRow | null => {
-	const row = db
-		.query("SELECT * FROM messages WHERE chat_id = ? AND message_id = ?")
-		.get(chatId, messageId) as MessageRow | null;
-	if (row) ipc.broadcast(ipc.msgToItem(row));
-	return row;
-};
-ipc = new IpcServer(db, join(config.dataDir, "daemon.sock"), botNames, botUserIds, (botId) =>
-	runtimes.get(botId)?.controlSnapshot(),
-);
-setMediaReadySink((fileUniqueId, mediaPath) => ipc.broadcastMediaReady({ fileUniqueId, mediaPath }));
 for (const [botId, rt] of runtimes) {
-	rt.eventSink = (event) => {
-		ipc.broadcast({
-			kind: "evt",
-			ts: event.ts,
-			evtId: event.id,
-			botId,
-			botName: botNames.get(botId) ?? botId,
-			evtKind: event.kind,
-			payload: JSON.stringify(event.payload),
-		});
-	};
 	rt.sentMessageSink = (rawMsg) => {
 		const m = rawMsg as { chat: { id: number }; message_id: number };
-		const row = broadcastMessageRow(m.chat.id, m.message_id);
+		const row = db
+			.query("SELECT * FROM messages WHERE chat_id = ? AND message_id = ?")
+			.get(m.chat.id, m.message_id) as MessageRow | null;
 		if (!row) return; // persistence failed: nothing durable to route
 		// Only agent sends reach this sink; control replies never route.
 		router.routeLocalSend(row);
 	};
-	rt.usageSink = () => ipc.broadcastUsage(botId);
-	rt.visionSink = (fileUniqueId, text) => ipc.broadcastVision({ fileUniqueId, text });
 	rt.mediaPruneSink = () => {
 		const result = pruneUnreferencedMediaCache(db, mediaDir, [...runtimes.keys()]);
 		if (result.scanned === 0) return;
@@ -240,8 +210,6 @@ for (const [botId, rt] of runtimes) {
 		if (result.failed > 0) log.warn("media_cache", "post_compaction_pruned", fields);
 		else log.info("media_cache", "post_compaction_pruned", fields);
 	};
-	rt.streamSink = (stream) => ipc.broadcastStream(stream);
-	rt.streamDemand = () => ipc.hasStreamListener(botId);
 }
 
 const telegramControl = new TelegramControlCommandService(
@@ -253,14 +221,7 @@ const telegramControl = new TelegramControlCommandService(
 	sharedModelRuntime,
 	botFire,
 );
-const telegramControlCoordinator = new TelegramControlCoordinator(
-	db,
-	telegramControl,
-	botApis,
-	({ chatId, messageId }) => {
-		broadcastMessageRow(chatId, messageId);
-	},
-);
+const telegramControlCoordinator = new TelegramControlCoordinator(db, telegramControl, botApis);
 void publishTelegramControlMenus(botApis);
 
 const boxes = [...runtimes].flatMap(([botId, rt]) =>
@@ -273,7 +234,7 @@ runBoxReset();
 const boxResetTimer = setInterval(runBoxReset, BOX_RESET_CHECK_MS);
 
 // Direct replies are durable response opportunities. Restore them only after each
-// session and observer sink is ready, before fresh polling can add more work.
+// session is ready, before fresh polling can add more work.
 for (const [botId, rt] of runtimes) {
 	const outcome = rt.recoverReplyObligations();
 	if (outcome) log.info("routing", "reply_recovered", { bot_id: botId, outcome });
@@ -296,7 +257,6 @@ const onMessage = async (result: IngestResult, update: unknown, botId: string) =
 	const command = parseTelegramControlCommand(update, botId, identities);
 	if (command) await telegramControlCoordinator.handle(command);
 	else router.route(result, row);
-	ipc.broadcast(ipc.msgToItem(row));
 };
 const onCallback = async (update: unknown, botId: string) => {
 	const command = parseTelegramControlCallback(update, botId, config.groupChatId);
@@ -332,7 +292,6 @@ async function shutdown(signal: string, exitCode = 0) {
 			});
 		}
 	}
-	ipc.stop();
 	releasePidLock(config.dataDir);
 	// wait for the poller loops to actually exit; stop() aborts any in-flight long
 	// poll or backoff sleep, so this returns promptly inside the hard shutdown bound
@@ -344,10 +303,8 @@ async function shutdown(signal: string, exitCode = 0) {
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));
 
-// Publish the readiness socket only after synchronous startup work and signal handlers are ready.
-ipc.start();
 log.info("daemon", "ready", { pid: process.pid, group_peer_id: config.groupPeerId, bot_count: config.bots.length });
 // A fatal poller error (revoked token) must still run the graceful shutdown so other bots'
-// in-flight turns settle and the pid file/socket are released.
+// in-flight turns settle and the pid file is released.
 const pollerRuns = Promise.all(pollers.map((p) => p.run()));
 await pollerRuns.catch(() => shutdown("poller_fatal", 1));

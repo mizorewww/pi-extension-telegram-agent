@@ -6,16 +6,7 @@ Start with the read-only diagnosis; it shows where things got stuck:
 bun run debug -- --since 30m
 ```
 
-Do not delete `data/`, pid or socket files "just to try".
-
-## `bun run pi` does not start
-
-```bash
-bun install --frozen-lockfile
-pi --version
-```
-
-If `pi` is not found, install Pi and put it on your PATH first; this project does not install it for you.
+Do not delete `data/` or pid files "just to try".
 
 ## Startup reports configuration errors
 
@@ -39,12 +30,6 @@ Then read the log (`data/daemon.log` under systemd). Typical causes: a wrong tok
 ## The bot keeps talking off-topic
 
 Its context may be stuck on a misunderstanding, which summaries then carry forward. An admin can send `/new` in the group to start a new session; it only sees later messages.
-
-## Images do not show
-
-- Inline images depend on your terminal (Kitty, Ghostty, iTerm2, WezTerm and others); otherwise you see a label such as `[photo]`.
-- New images first show a label and appear in place once downloaded. Images above 1 MiB are not shown in the terminal.
-- After a context summary, local images no bot needs anymore are cleaned up, so old cards showing only a label is expected; the messages and image descriptions remain.
 
 ## Videos are not understood
 

@@ -1,6 +1,6 @@
 # 用量与状态口径
 
-Pi `/tg status`、Telegram `/status` 与 attached 状态栏的字段含义、公式和数据来源。三者必须从同一份数据、同一组函数得到数值，只是渲染不同。
+Telegram `/status` 的字段含义、公式和数据来源。
 
 ## 数据来源
 
@@ -10,7 +10,7 @@ Pi `/tg status`、Telegram `/status` 与 attached 状态栏的字段含义、公
 | SQLite `tasks` 用量列 | 后台任务主会话累计的 token 与费用，不进入 bot 的聊天统计，不按遥测保留期清理；`task status` 与 `/task` 显示它 |
 | daemon runtime snapshot（`BotRuntime.controlSnapshot()`） | 当前 provider/model、**实际生效**的 reasoning、context window、epoch、运行状态、路由参数、最近压缩结果、Pi session 的实时 context 用量 |
 
-两者只在 `src/observability/status.ts` 的 `buildBotStatusView` 里合并一次；详细字段由 `botStatusFields` 生成，Pi 与 Telegram 迭代同一组有序字段。新增或改字段只改这一处。
+两者只在 `src/observability/status.ts` 的 `buildBotStatusView` 里合并一次；详细字段由 `botStatusFields` 生成。新增或改字段只改这一处。
 
 ## 三种时间范围
 
@@ -38,13 +38,5 @@ Pi `/tg status`、Telegram `/status` 与 attached 状态栏的字段含义、公
 - 上下文构成（system / tool / 摘要 / messages / free）来自 payload observer 的形状估算，再按比例归一到 provider 返回的 prompt 总数；跨 epoch 或当前用量未知时不显示。百分比用最大余数法取一位小数，五项严格相加为 100.0%。provider 没实现 Pi 的 `onPayload` 钩子时只有总量。
 - `≈` 表示本地结构估算（见 [cache.md](cache.md#遥测)），不是 provider 实际命中。
 - 费用 4–6 位小数，整数千位分隔；时间按本地时区 `YYYY-MM-DD HH:MM:SS`（生产为 Asia/Singapore）。
-
-## 实时推送
-
-每写入或更新一行 `llm_runs`（包括 send 耗时回填），daemon 立即用 `loadBotStats` 重新聚合该 bot，通过 IPC `usage` 帧推送整份 `BotStats`（附带当前 runtime snapshot）。客户端只替换，不自行累加，因此状态栏与 `/tg status` 永远一致。
-
-## 状态栏
-
-attached 期间用 Pi 的 `ctx.ui.setStatus("telegram", …)` 在 Pi 原生 footer 的状态行里显示一行：累计 `↑ ↓`、`CH`、`$`、最近主对话的 `ctx %/window` 和 `model • reasoning`，每个 `usage` 帧刷新。全局 feed 汇总所有已配置 bot，模型取最新主对话所属的 bot；该 bot 最新一条 run 比最近主对话更新（刚压缩过）时，context 显示 `?`。detach 后清除。
 
 查看遥测不调用 provider，不改变 session 或 provider payload。

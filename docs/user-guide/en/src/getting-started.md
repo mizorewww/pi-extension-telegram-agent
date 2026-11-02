@@ -8,10 +8,7 @@ You need [Bun](https://bun.sh/) and a local Pi installation (`pi --version` work
 git clone https://github.com/mizorewww/pi-extension-telegram-agent.git
 cd pi-extension-telegram-agent
 bun install --frozen-lockfile
-bun run pi
 ```
-
-`bun run pi` starts the Pi on your PATH and loads this project's Telegram extension.
 
 Optional: install `ffmpeg` (which also provides `ffprobe`) so bots that look at media can understand videos. Without it, videos show up as a text placeholder and everything else keeps working. Use `brew install ffmpeg` on macOS, `sudo apt install ffmpeg` on Debian/Ubuntu, or `sudo pacman -S ffmpeg` on Arch.
 
@@ -59,7 +56,7 @@ All three files are ignored by Git and stay on your machine.
 bun run start
 ```
 
-The daemon runs in the foreground; Ctrl-C stops it. For long-running use, hand it to systemd as described in [Daily operations](operations.md#start-and-stop). Once the output shows `"ready"`, run `/tg attach` in Pi to open the group view, then mention your bot in the group or send `/help` to see the group commands.
+The daemon runs in the foreground; Ctrl-C stops it. For long-running use, hand it to systemd as described in [Daily operations](operations.md#start-and-stop). Once the output shows `"ready"`, mention your bot in the group or send `/help` and `/status` to see the group commands and usage.
 
 If it does not start, the terminal says why; typical causes are a wrong token, no network, the bot not being in the group, or a model missing from Pi's catalog. See [Troubleshooting](troubleshooting.md).
 

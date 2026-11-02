@@ -12,7 +12,7 @@ export interface DebugReportInput {
 	sinceMs: number;
 	now?: number;
 	logs?: readonly LogRecord[];
-	daemon?: { pid: number | null; alive: boolean; socket: boolean };
+	daemon?: { pid: number | null; alive: boolean };
 	modelReasoning?: readonly DebugModelReasoning[];
 	videoTranscoder?: { required: boolean; available: boolean };
 }

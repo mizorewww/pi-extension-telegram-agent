@@ -24,7 +24,7 @@ The model's context is projected from the database, not pulled live from Telegra
 
 ## 4. Pi-native first
 
-Everything Pi can do is left to Pi: sessions and persistence, retries, compaction hooks, the steering queue, the model catalog and auth, image resizing, the codemode sandbox (background jobs reuse Pi's `CodemodeSandbox` directly) and the TUI components.
+Everything Pi can do is left to Pi: sessions and persistence, retries, compaction hooks, the steering queue, the model catalog and auth, image resizing, and the codemode sandbox (background jobs reuse Pi's `CodemodeSandbox` directly).
 
 What is hand-written is only what Pi lacks, or where Pi's version does not fit a cache-sensitive, multi-bot, sandboxed daemon:
 
@@ -34,7 +34,6 @@ What is hand-written is only what Pi lacks, or where Pi's version does not fit a
 | Provider watchdog | Pi's `timeoutMs` only works for SDKs that support it; it is not a deadline for the whole stream |
 | Session trimming | Pi has no public trimming API |
 | RPC framing for tasks | Pi's `RpcClient` hardcodes a `node` child process and cannot run `docker run` |
-| Daemon ↔ TUI IPC | Pi RPC is one session per process; this daemon serves several bots at once |
 
 Some Pi features are deliberately unused: switching tool sets mid-session, `context_edit` and in-session model changes all rewrite a prefix that was already sent and break the cache; skills and prompt templates add bytes to the system prompt, so they are off.
 

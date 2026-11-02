@@ -8,10 +8,7 @@
 git clone https://github.com/mizorewww/pi-extension-telegram-agent.git
 cd pi-extension-telegram-agent
 bun install --frozen-lockfile
-bun run pi
 ```
-
-`bun run pi` 启动你 PATH 中的 Pi，并自动加载本项目的 Telegram 扩展。
 
 可选：安装 `ffmpeg`（同时提供 `ffprobe`），开启看图后 bot 才能看懂视频；没有它，视频只显示成文字占位，其它功能不受影响。macOS 用 `brew install ffmpeg`，Debian/Ubuntu 用 `sudo apt install ffmpeg`，Arch 用 `sudo pacman -S ffmpeg`。
 
@@ -59,7 +56,7 @@ cp personas/template.zh.md personas/friend.local.md
 bun run start
 ```
 
-daemon 在前台运行，Ctrl-C 停止；长期运行请交给 systemd，见[日常运维](operations.md#启动和停止)。输出里出现 `"ready"` 后，在 Pi 里 `/tg attach` 打开群聊视图，去群里 @ 你的 bot 试试，或发 `/help` 查看群内命令。
+daemon 在前台运行，Ctrl-C 停止；长期运行请交给 systemd，见[日常运维](operations.md#启动和停止)。输出里出现 `"ready"` 后，去群里 @ 你的 bot 试试，或发 `/help`、`/status` 查看群内命令与状态。
 
 起不来时终端会给出原因，常见的是 token 错误、网络不通、bot 不在群里或所选模型不在 Pi 目录里，见[故障排查](troubleshooting.md)。
 

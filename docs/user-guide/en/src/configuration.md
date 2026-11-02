@@ -43,7 +43,7 @@ Omitted fields use defaults. An invalid configuration fails at startup with ever
 1. Add a new token line to `.env`, for example `helper_bot_token: ...`;
 2. copy `personas/template.en.md` into a new persona;
 3. append an entry to `bots` (`id` must be unique and contain only letters, digits, `_` and `-`);
-4. restart and check it with `/tg attach <id>` in Pi.
+4. restart and check it with `/status` in the group.
 
 Each bot has its own token, personality, session and statistics. They share the group's history and see each other's messages, but do not trigger each other unless an admin turns on `/fire` (see below).
 
@@ -136,4 +136,4 @@ Don't know your numeric user id? Message [@userinfobot](https://t.me/userinfobot
 
 After you change the model, personality, tools, media mode or other settings that affect what the model sees, each bot starts a new session on restart (the old session file is kept). This is expected.
 
-Next: [Chat and observe in Pi](using-pi.md).
+Next: [Daily operations and group commands](operations.md).

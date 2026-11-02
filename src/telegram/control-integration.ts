@@ -28,12 +28,6 @@ export interface TelegramControlApi extends MarkdownTextSendApi {
 	): Promise<Record<string, unknown>>;
 }
 
-export interface TelegramControlReplyNotification {
-	botId: string;
-	chatId: number;
-	messageId: number;
-}
-
 export type TelegramControlDeliveryResult =
 	| { outcome: "sent"; botId: string; chatId: number; messageId: number }
 	| { outcome: "no_reply" | "failed"; category?: string };
@@ -44,7 +38,6 @@ export class TelegramControlCoordinator {
 		private readonly db: Database,
 		private readonly commands: TelegramControlCommandPort,
 		private readonly apis: ReadonlyMap<string, TelegramControlApi>,
-		private readonly onSent: (message: TelegramControlReplyNotification) => void,
 	) {}
 
 	private warn(operation: string, fields: Record<string, unknown>): void {
@@ -99,7 +92,6 @@ export class TelegramControlCoordinator {
 					category: localFailureCategory(error),
 				});
 			}
-			this.onSent({ botId: result.replyBotId, chatId: canonical.chat_id, messageId: canonical.message_id });
 			return { outcome: "sent", botId: result.replyBotId, chatId: canonical.chat_id, messageId: canonical.message_id };
 		} catch (error) {
 			const category =
@@ -132,7 +124,6 @@ export class TelegramControlCoordinator {
 				.get(result.replyBotId)!
 				.editMessageText(result.chatId, command.messageId, result.text!, result.replyMarkup ?? { inline_keyboard: [] });
 			await retrySqliteBusy(() => persistEditedControlMessage(this.db, raw));
-			this.onSent({ botId: result.replyBotId, chatId: result.chatId, messageId: command.messageId });
 			return { outcome: "sent", botId: result.replyBotId, chatId: result.chatId, messageId: command.messageId };
 		} catch {
 			this.warn("menu_edit", { bot_id: command.replyBotId, message_id: command.messageId, category: "request_failed" });

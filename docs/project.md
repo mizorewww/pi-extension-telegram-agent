@@ -24,10 +24,9 @@
 | visible refs | 当前 context 真正包含完整内容的消息 id；可被压缩替换，不等于消费状态 |
 | canonical message | 群消息的本地统一表示，身份为 `(chat_id, message_id)` |
 | 回复义务 | 直接点名后尚未回复的消息，结清前不会丢 |
-| LOCAL | TUI 中只有本地可见的 bot 内部行为 |
 
 ## 部署与隐私边界
 
-- 一份 deployment = 一个 Telegram supergroup + 1..N 个 bot。一个工作目录只对应一个群；`data/`、DB、session、pid、socket 都没有第二层命名空间，多群必须用隔离的 clone。
+- 一份 deployment = 一个 Telegram supergroup + 1..N 个 bot。一个工作目录只对应一个群；`data/`、DB、session、pid 都没有第二层命名空间，多群必须用隔离的 clone。
 - 真实 bot 名、token、persona 只存在被 Git 忽略的本机文件里；仓库只跟踪 `personas/template.zh.md` 与 `template.en.md`。旧 Git 历史可能仍含已删除的 persona，未经授权不改写历史。
 - persona 只写人格与回应策略；`send` 的参数与语义以 `src/agent/tools.ts` 为准。

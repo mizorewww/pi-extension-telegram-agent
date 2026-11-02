@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
+
 import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
@@ -119,7 +119,7 @@ export async function main(args = process.argv.slice(2), rootDir = process.cwd()
 			chatId: config.groupChatId,
 			sinceMs,
 			logs: readStructuredLogTail(join(config.dataDir, "daemon.log")),
-			daemon: { pid, alive: pid != null && pidAlive(pid), socket: existsSync(join(config.dataDir, "daemon.sock")) },
+			daemon: { pid, alive: pid != null && pidAlive(pid) },
 			modelReasoning,
 			videoTranscoder: {
 				required: config.media.mode !== "off",

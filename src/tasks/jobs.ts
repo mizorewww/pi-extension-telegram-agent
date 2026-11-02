@@ -32,7 +32,6 @@ export interface JobDeps {
 	tools: () => CodemodeTool[];
 	/** Owe the requester a reply and wake the bot. */
 	wake: (originMessageId: number) => void;
-	onNote: (note: NotePayload) => void;
 }
 
 interface RunningJob {
@@ -105,7 +104,6 @@ export class JobRunner {
 		this.running.delete(id);
 		const note: NotePayload = { bot_id: this.deps.botId, source: "job", task_id: id, phase, text };
 		appendNoteEvent(this.deps.db, this.deps.chatId, job.originMessageId, `job:${this.deps.botId}:${id}:${phase}`, note);
-		this.deps.onNote(note);
 		this.deps.wake(job.originMessageId);
 		log.info("tasks", "job_finished", { bot_id: this.deps.botId, job_id: id, phase });
 	}

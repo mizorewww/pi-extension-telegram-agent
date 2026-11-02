@@ -24,7 +24,7 @@
 
 ## 4. Pi 原生优先
 
-能交给 Pi 的都交给 Pi：会话与持久化、重试、压缩钩子、steer 队列、模型目录与认证、图片缩放、codemode 沙箱（后台 job 也直接复用 Pi 的 `CodemodeSandbox`）、TUI 组件。
+能交给 Pi 的都交给 Pi：会话与持久化、重试、压缩钩子、steer 队列、模型目录与认证、图片缩放、codemode 沙箱（后台 job 也直接复用 Pi 的 `CodemodeSandbox`）。
 
 自己写的只有 Pi 确实没有、或者 Pi 的版本不适合“缓存敏感、多 bot、带沙箱”的场景的部分：
 
@@ -34,7 +34,6 @@
 | provider 看门狗 | Pi 的 `timeoutMs` 只对支持它的 SDK 生效，不是整条流的截止时间 |
 | session 裁剪 | Pi 没有公开的裁剪 API |
 | 后台任务的 RPC 帧 | Pi 的 `RpcClient` 写死了 `node` 子进程，跑不了 `docker run` |
-| daemon ↔ TUI 的 IPC | Pi 的 RPC 一进程一会话；这里一个 daemon 要同时服务多个 bot |
 
 不采用的 Pi 功能也有原因：运行中切换工具集、`context_edit`、会话内换模型都会改写已发送的前缀，破坏缓存；skills 和 prompt template 会往 system prompt 里加字节，所以关掉。
 

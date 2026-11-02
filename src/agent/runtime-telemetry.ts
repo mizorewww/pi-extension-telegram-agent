@@ -4,9 +4,7 @@ import type { Database } from "bun:sqlite";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { BotConfig } from "../config.ts";
-import type { RuntimeControlSnapshot } from "../ipc.ts";
-import { fitContextBreakdown } from "../observability/usage.ts";
-import type { AssistantActivityStream } from "./activity.ts";
+import { fitContextBreakdown, type RuntimeControlSnapshot } from "../observability/usage.ts";
 import { sha256 } from "./context-fingerprint.ts";
 import {
 	estimateCacheReadFromPrefix,
@@ -76,11 +74,6 @@ export class BotRuntimeTelemetry {
 	constructor(
 		private readonly db: Database,
 		private readonly bot: BotConfig,
-		private readonly activity: AssistantActivityStream,
-		private readonly eventSink: () =>
-			| ((event: { id: number; ts: number; kind: string; payload: unknown }) => void)
-			| null,
-		private readonly usageSink: () => (() => void) | null,
 	) {}
 
 	beginRun(now: number): void {
@@ -112,13 +105,9 @@ export class BotRuntimeTelemetry {
 	}
 
 	recordEvent(kind: string, payload: unknown): void {
-		const { stored, grouped } = this.activity.group(kind, payload);
-		const ts = Date.now();
-		const inserted = this.db
+		this.db
 			.query("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES (?, ?, ?, ?)")
-			.run(this.bot.id, ts, kind, JSON.stringify(stored));
-		if (grouped) this.activity.emit(ts);
-		else this.eventSink()?.({ id: Number(inserted.lastInsertRowid), ts, kind, payload });
+			.run(this.bot.id, Date.now(), kind, JSON.stringify(payload));
 	}
 
 	recordPublicSend(): void {
@@ -131,7 +120,6 @@ export class BotRuntimeTelemetry {
 		this.db
 			.query("UPDATE llm_runs SET send_ms = send_ms + ?, send_samples = send_samples + 1 WHERE id = ?")
 			.run(Math.max(0, Math.round(durationMs)), this.lastLlmRunId);
-		this.usageSink()?.();
 	}
 
 	recordUsage(
@@ -212,7 +200,6 @@ export class BotRuntimeTelemetry {
 			thinking_ms: this.thinkingMs,
 		});
 		this.pendingInputMetrics = emptyInputMetrics();
-		this.usageSink()?.();
 		this.thinkingMs = 0;
 		this.thinkingFinished = false;
 	}
@@ -240,6 +227,5 @@ export class BotRuntimeTelemetry {
 			api: model.api,
 			cache_retention: "none",
 		});
-		this.usageSink()?.();
 	}
 }

@@ -9,8 +9,8 @@ import type {
 } from "../agent/runtime.ts";
 import type { BotConfig, TelegramAdmin } from "../config.ts";
 import { loadBotStats } from "../db/usage.ts";
-import type { RuntimeControlSnapshot } from "../ipc.ts";
 import { log } from "../observability/log.ts";
+import type { RuntimeControlSnapshot } from "../observability/usage.ts";
 import { buildBotStatusView, renderBotStatusPlain } from "../observability/status.ts";
 import { updateBotConfigField, updateBotModelConfig } from "../onboarding/config-core.ts";
 import type { InlineKeyboardMarkup } from "./api.ts";

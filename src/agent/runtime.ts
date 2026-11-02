@@ -41,7 +41,6 @@ import {
 	removeReplyObligations,
 	replyObligationCount,
 } from "../db/reply-obligations.ts";
-import type { AgentStreamFrame, RuntimeControlSnapshot } from "../ipc.ts";
 import type { MediaDownloadApi } from "../media/local-cache.ts";
 import { createImageRefResolver } from "../media/prepare-images.ts";
 import {
@@ -50,16 +49,16 @@ import {
 	stickerCatalogPromptBlock,
 	stickerCatalogSnapshotHash,
 } from "../media/sticker-catalog.ts";
-import { ensureVision, type VisionExecutor, type VisionUpdateSink } from "../media/vision.ts";
+import { ensureVision, type VisionExecutor } from "../media/vision.ts";
 import type { VisionScheduler } from "../media/vision-scheduler.ts";
 import { errorCategory, log } from "../observability/log.ts";
+import type { RuntimeControlSnapshot } from "../observability/usage.ts";
 import { WorkBox } from "../sandbox/box.ts";
 import type { JobRunner } from "../tasks/jobs.ts";
 import { TaskError, type TaskManager } from "../tasks/manager.ts";
 import { TelegramTypingLease } from "../telegram/activity.ts";
 import { BotApi, groupReactionAllowlist, TelegramApiError } from "../telegram/api.ts";
 import { consumedControlMessageIds } from "../telegram/control-command.ts";
-import { AssistantActivityStream } from "./activity.ts";
 import {
 	buildContextFingerprint,
 	canResumeContextSession,
@@ -189,7 +188,6 @@ export class BotRuntime {
 	private readonly monotonicNow = () => performance.now();
 	private visibleMessageIds = new Set<number>();
 	private epoch = 1;
-	private readonly activity: AssistantActivityStream;
 	private readonly telemetry: BotRuntimeTelemetry;
 	private contextFingerprint = "";
 	private staticPrefixTokenEstimate = 0;
@@ -204,20 +202,10 @@ export class BotRuntime {
 	private readonly visionScheduler: VisionScheduler | null;
 	private readonly typingLease: TelegramTypingLease;
 	private readonly videoTranscoder: boolean;
-	/** Optional sink for TUI/live broadcasting of agent events. */
-	eventSink: ((event: { id: number; ts: number; kind: string; payload: unknown }) => void) | null = null;
-	/** Optional sink for messages this bot sent (poller echo dedupes them, so TUI needs this path). */
+	/** Optional sink for messages this bot sent (for local /fire routing across sibling bots). */
 	sentMessageSink: ((rawMsg: unknown) => void) | null = null;
-	/** Notified after each persisted llm_runs change so live views reload this bot's stats. */
-	usageSink: (() => void) | null = null;
-	/** Optional sink for newly persisted media descriptions (REQ-UI-0006). */
-	visionSink: VisionUpdateSink | null = null;
 	/** Bounded cache observer invoked only after successful compaction visibility commits. */
 	mediaPruneSink: (() => void) | null = null;
-	/** Ephemeral Pi-feed assistant snapshots; never persisted (REQ-UI-0010). */
-	streamSink: ((frame: AgentStreamFrame) => void) | null = null;
-	/** Lets the daemon avoid building snapshots when no matching listener completed hello. */
-	streamDemand: (() => boolean) | null = null;
 
 	constructor(
 		db: Database,
@@ -246,19 +234,7 @@ export class BotRuntime {
 		this.api = options.api ?? new BotApi(bot.token);
 		this.botApis = options.botApis ?? new Map([[bot.id, this.api]]);
 		this.tasks = bot.tools.tasks ? (options.tasks ?? null) : null;
-		this.activity = new AssistantActivityStream(
-			bot,
-			() => this.streamSink,
-			() => this.streamDemand?.() ?? true,
-			(snapshot) => this.telemetry.recordEvent("agent_activity", snapshot),
-		);
-		this.telemetry = new BotRuntimeTelemetry(
-			db,
-			bot,
-			this.activity,
-			() => this.eventSink,
-			() => this.usageSink,
-		);
+		this.telemetry = new BotRuntimeTelemetry(db, bot);
 		this.box = options.box ?? (bot.tools.sandbox && config.sandbox ? new WorkBox(bot.id, config.sandbox) : null);
 		const chatId = config.groupChatId;
 		this.typingLease = new TelegramTypingLease(
@@ -339,7 +315,6 @@ export class BotRuntime {
 				this.telemetry.pendingInputMetrics.imagesAttached += count;
 			},
 			recordEvent: (kind, payload) => this.telemetry.recordEvent(kind, payload),
-			recordNote: (note) => this.recordNote(note),
 			wakeForTask: (originMessageId, owe) => this.wakeForTask(originMessageId, owe),
 		});
 		this.jobs = jobs;
@@ -362,12 +337,9 @@ export class BotRuntime {
 				this.telemetry.pendingObservation = observation;
 			}),
 			...(this.bot.tools.codemode ? [makeCodemodeExtension()] : []),
-			makeAssistantPersistencePolicyExtension(
-				(text) => {
-					this.telemetry.recordEvent("assistant_text", { text });
-				},
-				(message) => this.activity.capture(message),
-			),
+			makeAssistantPersistencePolicyExtension((text) => {
+				this.telemetry.recordEvent("assistant_text", { text });
+			}),
 		];
 		this.contextFingerprintInput = {
 			piVersion: PI_VERSION,
@@ -517,7 +489,6 @@ export class BotRuntime {
 			const now = Date.now();
 			switch (event.type) {
 				case "agent_start":
-					this.activity.begin(now);
 					this.running = true;
 					this.lastTurnFailed = false;
 					this.telemetry.beginRun(now);
@@ -526,7 +497,6 @@ export class BotRuntime {
 				case "message_update":
 					if (event.message.role === "assistant") {
 						this.telemetry.observeThinking(event.message, now);
-						this.activity.update(event.message, now);
 					}
 					break;
 				case "message_end": {
@@ -604,7 +574,6 @@ export class BotRuntime {
 					});
 					this.running = false;
 					this.typingLease.stop();
-					this.activity.finish(now);
 					break;
 				case "compaction_end":
 					this.onCompactionEnd(event);
@@ -1310,7 +1279,6 @@ export class BotRuntime {
 		try {
 			await ensureVision(this.db, this.api, this.bot.id, fileUniqueId, this.visionExecutor, {
 				cacheDir: join(this.config.dataDir, "media"),
-				onPersist: (fileUniqueId, text) => this.visionSink?.(fileUniqueId, text),
 				onTelemetry: (telemetry) => {
 					if (telemetry.providerCalled) {
 						this.telemetry.pendingInputMetrics.visionCalls++;
@@ -1391,16 +1359,6 @@ export class BotRuntime {
 		}
 	}
 
-	/** Show a note in the local timeline; the provider sees it through the event stream instead. */
-	recordNote(note: NotePayload): void {
-		this.telemetry.recordEvent("note", {
-			source: note.source,
-			task_id: note.task_id ?? null,
-			phase: note.phase ?? null,
-			text: note.text,
-		});
-	}
-
 	/** A task needs the bot: owe the requester a reply when asked, then wake up. */
 	wakeForTask(originMessageId: number, owe: boolean): void {
 		if (owe && this.bot.tools.send)
@@ -1436,7 +1394,6 @@ export class BotRuntime {
 				text: `你的工作区已被清空（${reason === "weekly" ? "每周例行" : "管理员操作"}），/work 里之前的文件都不在了。`,
 			};
 			appendNoteEvent(this.db, this.config.groupChatId, 0, `box_reset:${this.bot.id}:${Date.now()}`, note);
-			this.recordNote(note);
 		}
 		log.info("sandbox", "box_reset", { bot_id: this.bot.id, reason });
 	}
@@ -1452,7 +1409,6 @@ export class BotRuntime {
 		this.jobs?.stopAll();
 		this.session?.abortCompaction();
 		this.typingLease.stop();
-		this.activity.end();
 		// Bounded wait for an in-flight flush so the Pi/SQLite context commit can settle;
 		// the timeout only guards a wedged provider run.
 		if (this.flushPromise) {

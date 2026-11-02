@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { validateToolArguments, type JsonValue } from "@earendil-works/pi-ai";
 import type { CodemodeJsonSchema } from "@earendil-works/pi-codemode";
 import type { AppConfig, BotConfig } from "../config.ts";
-import { groupMessage, type NotePayload } from "../db/message-events.ts";
+import { groupMessage } from "../db/message-events.ts";
 import { downloadSource, MEDIA_DOWNLOAD_MAX_BYTES, type MediaDownloadApi } from "../media/local-cache.ts";
 import { ensureViewImages } from "../media/prepare-images.ts";
 import type { WorkBox } from "../sandbox/box.ts";
@@ -65,7 +65,6 @@ export interface BotRuntimeToolHost {
 	markVisible: (ids: readonly number[]) => void;
 	onImageAttached: (count: number) => void;
 	recordEvent: (kind: string, payload: unknown) => void;
-	recordNote: (note: NotePayload) => void;
 	wakeForTask: (originMessageId: number, owe: boolean) => void;
 }
 
@@ -326,7 +325,6 @@ export function buildBotRuntimeTools(host: BotRuntimeToolHost) {
 							},
 						})),
 					wake: (originMessageId) => host.wakeForTask(originMessageId, true),
-					onNote: (note) => host.recordNote(note),
 				})
 			: null;
 	const jobTool = {

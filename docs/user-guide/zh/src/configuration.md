@@ -43,7 +43,7 @@ export default defineConfig({
 1. 在 `.env` 加一行新 token，例如 `helper_bot_token: ...`；
 2. 从 `personas/template.zh.md` 复制一份新的 persona；
 3. 在 `bots` 数组里追加一项（`id` 唯一，只含字母、数字、`_`、`-`）；
-4. 重启，在 Pi 里用 `/tg attach <id>` 确认。
+4. 重启，在群里用 `/status` 确认。
 
 每个 bot 有独立的 token、人格、会话和统计；它们共享同一个群的聊天记录，看得到彼此的发言，但不会互相触发，除非管理员开启 `/fire`（见下文）。
 
@@ -136,4 +136,4 @@ tasks: { workflows: { search: "~/pi-tasks/search" }, max_running: 2, timeout_min
 
 改了模型、人格、工具、媒体模式等影响模型输入的设置后，重启时 bot 会开启新的会话（旧会话文件保留），这是正常的。
 
-下一步：[在 Pi 中聊天和观察](using-pi.md)。
+下一步：[日常运维与群内命令](operations.md)。

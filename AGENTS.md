@@ -13,7 +13,7 @@
 
 - `docs/index.md` — 文档总索引
 - `docs/project.md` — 三个世界、行为约束、术语、部署边界
-- `docs/architecture.md` — 消息路径、发送边界、上下文、媒体、控制命令、IPC
+- `docs/architecture.md` — 消息路径、发送边界、上下文、媒体、控制命令
 - `docs/cache.md` — provider 可见字节、fingerprint、改动流程（CACHE_SCHEMA_VERSION）
 - `docs/data-model.md` — SQLite schema 与保留期
 - `docs/telemetry.md` — 用量字段与公式
@@ -31,7 +31,7 @@
 - Secret 不进日志、测试 fixture、commit；`.env` 不入库。
 - daemon 生产模块只用 `src/observability/log.ts` 结构化日志；不记正文 / prompt / response / tool args / 完整 URL 与 path；业务正确性不得依赖日志。
 - 不得为通过验证而削弱测试、类型检查或安全控制（如 codemode 边界、容器沙箱）。
-- 不改 SQLite schema、IPC 协议、消息序列化 grammar，除非有明确需求并同步文档。
+- 不改 SQLite schema、消息序列化 grammar，除非有明确需求并同步文档。
 - 配置只有一套：`telegram.config.ts`（业务配置）+ Pi 内部 settings + `.env`（secrets）。禁止引入第二来源。
 
 ## 4. 改动路由
@@ -41,8 +41,7 @@
 - Telegram API / 轮询 / normalize → `src/telegram/`
 - schema / 持久化 → `src/db/`（schema 变更必须更新 `docs/data-model.md`）
 - prompt / serialize / routing / runtime / provider-facing 工具 → `src/agent/`（tool description 是 cache-visible，见 `src/agent/tools.ts`）
-- 进程管理 / IPC server → `src/daemon/`、`src/ipc.ts`
-- TUI → `.pi/extensions/tg-extension.ts` + `src/plugin/timeline.ts`（UI-only 改动不得影响 provider payload）
+- 进程管理 → `src/daemon/`
 - 工具实现（search 等）→ `src/tools/`；codemode 接入 → `src/agent/extensions/codemode.ts`，注册顺序固定在 `src/agent/runtime.ts`
 - 后台任务 → `src/tasks/`；工作区容器（sandbox）→ `src/sandbox/`；镜像 `deploy/box/Dockerfile`；运维见 `docs/runbooks/sandbox.md`
 - 配置文件写回（`/set`、`/model`）→ `src/onboarding/config-core.ts`
@@ -73,10 +72,9 @@
 ## 8. 已知坑
 
 - `bun test` 强制 UTC：涉时间序列化的测试必须 pin TZ（参考 `test/cache.test.ts`，生产为 Asia/Singapore）。
-- Bun `socket.write` 返回字节数且可能部分写入：必须编码成 Uint8Array 后按字节偏移排队写（参考 `src/daemon/ipc-server.ts`）。
 - 本机 `telegram.config.ts`/`.env` 可能与生产共用 bot token：不要在开发机启动 daemon 或跑 e2e，两个 poller 会抢同一 token（409）并造成线上停摆。需要真实验证时在服务器上做。
 - `.env` 是 `key: value` 冒号格式，由 `src/config.ts` 自解析，不是 dotenv 的 `KEY=value`。
-- Pi 各包（agent-core、ai、coding-agent、tui，以及后台 job 直接用的 pi-codemode）精确锁定 registry `1.4.0`；升级必须同一原子提交一起更新 manifest、lock 并做兼容性验证。交互式 `bun run pi` 使用本机 PATH 中的 Pi。
+- Pi 各包（agent-core、ai、coding-agent、tui，以及后台 job 直接用的 pi-codemode）精确锁定 registry `1.4.0`；升级必须同一原子提交一起更新 manifest、lock 并做兼容性验证。
 - sticker / alias 的 short_id 用 rowid 分配，不用 COUNT+1（并发 / 删除下撞号）。
 - `streamFunction` 包装（`src/agent/runtime.ts`）是 Pi 的官方注入形态（`Agent.streamFunction` 是公开可变字段，函数包函数注入 `cacheRetention`）；`createAgentSession()` 不接受 streamFn 选项，只能事后覆盖。升级 Pi 时仍必须验证该包装（见 `docs/engineering/decisions.md`）。
 

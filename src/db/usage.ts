@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import type { BotStats, UsageRun } from "../ipc.ts";
+import type { BotStats, UsageRun } from "../observability/usage.ts";
 
 interface LastRunRow extends Omit<UsageRun, "cacheEstimated"> {
 	cacheEstimated: number;

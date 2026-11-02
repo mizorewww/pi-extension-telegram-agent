@@ -18,7 +18,7 @@ bun run debug -- --bot A --since 2h
 bun run debug -- --bot A --show-provider-content   # 敏感，见下
 ```
 
-只读：配置（不读 secret、不查 Pi 默认）、本机 Pi 模型目录、只读 SQLite 与 Pi session、PATH 工具、日志尾部 64 KiB。不联网、不写库。输出 JSON：daemon 存活与 socket、每 bot 的 cursor / high-water / 回复义务 / pending dispatch、最近 claims、runs、事件、日志、`findings`，以及重建的 provider 上下文结构（只有 hash 与长度）。
+只读：配置（不读 secret、不查 Pi 默认）、本机 Pi 模型目录、只读 SQLite 与 Pi session、PATH 工具、日志尾部 64 KiB。不联网、不写库。输出 JSON：daemon 存活状态、每 bot 的 cursor / high-water / 回复义务 / pending dispatch、最近 claims、runs、事件、日志、`findings`，以及重建的 provider 上下文结构（只有 hash 与长度）。
 
 `--show-provider-content` 必须配合单个 `--bot`，把完整 system prompt 与当前消息投影写到 stdout，可能包含 persona、群聊正文、工具结果与 thinking。只在本机短暂查看，不要贴进 issue 或存成文件。
 
@@ -47,7 +47,7 @@ bun run debug -- --bot A --show-provider-content   # 敏感，见下
 5. `llm_runs` + `provider_turn_settled` / `flush_failed` / `model_silence`：provider 完成、失败还是沉默。
 6. `agent_tool.execution_started|finished`：调了哪个工具、是否出错。
 7. `agent_send.preflight_failed|reaction_dropped|started|committed|degraded`：Telegram 提交前还是提交后。
-8. canonical 发送行、`agent_events.send` / `send_degraded`、IPC 事件：远端结果之后的本地记账。
+8. canonical 发送行、`agent_events.send` / `send_degraded`：远端结果之后的本地记账。
 
 不要用“看到模型输出”推断已发到群里，也不要用“群里没消息”推断 provider 没运行。
 

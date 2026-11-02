@@ -79,12 +79,9 @@ export interface VisionExecutor {
 	describe(input: VisionDescribeInput): Promise<VisionDescriptionResult>;
 }
 
-export type VisionUpdateSink = (fileUniqueId: string, text: string) => void;
 export type VisionTelemetrySink = (telemetry: VisionTelemetry) => void;
 
 export interface EnsureVisionOptions extends PrepareMediaImagesOptions {
-	/** Called exactly after a new non-empty description is persisted; cache hits do not emit. */
-	onPersist?: VisionUpdateSink;
 	/** Receives bounded aggregate fields only; never identity, path, prompt, or response text. */
 	onTelemetry?: VisionTelemetrySink;
 	/** Shared deployment-wide gate over each description's preparation and provider call. */
@@ -320,13 +317,5 @@ async function ensureVisionPrepared(
 		appendMediaUpdateEvents(db, fileUniqueId, text);
 	}
 	emitTelemetry(options, result.telemetry);
-	if (text && options.onPersist) {
-		try {
-			options.onPersist(fileUniqueId, text);
-		} catch {
-			// Persistence is authoritative; observer failures cannot retry provider work.
-			log.error("vision", "update_sink_failed", { category: "observer_failed" });
-		}
-	}
 	return text;
 }

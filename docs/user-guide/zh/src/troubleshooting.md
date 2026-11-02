@@ -6,16 +6,7 @@
 bun run debug -- --since 30m
 ```
 
-不要为了“试一下”删除 `data/`、pid 或 socket 文件。
-
-## `bun run pi` 启动不了
-
-```bash
-bun install --frozen-lockfile
-pi --version
-```
-
-找不到 `pi` 就先安装 Pi 并确认它在 PATH 中；本项目不会替你安装 Pi。
+不要为了“试一下”删除 `data/` 或 pid 文件。
 
 ## 启动时报配置错误
 
@@ -39,12 +30,6 @@ systemctl --user status telegram-agent
 ## bot 一直说跟话题无关的话
 
 bot 的上下文可能被某个误解带偏了（摘要会把它延续下去）。管理员在群里发 `/new` 开启新会话即可；它只会看到之后的消息。
-
-## 图片没有显示
-
-- 图片显示取决于终端是否支持图片（Kitty、Ghostty、iTerm2、WezTerm 等）；不支持时只显示 `[photo]` 等标签。
-- 新图片先显示标签，下载完成后原位出现。超过 1 MiB 的图片不在终端显示。
-- 上下文被压缩后，不再被任何 bot 需要的本地图片会被清理，旧卡片只剩标签是正常的；消息和图片描述都还在。
 
 ## 视频没被理解
 

@@ -5,15 +5,12 @@
 ## 进程
 
 ```
-Telegram ── poller × N ──┐
-                         daemon（唯一长驻进程）── SQLite
-                         │  ingest + router + BotRuntime × N（每 bot 一个 Pi AgentSession）
-                         └─ IPC（Unix socket JSONL）── Pi 交互进程（.pi/extensions/tg-extension.ts）
+Telegram ── poller × N ── daemon（唯一长驻进程）── SQLite
+                            ingest + router + BotRuntime × N（每 bot 一个 Pi AgentSession）
 ```
 
-- **daemon**（`src/daemon/index.ts`）：持有 SQLite、全部 poller、每 bot 一个 `BotRuntime` 和 IPC server。整个进程只创建一个 Pi `ModelRuntime`。
-- **Pi extension**：观察和控制界面，不是第二个 daemon。关闭 Pi 或 `/tg detach` 不影响 bot。
-- 依赖：Bun；Pi 各包（含 pi-codemode）精确锁定 1.4.0；Telegram 直接调用 Bot API（fetch long polling），无第三方 SDK。`bun run pi` 启动 PATH 中本机安装的 Pi CLI。
+- **daemon**（`src/daemon/index.ts`）：持有 SQLite、全部 poller 与每 bot 一个 `BotRuntime`。整个进程只创建一个 Pi `ModelRuntime`。
+- 依赖：Bun；Pi 各包（含 pi-codemode）精确锁定 1.4.0；Telegram 直接调用 Bot API（fetch long polling），无第三方 SDK。
 
 ## 一条消息的路径
 
@@ -87,7 +84,7 @@ Telegram create 不可回滚，所以：
 - **off（默认）**：只有文字占位。
 - **hybrid**（推荐）：视觉模型（`media.vision_model`）为每个媒体生成一次文字描述，按 `file_unique_id` 持久化在 `media.vision` 并跨 bot 复用；描述作为 `media_update` delta 追加，主模型看到文字。每轮最多 `media.max_per_turn` 个、全局并发 `media.concurrency`；一轮最多等 2.5 秒，没赶上的描述在后台继续，之后以 `media_update` 进入下一轮（需要时 bot 用 view_image 直接看原图）。另注册 `view_image({message_id})`（model-only）。它用 `ensureViewImages` 准备图片（文件名由媒体身份推出，不入库），结果 content 只有该消息的渲染行，`details` 只存文件引用 `{messageId, images}`；`context` 投影时才把文件读成 image block（session 不存 base64）。被查看的消息计入可见集合（可被 `reply_to`、文件不被清理），图片计入 `context_image_budget_bytes`、压缩前的每张 1,100 token 换算和摘要输入。主模型必须支持图片输入。
 - 下载严格把 `file_id` 与拥有它的那个 bot 的 Bot API 配对；回复 bot 没有 mapping 时可用其他已配置 bot 的。
-- 媒体只在 vision 或 view_image 需要时下载，不为 TUI 预取；新装入缓存的静态图片（≤1 MiB）通过 `media_ready` 推给 TUI。
+- 媒体只在 vision 或 view_image 需要时下载。
 - 本地文件是可再生缓存：成功压缩后，所有已配置 bot 都不再引用（不可见、无待回复、无未消费 event）的文件按 ≤256 个一批删除；媒体行、描述、short id 与 file mapping 保留。
 
 ## Sticker
@@ -105,7 +102,7 @@ Telegram create 不可回滚，所以：
 - `codemode`：Pi 原生（`createCodemodeExtension`，`mode: "on"`、`models: false`），见下节威胁模型。声明文本由 Pi 按可调用工具渲染，fingerprint 以 Pi 版本 + 工具列表锁定。
 - `tg_messages`（`exposure: "codemode"`，只有脚本能调）：只读检索本群 canonical 历史（`src/tools/messages.ts`），按 id / 时间 / 发送者 / 回复 / 媒体类型 / 子串过滤（3 字以上走 FTS5 trigram 索引，可按 relevance 排序；更短的回退 LIKE），每次 ≤2000 行（按 id 取 ≤1000 个），带 `next_before_id`/`next_after_id` 分页；返回固定 DTO（声明为 `outputSchema`），不暴露 SQL 与表结构；排除 `telegram_control_messages` 与其他 chat。bot 收不到 Telegram 删除事件，已删除的消息仍可能被检索到。
 - `tg_download` / `sh_exec` / `sh_reset`（`exposure: "codemode"`，`tools.sandbox` 开启时注册）：在 bot 的工作区容器里拷入 Telegram 附件、执行命令、清空工作区，见下节威胁模型与 [runbooks/sandbox.md](runbooks/sandbox.md)。
-- 没有调用 send 的 assistant 文本只写本地事件和 TUI，session 里用固定 `[no_send]` 代替。
+- 没有调用 send 的 assistant 文本只写本地 `agent_events`，session 里用固定 `[no_send]` 代替。
 
 ## codemode 威胁模型
 
@@ -129,16 +126,8 @@ Telegram create 不可回滚，所以：
 - `/set` 弹出按钮菜单（插话概率、冷却的固定预设，当前值打勾）；回调只接受预设值，校验后写穿 `telegram.config.ts`、更新内存中的同一 `BotConfig`，并原地刷新菜单。
 - `/status` 由确定性代码生成 Markdown，与 bot 发言走同一条本地 Markdown → entities 的经典 `sendMessage`（不用 Rich Message，旧客户端看不到）。
 
-## Pi 界面与 IPC
-
-- `/tg attach [bot]` 在 Pi transcript 里挂一个 TUI-only custom entry；消息、事件、图片用 Pi 原生组件渲染，滚动、resize、Kitty 图片由 Pi 负责。feed 内容不写 Pi session，也不进入 provider context。
-- `src/plugin/timeline.ts` 是无展示逻辑的 IPC client。协议：`hello`（可带 bot filter）→ snapshot；`history` 分页（复合游标 `(ts, rank, id)`，同秒不丢不重）；推送 `append`、`usage`（daemon 重新聚合好的整份 `BotStats`）、`vision_update`、`media_ready`、`agent_stream`。TUI 只观察，不能以 bot 身份发言。
-- 任务进展与系统通知除了写成 `note` 事件进入 bot 上下文，还镜像为 `note` agent event 推给 TUI（`[task t3 done] …` / `[系统] …`），只用于本地展示。
-- socket 权限 0600；接收缓冲 4 MB、出站队列 1 MB，超限断开；history limit 服务端夹到 [1, 500]；渲染前剥离 ANSI/OSC 等控制序列。
-- 未知 bot filter 直接断开，不降级为全局视图。daemon 与 extension 同仓库一起升级，不兼容新 client 连旧 daemon。
-
 ## 进程管理与配置
 
 - 配置只有 `telegram.config.ts`（受信本机代码，`defineConfig()` 提供类型）+ `.env`（`key: value`，只放项目自己的 secret：bot token、`tiny_fish_api_key`、可选 `router_secret`）+ Pi auth store（模型凭据）。校验一次收集全部错误，未知或已废弃的字段直接报错并提示替代写法。
 - 进程由 systemd user unit 托管（见 [runbook](runbooks/daemon.md)），仓库不自带 start/stop 控制器；`bun run start` 只是前台运行入口。daemon 启动最早一步用 `openSync(wx)` 独占 pid 文件，记录的 pid 仍存活就拒绝启动，绝不让两个 daemon 轮询同一 token。
-- 一个工作目录只对应一个群：`data/`、DB、session、pid、socket 都由工作目录决定。多群必须用隔离的 clone。
+- 一个工作目录只对应一个群：`data/`、DB、session、pid 都由工作目录决定。多群必须用隔离的 clone。

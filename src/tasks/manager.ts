@@ -43,8 +43,6 @@ export interface TaskManagerDeps {
 	config: TasksConfig;
 	run: TaskRunConfig;
 	box: (botId: string) => WorkBox | null;
-	/** Mirror of every note for the bot's local timeline (TUI); never reaches the provider. */
-	onNote?: (botId: string, note: NotePayload) => void;
 	/** Wake the bot; `owe` also creates a reply obligation on the origin message first. */
 	wake: (botId: string, originMessageId: number, owe: boolean) => void;
 	spawner?: Spawner;
@@ -263,7 +261,6 @@ export class TaskManager {
 			`task:${row.task_id}:${Date.now()}:${phase}`,
 			note,
 		);
-		this.deps.onNote?.(row.bot_id, note);
 	}
 
 	private onReport(taskId: string, kind: ReportKind, text: string, files: string[]): void {

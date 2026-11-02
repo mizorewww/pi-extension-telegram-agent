@@ -11,7 +11,7 @@
 |---|---|
 | [`../AGENTS.md`](../AGENTS.md) | agent 常载：哲学、路由、硬约束、已知坑 |
 | [project.md](project.md) | 三个世界、行为约束、术语、部署边界 |
-| [architecture.md](architecture.md) | 进程、消息路径、发送边界、上下文、媒体、控制命令、IPC |
+| [architecture.md](architecture.md) | 进程、消息路径、发送边界、上下文、媒体、控制命令 |
 | [cache.md](cache.md) | provider 可见字节、fingerprint、改动流程 |
 | [data-model.md](data-model.md) | SQLite 表与保留期 |
 | [telemetry.md](telemetry.md) | 用量与状态的字段和公式 |

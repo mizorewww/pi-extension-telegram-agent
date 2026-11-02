@@ -7,9 +7,9 @@
 - **`streamFunction` 包装是官方注入形态。** `Agent.streamFunction` 是公开可变字段；`createAgentSession()` 不接受 streamFn，只能事后包一层来注入 `cacheRetention`、timeout 和 provider watchdog。升级 Pi 必须验证这一包装仍生效（`src/agent/runtime.ts`）。
 - **扩展抛异常时 Pi 会退回默认摘要器。** 所以 `tg-compaction` 的任何失败都返回 `{ cancel: true }`，绝不 throw（`handleBeforeCompact`）。
 - **图片预算必须在 Pi 准备压缩之前换算。** 文字小于预算时 Pi 在触发 `session_before_compact` 之前就返回，钩子来不及；所以在 `agent_end` / `compact()` 前临时调整 `keepRecentTokens`。
-- **升级 Pi 时复核的行为差异。** `COMPACTION_SUMMARY_PREFIX` 不再导出（`src/agent/extensions/cache-observer.ts` 的本地常量）；`context` handler 收不到 system message；扩展的 `Image` 组件由 Pi 宿主把非 PNG 转成 Kitty 可用格式；每轮用 `sendCustomMessage(batch, { triggerTurn: true })` 启动：Pi 1.4.0 的 custom 触发与 `prompt()` 走同一个 `_prepareRun`（含压缩检查），但不校验认证、正在 streaming 时会改为 steer 并立即返回，所以 runtime 在调用前先检查 `isStreaming`。
+- **升级 Pi 时复核的行为差异。** `COMPACTION_SUMMARY_PREFIX` 不再导出（`src/agent/extensions/cache-observer.ts` 的本地常量）；`context` handler 收不到 system message；每轮用 `sendCustomMessage(batch, { triggerTurn: true })` 启动：Pi 1.4.0 的 custom 触发与 `prompt()` 走同一个 `_prepareRun`（含压缩检查），但不校验认证、正在 streaming 时会改为 steer 并立即返回，所以 runtime 在调用前先检查 `isStreaming`。
 - **脚本执行用 Pi 原生 codemode，不自建沙箱。** 自建的 `run_js`（子进程 + bubblewrap）已删除；QuickJS VM 的边界由 Pi 维护，本仓库只加宿主侧约束（脚本图片不进 session；脚本里的 `send` 不结束本轮）。需要真实命令行时走每 bot 的 rootless Docker 工作区，而不是放宽 VM。
-- **2026-11-01 审计确认仍需自写、不能换成 Pi 的部分**：摘要器（Pi 模板固定英文、不收图、保留 thinking）、`provider-guard`（Pi `timeoutMs` 不是整流截止）、`session-trim`（无公开 API）、任务 RPC 帧（`RpcClient` 写死 `spawn("node")`）、daemon IPC（Pi RPC 一进程一会话）、`cache-observer` 的 miss 估算（Pi 的 `core/cache-stats` 未导出）。不采用：运行中换工具集 / `context_edit` / 会话内 `setModel`（改写前缀）、skills 与 prompt templates（加 system 字节）。
+- **2026-11-01 审计确认仍需自写、不能换成 Pi 的部分**：摘要器（Pi 模板固定英文、不收图、保留 thinking）、`provider-guard`（Pi `timeoutMs` 不是整流截止）、`session-trim`（无公开 API）、任务 RPC 帧（`RpcClient` 写死 `spawn("node")`）、`cache-observer` 的 miss 估算（Pi 的 `core/cache-stats` 未导出）。不采用：运行中换工具集 / `context_edit` / 会话内 `setModel`（改写前缀）、skills 与 prompt templates（加 system 字节）。
 - **bot session 不加载项目或用户 extension**（`noExtensions`），shared `ModelRuntime` 只加载用户级已安装的 provider extension 以获得模型目录与认证。
 
 ## 正确性边界
