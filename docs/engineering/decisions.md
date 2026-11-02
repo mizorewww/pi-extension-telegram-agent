@@ -6,6 +6,9 @@
 
 - **`streamFunction` 包装是官方注入形态。** `Agent.streamFunction` 是公开可变字段；`createAgentSession()` 不接受 streamFn，只能事后包一层来注入 `cacheRetention`、timeout 和 provider watchdog。升级 Pi 必须验证这一包装仍生效（`src/agent/runtime.ts`）。
 - **扩展抛异常时 Pi 会退回默认摘要器。** 所以 `tg-compaction` 的任何失败都返回 `{ cancel: true }`，绝不 throw（`handleBeforeCompact`）。
+- **摘要输入可以超过摘要模型窗口，必须有分块降级。** 单发拒绝 = 压缩死锁（2026-11-02 线上：272 次失败后上下文涨到 314K 真实 token，provider 超时把 bot 打趴）。现在切块沿 `previousSummary` 滚动合并，同模型多次调用；图先丢、文本后截断。
+- **加密思维链签名是 provider 计费、本地不可见的成本。** Devin `sealed` signature 随每条 assistant 回放（实测 ~39K token/请求），Pi `estimateTokens` 只算 thinking 文本；`compactionTextBudget` 按 /4 折入 keepRecent 成本。
+- **`/new` 必须能打断让它不得不按的那次卡死。** 抢占式：abort run/retry/compaction + 停本 bot 任务 + 换 session（事务内清 obligations：新 session 看不见旧上下文）+ 重置工作区。
 - **图片预算必须在 Pi 准备压缩之前换算。** 文字小于预算时 Pi 在触发 `session_before_compact` 之前就返回，钩子来不及；所以在 `agent_end` / `compact()` 前临时调整 `keepRecentTokens`。
 - **升级 Pi 时复核的行为差异。** `COMPACTION_SUMMARY_PREFIX` 不再导出（`src/agent/extensions/cache-observer.ts` 的本地常量）；`context` handler 收不到 system message；每轮用 `sendCustomMessage(batch, { triggerTurn: true })` 启动：Pi 1.4.0 的 custom 触发与 `prompt()` 走同一个 `_prepareRun`（含压缩检查），但不校验认证、正在 streaming 时会改为 steer 并立即返回，所以 runtime 在调用前先检查 `isStreaming`。
 - **脚本执行用 Pi 原生 codemode，不自建沙箱。** 自建的 `run_js`（子进程 + bubblewrap）已删除；QuickJS VM 的边界由 Pi 维护，本仓库只加宿主侧约束（脚本图片不进 session；脚本里的 `send` 不结束本轮）。需要真实命令行时走每 bot 的 rootless Docker 工作区，而不是放宽 VM。

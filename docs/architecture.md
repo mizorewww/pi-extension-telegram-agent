@@ -72,8 +72,8 @@ Telegram create 不可回滚，所以：
 - 每 bot 一个 Pi session，打开前先算完整 context fingerprint；fingerprint 和 session 文件都匹配才恢复，否则保留旧文件、新建 session、推进 epoch。规则见 [cache.md](cache.md)。
 - Pi session 文件只增不减。恢复时 `src/agent/session-trim.ts` 把最近一次压缩保留窗口之前的内容裁掉（保留最后的 model / thinking 设置与 session id），只有 Pi 由新文件构建出的 context 与原文件逐字节相同才替换；原文件改名为 `.pre-trim-<时间>` 保留。
 - `bot_cursors`（业务消费位置，只增不减）与 `bot_visible_messages`（当前 context 真正可见的完整消息）分开维护。压缩或换 session 只替换后者。
-- 压缩由 Pi 原生触发（阈值 = `context_window − max(16384, context_window − compaction_threshold)`），摘要由 `tg-compaction` 用配置的 `compaction_model` 生成；失败或空摘要直接取消，不退回主模型、不退回 Pi 默认摘要器。
-- 图片在 session 里只存引用，Pi 的 chars/4 估算看不到它们。runtime 在 Pi 准备压缩**之前**按每张 1,100 token 临时缩小 `keepRecentTokens`，结束后恢复。
+- 压缩由 Pi 原生触发（阈值 = `context_window − max(16384, context_window − compaction_threshold)`），摘要由 `tg-compaction` 用配置的 `compaction_model` 生成；失败或空摘要直接取消，不退回主模型、不退回 Pi 默认摘要器。摘要输入超出模型窗口时按窗口切块、沿 `previousSummary` 滚动合并（同一模型多次调用），再不行先丢图后截断——任何大小的上下文都能就地恢复。
+- 图片在 session 里只存引用，Pi 的 chars/4 估算看不到它们；思维链签名（如 Devin 的 `sealed` signature）随回放计费同样不可见。runtime 在 Pi 准备压缩**之前**按每张图 1,100 token、每字节签名 /4 临时缩小 `keepRecentTokens`，结束后恢复。
 - 主请求追加新批次前检查图片字节预算（`context_image_budget_bytes`），超限先压缩；压缩失败则本轮不发请求、保留 cursor 与义务。HTTP 413 被归一为 Pi 可识别的 overflow，由 Pi 原生 compact-and-retry 一次。
 - 最近一条 assistant 是 error/aborted 时，阈值压缩被取消（避免在 provider 故障时叠加摘要请求）；overflow 恢复和手动压缩不受影响。
 
@@ -121,8 +121,9 @@ Telegram create 不可回滚，所以：
 ## Telegram 控制命令
 
 - 只识别 offset 0 的 `bot_command` entity：`/help`、`/status`、`/fire status`、`/task [status]` 公开；`/task cancel tN`、`/model`、`/compact`、`/new`、`/set`、`/fire [on|off]`（不带参数为切换）、`/box reset` 需要 `telegram_admins` 中的人类账号（只接受数字 user id）。带 `@bot_username` 时定向到该 bot，否则作用于收到命令的 bot。
-- 命令和回复的 message id 永久记录在 `telegram_control_messages`，**永不进入任何 provider context**。变更类命令串行执行，不 abort 在途回复；bot busy 时返回“请稍后”。
-- `/model`：按钮分页列出 Pi 当前已认证的全部模型；`/new`：用当前模型开新 session。两者共用同一个 session 切换：先建好新 session，再在一个事务里写 epoch、manifest、清空可见集，失败时旧 session 原样保留；旧 session 文件留在磁盘。
+- 命令和回复的 message id 永久记录在 `telegram_control_messages`，**永不进入任何 provider context**。除 `/new` 外的变更类命令串行执行，不 abort 在途回复；bot busy 时返回“请稍后”。
+- `/model`：按钮分页列出 Pi 当前已认证的全部模型；`/new`：用当前模型开新 session。两者共用同一个 session 切换：先建好新 session，再在一个事务里写 epoch、manifest、清空可见集与该 session 名下的未答 obligations，失败时旧 session 原样保留；旧 session 文件留在磁盘。
+- `/new` 是唯一抢占式命令：它是卡死逃生口，先 abort 在途 run/retry/compaction 与后台任务，再换 session 并重置工作区；切换中的 `/model` 不抢占。reset 窗口内到达的消息只排队不建义务，由新 session 作为普通事件继续看到。
 - `/set` 弹出按钮菜单（插话概率、冷却的固定预设，当前值打勾）；回调只接受预设值，校验后写穿 `telegram.config.ts`、更新内存中的同一 `BotConfig`，并原地刷新菜单。
 - `/status` 由确定性代码生成 Markdown，与 bot 发言走同一条本地 Markdown → entities 的经典 `sendMessage`（不用 Rich Message，旧客户端看不到）。
 
