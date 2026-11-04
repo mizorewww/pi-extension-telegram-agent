@@ -121,6 +121,7 @@ export class TaskProcess {
 		child.stderr.resume();
 		child.on("close", (code) => {
 			if (this.killTimer) clearTimeout(this.killTimer);
+			this.killTimer = null;
 			this.child = null;
 			this.events.onExit(code);
 		});
@@ -135,23 +136,20 @@ export class TaskProcess {
 		this.send(running ? { type: "steer", message: text } : { type: "prompt", message: text });
 	}
 
-	/** Orderly end: Pi exits once stdin closes. */
-	finish(): void {
-		this.child?.stdin.end();
-	}
-
-	cancel(): void {
-		if (!this.child) return;
-		this.send({ type: "abort" });
-		this.child.stdin.end();
+	cancel(): Promise<void> {
 		const child = this.child;
-		this.killTimer = setTimeout(() => {
+		if (!child) return Promise.resolve();
+		this.send({ type: "abort" });
+		child.stdin.end();
+		this.killTimer ??= setTimeout(() => {
 			void runDocker(["rm", "--force", this.container], {
 				dockerHost: this.config.dockerHost,
 				timeoutMs: 60_000,
-			}).catch(() => {});
-			child.kill("SIGKILL");
+			})
+				.catch(() => {})
+				.finally(() => child.kill("SIGKILL"));
 		}, 10_000);
+		return new Promise((resolve) => child.once("close", () => resolve()));
 	}
 
 	private send(command: Record<string, unknown>): void {
@@ -178,8 +176,8 @@ export class TaskProcess {
 		} catch {
 			return;
 		}
-		if (record.type === "tool_execution_start" && record.toolName === "report") {
-			const args = (record.args ?? {}) as { kind?: unknown; text?: unknown; files?: unknown };
+		if (record.type === "tool_execution_end" && record.toolName === "report" && !record.isError) {
+			const args = (record.result?.structuredContent ?? {}) as { kind?: unknown; text?: unknown; files?: unknown };
 			if (args.kind !== "progress" && args.kind !== "need_input" && args.kind !== "done") return;
 			if (typeof args.text !== "string" || !args.text.trim()) return;
 			const files = Array.isArray(args.files) ? args.files.filter((f): f is string => typeof f === "string") : [];

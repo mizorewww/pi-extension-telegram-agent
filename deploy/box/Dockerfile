@@ -19,7 +19,7 @@ RUN apt-get update \
 
 # Task runs: Pi, the packages the search workflow uses, and the CLIs its rules call.
 RUN npm install -g --ignore-scripts \
-      @earendil-works/pi-coding-agent@1.4.0 \
+      @earendil-works/pi-coding-agent@1.5.0 \
       @tiny-fish/cli@0.54.0 \
       agent-browser@0.41.0 \
  && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-x64 \

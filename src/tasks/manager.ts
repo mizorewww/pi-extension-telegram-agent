@@ -143,6 +143,7 @@ export class TaskManager {
 	}
 
 	async start(botId: string, originMessageId: number, workflow: string, title: string, brief: string): Promise<string> {
+		if (this.stopping) throw new TaskError("daemon is stopping");
 		const dir = this.deps.config.workflows[workflow];
 		if (!dir) throw new TaskError(`unknown workflow: ${workflow} (available: ${this.workflows.join(", ")})`);
 		const box = this.deps.box(botId);
@@ -166,9 +167,10 @@ export class TaskManager {
 		} catch (error) {
 			clearTimeout(task.timer);
 			this.live.delete(taskId);
-			this.setStatus(taskId, "failed");
+			if (!task.terminal && !this.stopping) this.setStatus(taskId, "failed");
 			throw new TaskError(`could not prepare the task: ${(error as Error).message}`);
 		}
+		if (task.terminal || this.stopping) throw new TaskError("task cancelled during preparation");
 		task.process.start(`${brief}\n\n（任务标题：${title}。完成时调用 report，kind 为 done。）`);
 		log.info("tasks", "task_started", { bot_id: botId, task_id: taskId, workflow });
 		return taskId;
@@ -183,26 +185,24 @@ export class TaskManager {
 	}
 
 	cancel(botId: string, taskId: string): void {
-		const task = this.ownLive(botId, taskId);
-		task.terminal = true;
-		this.setStatus(taskId, "cancelled");
-		task.process.cancel();
+		this.ownLive(botId, taskId);
+		this.finish(taskId, "cancelled");
 	}
 
-	/** /new discards the session tasks were launched under; cancel this bot's live tasks. */
-	cancelAllForBot(botId: string): void {
-		for (const [taskId, task] of [...this.live])
-			if (task.process.botId === botId) {
-				task.terminal = true;
-				this.setStatus(taskId, "cancelled");
-				task.process.cancel();
-			}
+	/** /new discards the session tasks were launched under. */
+	async cancelAllForBot(botId: string): Promise<void> {
+		await Promise.all(
+			[...this.live].filter(([, task]) => task.process.botId === botId).map(([id]) => this.finish(id, "cancelled")),
+		);
 	}
 
 	/** Daemon shutdown: stop the containers but keep the tasks resumable. */
 	stopAll(): void {
 		this.stopping = true;
-		for (const task of this.live.values()) task.process.cancel();
+		for (const [id, task] of this.live) {
+			task.process.cancel();
+			this.release(id);
+		}
 	}
 
 	private track(taskId: string, botId: string, createdAt: number): Live {
@@ -219,7 +219,7 @@ export class TaskManager {
 			this.deps.spawner,
 		);
 		const remaining = Math.max(5 * 60_000, createdAt + this.deps.config.timeoutMs - Date.now());
-		const timer = setTimeout(() => this.fail(taskId, "超过时间上限，已停止。"), remaining);
+		const timer = setTimeout(() => this.finish(taskId, "failed", "超过时间上限，已停止。"), remaining);
 		timer.unref?.();
 		const task: Live = {
 			process,
@@ -243,7 +243,7 @@ export class TaskManager {
 
 	private ownLive(botId: string, taskId: string): Live {
 		const task = this.live.get(taskId);
-		if (!task || task.process.botId !== botId) throw new TaskError(`no running task ${taskId}`);
+		if (!task || task.terminal || task.process.botId !== botId) throw new TaskError(`no running task ${taskId}`);
 		return task;
 	}
 
@@ -291,7 +291,7 @@ export class TaskManager {
 			this.deps.wake(row.bot_id, row.origin_message_id, true);
 			return;
 		}
-		this.complete(taskId, text, files);
+		this.finish(taskId, "done", text, files);
 	}
 
 	private onSettled(taskId: string, lastText: string | null): void {
@@ -301,39 +301,42 @@ export class TaskManager {
 		// Waiting for an answer keeps the process; otherwise a run that ends without `done`
 		// still delivers its last words as the result.
 		if (this.row(taskId)?.status === "need_input") return;
-		if (lastText) this.complete(taskId, lastText, []);
-		else this.fail(taskId, "任务没有给出结果就结束了。");
+		if (lastText) this.finish(taskId, "done", lastText);
+		else this.finish(taskId, "failed", "任务没有给出结果就结束了。");
 	}
 
-	private complete(taskId: string, text: string, files: string[]): void {
+	private finish(
+		taskId: string,
+		status: "done" | "failed" | "cancelled",
+		text?: string,
+		files: string[] = [],
+	): Promise<void> | void {
 		const task = this.live.get(taskId);
 		const row = this.row(taskId);
-		if (!task || !row || task.terminal) return;
+		if (!task || !row) return;
+		if (task.terminal) return task.process.cancel();
 		task.terminal = true;
-		this.setStatus(taskId, "done");
-		this.note(row, "done", text, files);
-		this.deps.wake(row.bot_id, row.origin_message_id, true);
-		task.process.finish();
-		log.info("tasks", "task_done", { bot_id: row.bot_id, task_id: taskId });
+		this.setStatus(taskId, status);
+		if (text != null) {
+			this.note(row, status === "done" ? "done" : "failed", text, files);
+			this.deps.wake(row.bot_id, row.origin_message_id, true);
+		}
+		const stopped = task.process.cancel();
+		this.release(taskId);
+		log.info("tasks", "task_finished", { bot_id: row.bot_id, task_id: taskId, status });
+		return stopped;
 	}
 
-	private fail(taskId: string, text: string): void {
+	private release(taskId: string): void {
 		const task = this.live.get(taskId);
-		const row = this.row(taskId);
-		if (!task || !row || task.terminal) return;
-		task.terminal = true;
-		this.setStatus(taskId, "failed");
-		this.note(row, "failed", text);
-		this.deps.wake(row.bot_id, row.origin_message_id, true);
-		task.process.cancel();
-		log.warn("tasks", "task_failed", { bot_id: row.bot_id, task_id: taskId });
+		clearTimeout(task?.timer);
+		if (!task?.process.started) this.live.delete(taskId);
 	}
 
 	private onExit(taskId: string, code: number | null): void {
 		const task = this.live.get(taskId);
 		if (!task) return;
-		clearTimeout(task.timer);
-		if (!task.terminal && !this.stopping) this.fail(taskId, `任务进程意外退出（code ${code ?? "?"}）。`);
-		this.live.delete(taskId);
+		if (!task.terminal && !this.stopping) this.finish(taskId, "failed", `任务进程意外退出（code ${code ?? "?"}）。`);
+		this.release(taskId);
 	}
 }

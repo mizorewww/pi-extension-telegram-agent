@@ -7,10 +7,9 @@ import {
 	classifyTelegramCreateFailure,
 	localFailureCategory,
 	retrySqliteBusy,
-	sendMarkdownTextAndPersist,
 	sendTextAndPersist,
 	SentMessagePersistenceError,
-	type MarkdownTextSendApi,
+	type TextSendApi,
 } from "./send.ts";
 
 export interface TelegramControlCommandPort {
@@ -18,7 +17,7 @@ export interface TelegramControlCommandPort {
 	consumeReply(botId: string, chatId: number, messageId: number): void;
 }
 
-export interface TelegramControlApi extends MarkdownTextSendApi {
+export interface TelegramControlApi extends TextSendApi {
 	answerCallbackQuery(id: string, text?: string): Promise<true>;
 	editMessageText(
 		chatId: number,
@@ -34,6 +33,22 @@ export type TelegramControlDeliveryResult =
 
 /** Command execution + Telegram send/canonical projection, with no uncertain remote retry. */
 export class TelegramControlCoordinator {
+	private readonly pending = new Set<Promise<unknown>>();
+
+	/** handle() claims synchronously before its first await; polling waits only for acceptance. */
+	dispatch(command: ParsedTelegramControlCommand): void {
+		const work = this.handle(command)
+			.catch(() => {
+				this.warn("dispatch", { bot_id: command.replyBotId, category: "local_failure" });
+			})
+			.finally(() => this.pending.delete(work));
+		this.pending.add(work);
+	}
+
+	async drain(): Promise<void> {
+		await Promise.allSettled([...this.pending]);
+	}
+
 	constructor(
 		private readonly db: Database,
 		private readonly commands: TelegramControlCommandPort,
@@ -63,24 +78,15 @@ export class TelegramControlCoordinator {
 		const api = this.apis.get(result.replyBotId)!;
 
 		try {
-			const { canonical } = result.markdown
-				? await sendMarkdownTextAndPersist(
-						this.db,
-						api,
-						result.replyBotId,
-						result.chatId,
-						result.markdown,
-						result.replyToMessageId,
-					)
-				: await sendTextAndPersist(
-						this.db,
-						api,
-						result.replyBotId,
-						result.chatId,
-						result.text,
-						result.replyToMessageId,
-						result.replyMarkup,
-					);
+			const { canonical } = await sendTextAndPersist(
+				this.db,
+				api,
+				result.replyBotId,
+				result.chatId,
+				result.text,
+				result.replyToMessageId,
+				result.replyMarkup,
+			);
 			try {
 				await retrySqliteBusy(() =>
 					this.commands.consumeReply(result.replyBotId, canonical.chat_id, canonical.message_id),

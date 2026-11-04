@@ -182,10 +182,11 @@ export class WorkBox {
 		await this.call(["exec", this.container, "mkdir", "-p", `${BOX_WORKDIR}/.home`, `${BOX_WORKDIR}/inbox`]);
 	}
 
-	async exec(command: string, timeoutS = BOX_DEFAULT_TIMEOUT_S): Promise<ExecResult> {
+	async exec(command: string, timeoutS = BOX_DEFAULT_TIMEOUT_S, signal?: AbortSignal): Promise<ExecResult> {
 		if (!command.trim()) throw new BoxError("empty command");
 		const seconds = Math.min(Math.max(1, Math.floor(timeoutS)), BOX_MAX_TIMEOUT_S);
 		await this.ensure();
+		signal?.throwIfAborted();
 		const started = Date.now();
 		// `timeout` inside the box ends the process tree; the host deadline backs it up.
 		const result = await this.call(
@@ -216,6 +217,12 @@ export class WorkBox {
 			timed_out: timedOut,
 			wall_ms: Date.now() - started,
 		};
+	}
+
+	/** /new and shutdown cancel all work for this bot; keep the volume until reset commits. */
+	async interrupt(): Promise<void> {
+		await this.starting;
+		await this.call(["kill", this.container]);
 	}
 
 	/** Destroy the container and its /work volume; the next call starts from the clean image. */

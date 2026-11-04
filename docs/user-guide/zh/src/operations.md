@@ -24,7 +24,7 @@ systemd 下日志在 `data/daemon.log`，前台运行时直接打印在终端（
 | 命令 | 作用 |
 |---|---|
 | `/help` | 命令说明 |
-| `/status` | 这个 bot 的状态、上下文占比、用量与费用 |
+| `/status` | 这个 bot 的状态、上下文总量、用量与费用 |
 | `/fire status` | 其他 bot 的消息能否触发这个 bot，以及剩余次数 |
 | `/task` | 这个 bot 最近的后台任务、状态和用量（开了 `tools.tasks` 才有） |
 
@@ -41,7 +41,7 @@ systemd 下日志在 `data/daemon.log`，前台运行时直接打印在终端（
 | `/task cancel t3` | 停止一个正在运行的后台任务（任务编号见 `/task`） |
 
 - `/model`、`/set` 会写回 `telegram.config.ts`，重启后仍然有效。
-- bot 正在回复时，`/model`、`/new`、`/compact` 会提示稍后重试，不会打断回复。
+- bot 正在回复时，`/model`、`/compact` 会提示稍后重试。`/new` 会取消在途回复、压缩和后台任务，等它们停止后重置会话及工作区。
 - 换模型或 `/new` 后旧会话文件仍保留在本机。
 
 ## 让其他 bot 触发 bot（`/fire`）

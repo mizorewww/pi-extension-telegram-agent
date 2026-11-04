@@ -10,7 +10,7 @@ Telegram ── poller × N ── daemon（唯一长驻进程）── SQLite
 ```
 
 - **daemon**（`src/daemon/index.ts`）：持有 SQLite、全部 poller 与每 bot 一个 `BotRuntime`。整个进程只创建一个 Pi `ModelRuntime`。
-- 依赖：Bun；Pi 各包（含 pi-codemode）精确锁定 1.4.0；Telegram 直接调用 Bot API（fetch long polling），无第三方 SDK。
+- 依赖：Bun；Pi 各包（含 pi-codemode、pi-schema）精确锁定 1.5.0；Telegram 直接调用 Bot API（fetch long polling），无第三方 SDK。
 
 ## 一条消息的路径
 
@@ -52,7 +52,7 @@ Telegram ── poller × N ── daemon（唯一长驻进程）── SQLite
 ## 回复义务
 
 - 人类直接点名（@、回复、配置名称）在 provider 调用前写入 `reply_obligations`。只有 send 返回终态（已发送、部分发送或结果未知）后才结清；结果未知或部分发送**永不自动重发**。
-- 健康 turn 没有公开发送、且待回复消息仍在上下文里时，最多追加一次固定补答提示；仍沉默就保留义务等下次触发，不会无限循环。
+- 健康 turn 没有公开发送、且待回复消息仍在上下文里时，由 Pi `agent_before_settle` 最多追加一次固定补答 custom message 并继续当前运行；仍沉默就保留义务等下次触发，不会无限循环。
 - provider 失败的 turn 保留义务、不写零用量 `llm_runs`。
 - `send` 关闭的观察 bot 不创建义务。
 
@@ -107,7 +107,7 @@ Telegram create 不可回滚，所以：
 ## codemode 威胁模型
 
 - **威胁**：群成员或网页内容通过 prompt injection 让 bot 执行任意 JS。
-- **边界**：脚本跑在 Pi 的 QuickJS（wasm）VM 里，位于独立 worker 线程；VM 的唯一出口是被注册为可调用的工具，没有 Node API、文件系统、网络、计时器。可调用工具 = 激活的 `direct` 工具（含 send、task、job）+ `codemode` 暴露的工具；脚本发消息受每轮 20 条的防死循环上限约束，`view_image` 是 model-only。
+- **边界**：脚本跑在 Pi 的 QuickJS（wasm）VM 里，位于独立 worker 线程；VM 的唯一出口是被注册为可调用的工具，没有 Node API、文件系统、网络、计时器。可调用工具 = 激活的 `direct` 工具（含 send、task、job）+ `codemode` 暴露的工具；send 采用 Pi 1.5 原生 `executionMode: "sequential"`，脚本发消息还受每轮 20 次的防死循环上限约束，额度在异步提交前预占，`view_image` 是 model-only。
 - **宿主侧约束**（`src/agent/extensions/codemode.ts`）：脚本 `image()` 产生的图片替换为固定文本，session 里永远不存 base64；输出长度沿用 Pi 的 `max_output_tokens`（默认 10,000 token）。
 - **残余风险**：wasm 引擎漏洞；VM 每次最多 256 MB，同进程最多 2 个 worker（`PI_CODEMODE_MAX_WORKERS`）。默认关闭。
 
@@ -121,14 +121,14 @@ Telegram create 不可回滚，所以：
 ## Telegram 控制命令
 
 - 只识别 offset 0 的 `bot_command` entity：`/help`、`/status`、`/fire status`、`/task [status]` 公开；`/task cancel tN`、`/model`、`/compact`、`/new`、`/set`、`/fire [on|off]`（不带参数为切换）、`/box reset` 需要 `telegram_admins` 中的人类账号（只接受数字 user id）。带 `@bot_username` 时定向到该 bot，否则作用于收到命令的 bot。
-- 命令和回复的 message id 永久记录在 `telegram_control_messages`，**永不进入任何 provider context**。除 `/new` 外的变更类命令串行执行，不 abort 在途回复；bot busy 时返回“请稍后”。
+- 命令和回复的 message id 永久记录在 `telegram_control_messages`，**永不进入任何 provider context**。只有 `/set`、`/model` 配置写回串行执行。命令完成与 poller 接收解耦，持久化 claim 后继续接收下一条 update，因此 `/new` 能抢占尚未完成的 `/compact`。
 - `/model`：按钮分页列出 Pi 当前已认证的全部模型；`/new`：用当前模型开新 session。两者共用同一个 session 切换：先建好新 session，再在一个事务里写 epoch、manifest、清空可见集与该 session 名下的未答 obligations，失败时旧 session 原样保留；旧 session 文件留在磁盘。
-- `/new` 是唯一抢占式命令：它是卡死逃生口，先 abort 在途 run/retry/compaction 与后台任务，再换 session 并重置工作区；切换中的 `/model` 不抢占。reset 窗口内到达的消息只排队不建义务，由新 session 作为普通事件继续看到。
+- `/new` 是唯一抢占式命令：它是卡死逃生口，先通过 Pi `abort()` 取消在途 run/retry/compaction，停止后台任务和工作区执行，等待旧 flush / 手动压缩收尾，再换 session 并重置工作区；切换中的 `/model` 不抢占。只清除 reset 开始时 high-water 以内的旧义务，并推进 cursor；reset 窗口内到达的直接点名照常持久化义务，由新 session 处理。
 - `/set` 弹出按钮菜单（插话概率、冷却的固定预设，当前值打勾）；回调只接受预设值，校验后写穿 `telegram.config.ts`、更新内存中的同一 `BotConfig`，并原地刷新菜单。
-- `/status` 由确定性代码生成 Markdown，与 bot 发言走同一条本地 Markdown → entities 的经典 `sendMessage`（不用 Rich Message，旧客户端看不到）。
+- `/status` 由确定性代码生成纯文本，用 Pi 原生 session/context 统计和 SQLite 保留期账目，不计算复杂构成占比。
 
 ## 进程管理与配置
 
-- 配置只有 `telegram.config.ts`（受信本机代码，`defineConfig()` 提供类型）+ `.env`（`key: value`，只放项目自己的 secret：bot token、`tiny_fish_api_key`、可选 `router_secret`）+ Pi auth store（模型凭据）。校验一次收集全部错误，未知或已废弃的字段直接报错并提示替代写法。
+- 配置只有 `telegram.config.ts`（受信本机代码，`defineConfig()` 提供类型）+ `.env`（`key: value`，只放项目自己的 secret：bot token、`tiny_fish_api_key`、可选 `router_secret`）+ Pi auth store（模型凭据）。配置类型与结构校验共用 TypeBox schema，由 Pi schema 执行严格校验（不进行类型强制转换）；未知字段直接报错。跨字段、文件存在性和凭据是否配置仍由业务代码检查。
 - 进程由 systemd user unit 托管（见 [runbook](runbooks/daemon.md)），仓库不自带 start/stop 控制器；`bun run start` 只是前台运行入口。daemon 启动最早一步用 `openSync(wx)` 独占 pid 文件，记录的 pid 仍存活就拒绝启动，绝不让两个 daemon 轮询同一 token。
 - 一个工作目录只对应一个群：`data/`、DB、session、pid 都由工作目录决定。多群必须用隔离的 clone。

@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Start with the read-only diagnosis; it shows where things got stuck:
+Start with the read-only report; compare recent requests, pending replies and logs:
 
 ```bash
 bun run debug -- --since 30m
@@ -10,7 +10,7 @@ Do not delete `data/` or pid files "just to try".
 
 ## Startup reports configuration errors
 
-All problem fields are listed at once with the reason (values such as tokens are not echoed). Fix `telegram.config.ts` or `.env` and restart; if the model is not ready, fix it with Pi `/login` and `/model`.
+Configuration errors identify problem fields and their reasons (values such as tokens are not echoed). Fix `telegram.config.ts` or `.env` and restart; if the model is not ready, fix it with Pi `/login` and `/model`.
 
 ## The configuration is valid but the bot is not online
 
@@ -23,7 +23,7 @@ Then read the log (`data/daemon.log` under systemd). Typical causes: a wrong tok
 ## The bot ignores a mention
 
 - Check that group privacy is off in BotFather and the bot is in the right group with permission to post.
-- Run `bun run debug`: `pending_reply_obligation` means the reply is still owed (it is sent on the next trigger or restart); `route_without_run` means the message was routed but no request ran, so look for `flush_failed` / `provider_attempt_failed` in the log.
+- Run `bun run debug`: `context.pending_reply_obligations > 0` means replies are still owed (retried on the next trigger or restart). Compare `claims` and `runs`, then look for `flush_failed` / `provider_attempt_failed` in the log.
 - 401: the token was revoked; fix `.env` and restart.
 - 409: another process uses the same token. Make sure only one daemon runs (do not run another `bun run start` next to systemd, and do not start the same token on another machine).
 

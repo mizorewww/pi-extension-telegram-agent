@@ -80,10 +80,6 @@ export function buildCompactionContent(
 	return content;
 }
 
-function contextImageCount(entry: SessionEntry): number {
-	return entryImageRefs(entry).length;
-}
-
 /**
  * Encrypted reasoning signatures ride along on every assistant replay (the provider verifies
  * and continues the chain), but Pi's estimateTokens only counts `thinking` text. Charge the
@@ -120,16 +116,14 @@ export function compactionTextBudget(entries: readonly SessionEntry[], keepRecen
 	const boundaryStart = compactionBoundaryStart(entries);
 	let piTokens = 0;
 	let chargedTokens = 0;
-	let images = 0;
 	for (let index = entries.length - 1; index >= boundaryStart && chargedTokens < keepRecentTokens; index--) {
 		const entry = entries[index]!;
-		const entryImages = contextImageCount(entry);
+		const entryImages = entryImageRefs(entry).length;
 		const entryTokens = sessionEntryToContextMessages(entry).reduce((sum, message) => sum + estimateTokens(message), 0);
 		piTokens += entryTokens;
-		images += entryImages;
 		chargedTokens += entryTokens + entryImages * CONTEXT_IMAGE_TOKEN_ESTIMATE + contextSignatureTokens(entry);
 	}
-	return images > 0 && chargedTokens >= keepRecentTokens
+	return chargedTokens > piTokens && chargedTokens >= keepRecentTokens
 		? Math.min(keepRecentTokens, Math.max(1, piTokens))
 		: keepRecentTokens;
 }
@@ -158,8 +152,7 @@ export interface CompactionSummaryOptions {
 	onUsage: (usage: Awaited<ReturnType<ModelRuntime["completeSimple"]>>["usage"]) => void;
 }
 
-type SummaryUsage = Awaited<ReturnType<ModelRuntime["completeSimple"]>>["usage"];
-type SummaryResult = { summary: string; usage: SummaryUsage } | { failure: string };
+type SummaryResult = { summary: string } | { failure: string };
 
 /** Same accounting the window check uses: text at bytes/2 plus the flat per-image charge. */
 function compactionContentTokens(content: string | (TextContent | ImageContent)[]): number {
@@ -342,7 +335,7 @@ export async function generateCompactionSummary(
 		}
 		const summary = contentText(result.content);
 		if (!summary.trim()) return { failure: "empty summary" };
-		return { summary, usage: result.usage };
+		return { summary };
 	};
 
 	const fullContent = buildCompactionContent(messages, prep.previousSummary, resolveImage);
@@ -360,7 +353,6 @@ export async function generateCompactionSummary(
 		input_tokens_estimated: promptTokens + compactionContentTokens(fullContent),
 	});
 	let rolling = prep.previousSummary;
-	let usage: SummaryUsage | undefined;
 	for (const [index, chunk] of chunks.entries()) {
 		signal.throwIfAborted();
 		const extra = { chunk: `${index + 1}/${chunks.length}` };
@@ -375,7 +367,6 @@ export async function generateCompactionSummary(
 		const result = await runSummary(content, compactionContentImages(content), extra);
 		if ("failure" in result) return result;
 		rolling = result.summary;
-		usage = result.usage;
 	}
-	return rolling === undefined || !rolling.trim() ? { failure: "empty summary" } : { summary: rolling, usage: usage! };
+	return rolling === undefined || !rolling.trim() ? { failure: "empty summary" } : { summary: rolling };
 }

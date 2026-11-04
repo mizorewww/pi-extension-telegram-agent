@@ -1,50 +1,40 @@
 #!/usr/bin/env bun
 
 import { Database } from "bun:sqlite";
+import { parseArgs } from "node:util";
 
 import { join } from "node:path";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { loadConfig } from "../src/config.ts";
 import { readPid, pidAlive } from "../src/daemon/pid.ts";
-import { buildDebugReport, parseDebugDuration, type DebugModelReasoning } from "../src/observability/debug-report.ts";
+import { buildDebugReport, parseDebugDuration } from "../src/observability/debug-report.ts";
 import { readStructuredLogTail } from "../src/observability/log.ts";
-import { inspectProviderContext } from "../src/observability/provider-context.ts";
-import { inspectModelReasoning } from "../src/agent/model-runtime.ts";
-import { parsePiModelReference } from "../src/agent/model-ref.ts";
-import { inspectVideoTranscoder } from "../src/media/video-frames.ts";
 
 function usage(): string {
-	return "Usage: bun run debug -- [--bot <id>] [--since <30s|15m|2h|7d>] [--show-provider-content]\n";
+	return "Usage: bun run debug -- [--bot <id>] [--since <30s|15m|2h|7d>]\n";
 }
 
 export async function main(args = process.argv.slice(2), rootDir = process.cwd()): Promise<number> {
-	let botId: string | null = null;
-	let sinceMs = 30 * 60_000;
-	let showProviderContent = false;
-	for (let index = 0; index < args.length; index++) {
-		const arg = args[index];
-		if (arg === "--help" || arg === "-h") {
-			process.stdout.write(usage());
-			return 0;
-		}
-		if (arg === "--bot" && args[index + 1]) {
-			botId = args[++index]!;
-			continue;
-		}
-		if (arg === "--since" && args[index + 1]) {
-			const parsed = parseDebugDuration(args[++index]!);
-			if (parsed == null) {
-				process.stderr.write(usage());
-				return 2;
-			}
-			sinceMs = parsed;
-			continue;
-		}
-		if (arg === "--show-provider-content") {
-			showProviderContent = true;
-			continue;
-		}
+	let values: { bot?: string; since?: string; help?: boolean };
+	try {
+		({ values } = parseArgs({
+			args,
+			options: {
+				bot: { type: "string" },
+				since: { type: "string", default: "30m" },
+				help: { type: "boolean", short: "h" },
+			},
+		}));
+	} catch {
+		process.stderr.write(usage());
+		return 2;
+	}
+	if (values.help) {
+		process.stdout.write(usage());
+		return 0;
+	}
+	const botId = values.bot;
+	const sinceMs = parseDebugDuration(values.since!);
+	if (sinceMs == null) {
 		process.stderr.write(usage());
 		return 2;
 	}
@@ -53,64 +43,10 @@ export async function main(args = process.argv.slice(2), rootDir = process.cwd()
 	try {
 		const config = loadConfig(rootDir, { identityOnly: true });
 		const configuredIds = config.bots.map((bot) => bot.id);
-		if (showProviderContent && botId == null) {
-			process.stderr.write(
-				"--show-provider-content requires --bot <id> to prevent an accidental multi-bot content dump.\n",
-			);
-			return 2;
-		}
 		const botIds = botId == null ? configuredIds : [botId];
 		if (botId != null && !configuredIds.includes(botId)) {
 			process.stderr.write(`Unknown bot id. Valid ids: ${configuredIds.join(", ")}\n`);
 			return 2;
-		}
-		let modelReasoning: DebugModelReasoning[] | undefined;
-		try {
-			const runtime = await ModelRuntime.create();
-			const selections = [
-				...config.bots.flatMap((bot) => {
-					if (!bot.provider || !bot.model) return [];
-					const compact = parsePiModelReference(bot.compactionModel)!;
-					return [
-						{
-							bot_id: bot.id,
-							scope: "main" as const,
-							provider: bot.provider,
-							model: bot.model,
-							requested: bot.reasoningEffort as ModelThinkingLevel,
-						},
-						{
-							bot_id: bot.id,
-							scope: "compaction" as const,
-							provider: compact.provider,
-							model: compact.model,
-							requested: compact.thinkingLevel as ModelThinkingLevel,
-						},
-					];
-				}),
-				...(config.media.mode === "hybrid"
-					? (() => {
-							const vision = parsePiModelReference(config.media.visionModel)!;
-							return [
-								{
-									bot_id: "vision",
-									scope: "vision" as const,
-									provider: vision.provider,
-									model: vision.model,
-									requested: vision.thinkingLevel as ModelThinkingLevel,
-								},
-							];
-						})()
-					: []),
-			];
-			modelReasoning = selections.flatMap((selection) => {
-				const model = runtime.getModel(selection.provider, selection.model);
-				if (!model) return [];
-				const capability = inspectModelReasoning(model, selection.requested);
-				return [{ ...selection, ...capability }];
-			});
-		} catch {
-			modelReasoning = undefined;
 		}
 		db = new Database(config.dbPath, { readonly: true, strict: true });
 		const pid = readPid(join(config.dataDir, "daemon.pid"));
@@ -120,31 +56,8 @@ export async function main(args = process.argv.slice(2), rootDir = process.cwd()
 			sinceMs,
 			logs: readStructuredLogTail(join(config.dataDir, "daemon.log")),
 			daemon: { pid, alive: pid != null && pidAlive(pid) },
-			modelReasoning,
-			videoTranscoder: {
-				required: config.media.mode !== "off",
-				available: inspectVideoTranscoder(),
-			},
 		});
-		const providerContexts = Object.fromEntries(
-			botIds.map((id) => {
-				try {
-					return [
-						id,
-						inspectProviderContext(
-							db!,
-							config,
-							id,
-							showProviderContent,
-							modelReasoning?.find((entry) => entry.bot_id === id && entry.scope === "main"),
-						),
-					];
-				} catch {
-					return [id, { unavailable: true }];
-				}
-			}),
-		);
-		process.stdout.write(`${JSON.stringify({ ...report, provider_contexts: providerContexts }, null, 2)}\n`);
+		process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 		return 0;
 	} catch {
 		process.stderr.write("Debug report unavailable: invalid local configuration or database state.\n");

@@ -61,24 +61,12 @@ export function inspectVideoTranscoder(runner: VideoCommandRunner = defaultRunne
 	return runner.which("ffmpeg") != null && runner.which("ffprobe") != null;
 }
 
-/** Human-facing operator warning; absence never blocks chat or daemon readiness. */
-export function videoTranscoderAdvisory(required: boolean, available: boolean): string | null {
-	if (!required || available) return null;
-	return "warning: video frame sampling is disabled because ffmpeg/ffprobe are unavailable; install the FFmpeg package and restart (it is used only to sample video frames for the model context; chat, images, and sticker sending continue normally)";
-}
-
 /** Fixed representative positions keep extraction deterministic and explainable. */
 export function sampleVideoFrameFractions(requested = VIDEO_FRAME_MAX): number[] {
 	const count = Math.min(VIDEO_FRAME_MAX, Math.max(0, Math.floor(requested)));
 	if (count === 1) return [0.5];
 	if (count === 2) return [1 / 3, 2 / 3];
 	return count === 3 ? [0.2, 0.5, 0.8] : [];
-}
-
-function frameCount(durationSeconds: number): number {
-	if (durationSeconds < 1) return 1;
-	if (durationSeconds < 3) return 2;
-	return VIDEO_FRAME_MAX;
 }
 
 function parseDuration(stdout: string): number | null {
@@ -136,7 +124,7 @@ export async function extractVideoFrames(
 		const durationSeconds = parseDuration(probe.stdout);
 		if (durationSeconds == null) return { ok: false, outcome: "video_probe_failed" };
 
-		const positions = sampleVideoFrameFractions(frameCount(durationSeconds));
+		const positions = sampleVideoFrameFractions(durationSeconds < 1 ? 1 : durationSeconds < 3 ? 2 : VIDEO_FRAME_MAX);
 		const frames: VideoFrame[] = [];
 		for (let index = 0; index < positions.length; index++) {
 			const position = positions[index]!;

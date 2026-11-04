@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, openSync, closeSync, readSync, renameSync, rmSync, statSync } from "node:fs";
+import { openSync, closeSync, readSync, existsSync, statSync, renameSync, rmSync, chmodSync } from "node:fs";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type LogFields = Readonly<Record<string, unknown>>;
@@ -7,8 +7,6 @@ export const LOG_SCHEMA_VERSION = 1;
 const MAX_LOG_FIELDS = 24;
 const MAX_LOG_STRING = 256;
 const MAX_LOG_LINE_BYTES = 4096;
-const DEFAULT_LOG_MAX_BYTES = 8 * 1024 * 1024;
-const DEFAULT_LOG_GENERATIONS = 3;
 
 const SENSITIVE_KEY =
 	/(?:^|_)(?:token|secret|password|authorization|cookie|api[_-]?key|prompt|content|body|response|query|url|path|stack|persona)(?:$|_)/i;
@@ -125,26 +123,15 @@ export function errorCategory(error: unknown): string {
 	return typeof error === "string" ? "string_error" : "unknown_error";
 }
 
-/** Rotate before daemon spawn. `daemon.log` is generation 0; `.1` is the newest archive. */
-export function rotateLogFile(
-	logPath: string,
-	maxBytes = DEFAULT_LOG_MAX_BYTES,
-	generations = DEFAULT_LOG_GENERATIONS,
-): void {
-	if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("maxBytes must be a positive integer");
-	if (!Number.isSafeInteger(generations) || generations < 1 || generations > 16) {
-		throw new Error("generations must be an integer in [1,16]");
-	}
-	if (existsSync(logPath) && statSync(logPath).size >= maxBytes) {
-		rmSync(`${logPath}.${generations}`, { force: true });
-		for (let index = generations - 1; index >= 1; index--) {
+/** systemd ExecStartPre: fixed 8 MiB / three archives, private permissions. */
+export function rotateLogFile(logPath: string): void {
+	if (existsSync(logPath) && statSync(logPath).size >= 8 * 1024 * 1024) {
+		rmSync(`${logPath}.3`, { force: true });
+		for (let index = 2; index >= 1; index--)
 			if (existsSync(`${logPath}.${index}`)) renameSync(`${logPath}.${index}`, `${logPath}.${index + 1}`);
-		}
 		renameSync(logPath, `${logPath}.1`);
 	}
-	for (const candidate of [logPath, ...Array.from({ length: generations }, (_, index) => `${logPath}.${index + 1}`)]) {
-		if (existsSync(candidate)) chmodSync(candidate, 0o600);
-	}
+	for (const suffix of ["", ".1", ".2", ".3"]) if (existsSync(logPath + suffix)) chmodSync(logPath + suffix, 0o600);
 }
 
 export function readStructuredLogTail(logPath: string, maxBytes = 64 * 1024, maxRecords = 100): LogRecord[] {

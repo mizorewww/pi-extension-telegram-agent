@@ -24,7 +24,7 @@ Anyone:
 | Command | Effect |
 |---|---|
 | `/help` | command help |
-| `/status` | this bot's state, context share, usage and cost |
+| `/status` | this bot's state, context size, usage and cost |
 | `/fire status` | whether other bots' messages can trigger this bot, and how much budget is left |
 | `/task` | this bot's recent background tasks, their status and usage (only with `tools.tasks`) |
 
@@ -41,7 +41,7 @@ Only people in `telegram_admins`:
 | `/task cancel t3` | stop a running background task (task ids are listed by `/task`) |
 
 - `/model` and `/set` are written back to `telegram.config.ts` and survive restarts.
-- While a bot is replying, `/model`, `/new` and `/compact` ask you to retry later instead of interrupting it.
+- While a bot is replying, `/model` and `/compact` ask you to retry later. `/new` cancels the active reply, compaction and background tasks, waits for them to stop, then resets the session and workspace.
 - After a model change or `/new`, the old session file stays on your machine.
 
 ## Letting other bots trigger a bot (`/fire`)

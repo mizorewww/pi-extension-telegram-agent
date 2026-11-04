@@ -3,41 +3,15 @@
 // Any change here must bump CACHE_SCHEMA_VERSION and start a new context epoch;
 // test/cache.test.ts locks the schema hash.
 
-import { Type } from "@earendil-works/pi-ai";
+import { Type, type Static } from "typebox";
 import { sha256Short } from "./prompt.ts";
 
-export interface SendFile {
-	path: string;
-	as?: "photo" | "document" | "auto";
-}
-
-export interface SendParams {
-	message?: string;
-	sticker?: string;
-	reply_to?: number;
-	reaction?: string;
-	files?: SendFile[];
-}
-
-export interface TaskParams {
-	action: "start" | "message" | "cancel" | "status";
-	workflow?: string;
-	title?: string;
-	brief?: string;
-	task_id?: string;
-	text?: string;
-	for_message?: number;
-}
-
-export interface ViewImageParams {
-	message_id: number;
-}
-
-export interface SearchParams {
-	query?: string;
-	url?: string;
-	offset?: number;
-}
+export type SendParams = Static<ReturnType<typeof sendToolWithFiles>["parameters"]>;
+export type SendFile = NonNullable<SendParams["files"]>[number];
+export type TaskParams = Static<ReturnType<typeof taskToolDefinition>["parameters"]>;
+export type ViewImageParams = Static<(typeof TOOL_DEFS)[2]["parameters"]>;
+export type SearchParams = Static<(typeof TOOL_DEFS)[1]["parameters"]>;
+export type JobParams = Static<typeof JOB_TOOL_DEF.parameters>;
 
 export const SEND_SUCCESS_ACK = "ok";
 export const SEND_NO_RETRY_ACK = "no_retry";
@@ -292,12 +266,6 @@ export const JOB_TOOL_DEF = {
 	),
 } as const;
 
-export interface JobParams {
-	title: string;
-	code: string;
-	for_message?: number;
-}
-
 /** The send declaration for a bot with a work box: the same tool plus `files`. */
 export function sendToolWithFiles() {
 	const send = TOOL_DEFS[0];
@@ -342,9 +310,11 @@ export function taskToolDefinition(workflows: readonly string[]) {
 					Type.Literal("status"),
 				]),
 				workflow: Type.Optional(
-					Type.Union(
-						workflows.map((name) => Type.Literal(name)),
-						{ description: "start：用哪个工作流" },
+					Type.Unsafe<string>(
+						Type.Union(
+							workflows.map((name) => Type.Literal(name)),
+							{ description: "start：用哪个工作流" },
+						),
 					),
 				),
 				title: Type.Optional(Type.String({ maxLength: 80, description: "start：简短标题" })),
@@ -365,43 +335,11 @@ export function taskToolDefinition(workflows: readonly string[]) {
 	};
 }
 
-export interface BotToolCapabilities {
-	send: boolean;
-	search: boolean;
-	viewImage: boolean;
-	codemode: boolean;
-	box: boolean;
-	taskWorkflows: readonly string[];
-}
-
 export interface ProviderToolProtocol {
 	name: string;
 	description: string;
 	parameters: unknown;
 	outputSchema?: unknown;
-}
-
-/** Fixed-order tool definitions enabled for a bot: the single authority for runtime and diagnostics. */
-export function botToolDefinitions(capabilities: BotToolCapabilities) {
-	const sendDef = capabilities.box ? sendToolWithFiles() : TOOL_DEFS[0];
-	const enabled: Record<string, boolean> = {
-		send: capabilities.send,
-		search: capabilities.search,
-		view_image: capabilities.viewImage,
-		task: capabilities.taskWorkflows.length > 0,
-		job: capabilities.codemode && capabilities.send,
-	};
-	const active = [
-		sendDef,
-		TOOL_DEFS[1],
-		TOOL_DEFS[2],
-		taskToolDefinition(capabilities.taskWorkflows),
-		JOB_TOOL_DEF,
-	].filter((tool) => enabled[tool.name]);
-	const script = capabilities.codemode
-		? [CODEMODE_TOOL_DEFS[0], ...(capabilities.box ? CODEMODE_TOOL_DEFS.slice(1) : [])]
-		: [];
-	return { active, script };
 }
 
 /** Hash every provider-visible field in registration order; labels stay local-only. */

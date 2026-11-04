@@ -9,19 +9,9 @@ import type { Database } from "bun:sqlite";
 /** The trigram index only matches needles of at least three characters. */
 const INDEX_MIN_CHARS = 3;
 
-export interface MessageQuery {
-	ids?: number[];
-	since?: string;
-	until?: string;
-	before_id?: number;
-	after_id?: number;
-	sender?: number | string;
-	reply_to?: number;
-	has_media?: "photo" | "video" | "sticker" | "document" | "any";
-	text_contains?: string;
-	order?: "desc" | "asc" | "relevance";
-	limit?: number;
-}
+import type { Static } from "typebox";
+import type { CODEMODE_TOOL_DEFS } from "../agent/tools.ts";
+export type MessageQuery = Static<(typeof CODEMODE_TOOL_DEFS)[0]["parameters"]>;
 
 export interface MessageDto {
 	id: number;

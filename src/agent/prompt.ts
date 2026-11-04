@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-export const CACHE_SCHEMA_VERSION = 46; // v46: render Markdown math as images before sending
+export const CACHE_SCHEMA_VERSION = 47; // v47: Pi 1.5 native before-settle reply repair and extension order
 
 /** Marks system-appended blocks so the model never mistakes them for a group member's message. */
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";

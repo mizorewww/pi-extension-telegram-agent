@@ -15,24 +15,11 @@
 ```bash
 bun run debug -- --since 30m
 bun run debug -- --bot A --since 2h
-bun run debug -- --bot A --show-provider-content   # 敏感，见下
 ```
 
-只读：配置（不读 secret、不查 Pi 默认）、本机 Pi 模型目录、只读 SQLite 与 Pi session、PATH 工具、日志尾部 64 KiB。不联网、不写库。输出 JSON：daemon 存活状态、每 bot 的 cursor / high-water / 回复义务 / pending dispatch、最近 claims、runs、事件、日志、`findings`，以及重建的 provider 上下文结构（只有 hash 与长度）。
+只读：本地配置身份、SQLite 和日志尾部 64 KiB；不读取 `.env`、Pi 凭据或 session 内容，不联网、不写库。JSON schema 2 输出 daemon 存活状态、每 bot 的 cursor / high-water / 回复义务数量 / pending dispatch、保留期用量、最近 claims、runs、事件种类与结构化日志。
 
-`--show-provider-content` 必须配合单个 `--bot`，把完整 system prompt 与当前消息投影写到 stdout，可能包含 persona、群聊正文、工具结果与 thinking。只在本机短暂查看，不要贴进 issue 或存成文件。
-
-| finding | 含义 | 下一步 |
-|---|---|---|
-| `unsupported_reasoning_effort` | 配置的 reasoning 不在该模型支持列表中 | 改成支持的档位（启动也会拒绝） |
-| `video_transcoder_unavailable` | 当前模式需要抽帧但缺 `ffmpeg`/`ffprobe` | 安装 FFmpeg 后重启；不影响其它功能 |
-| `cursor_backlog` | 有未消费的事件 | 结合最近 claim 判断；没有触发时属正常 |
-| `pending_reply_obligation` | 直接点名的消息还没回复 | 查 flush/provider 失败；重启会自动恢复 |
-| `pending_telegram_dispatch` | 有一条 update 的路由交接没完成 | 查 `telegram_poller.dispatch_pending`；不要手删 |
-| `route_without_run` | 启动的 claim 120 秒后仍没有对应 run | 查 `flush_failed`、`provider_attempt_failed` |
-| `model_silence` | run 没有公开发言 | 直接点名会补答一次；单凭本地文本不能认定沉默 |
-| `tool_preflight_failed` | send 在 Telegram 调用前被本地拒绝 | 按 category 修输入/可见性/目录 |
-| `send_degraded` | 发送处于 committed/partial/unknown | 都不能自动重试；按 stage 修本地副作用 |
+报告只收集事实，不输出自动推断的 `findings`，也不再重建或导出 provider payload。用下面的证据梯定位问题：例如 `context.pending_reply_obligations > 0` 表示有待答消息；claim 已开始但没有对应时间的 run 时，查看 `flush_failed` / `provider_attempt_failed`。
 
 报告是线索不是历史证明：窗口外或被保留期删掉的证据会缺失；概率触发合法地沉默或跳过。
 
@@ -58,7 +45,7 @@ bun run debug -- --bot A --show-provider-content   # 敏感，见下
 1. `messages.media` 与 `media_file_ids`：哪个 bot 拥有可用的 `file_id`。
 2. `media.local_path`：本地文件是否就绪（只在 vision / view_image 用到时下载，不代表已送入模型）。
 3. 视频先看 `video_transcoder`；`video_probe_failed` / `video_frame_extraction_failed` 是本地抽帧失败。
-4. hybrid 的文字描述：`agent_events.kind=vision` 的 outcome，非空 `media.vision` 与对应 `media_update` event。`view_image`：`tool_view_image` 事件与 `llm_runs.images_attached`。
+4. hybrid 的文字描述：`agent_events.kind=vision` 的 outcome，非空 `media.vision` 与对应 `media_update` event。`view_image`：`tool_view_image` 事件的结果与图片数量。
 5. 压缩后的 `media_cache.post_compaction_pruned` 只给聚合数字。
 
 ## 日志契约
@@ -79,7 +66,7 @@ bun run debug -- --bot A --show-provider-content   # 敏感，见下
 1. 成功、合法 no-op/沉默、可重试失败、不可重试/结果未知分别怎么观察？
 2. 用哪些已有 identity 跨边界关联？
 3. 哪些字段绝不能记？每个事件/查询/队列的上限是多少？
-4. `bun run debug` 能否判断故障停在哪一层？需要新 finding 吗？
+4. `bun run debug` 能否判断故障停在哪一层？需要补充哪条有界事实？
 5. Cache impact 是否仍为 NONE、0 新增 LLM 调用？
 
 只写“加日志”而没有状态区分、隐私边界与验证，不算完成。修复时改职责拥有层，日志只补缺失的可观察状态，绝不用重试掩盖结果未知的提交。

@@ -13,6 +13,7 @@ import {
 	VERSION as PI_VERSION,
 	type AgentSession,
 	type AgentSessionEvent,
+	type InlineExtension,
 	type CompactionResult,
 	type ModelRuntime,
 	type SessionBeforeCompactEvent,
@@ -92,12 +93,11 @@ import {
 	COMPACTION_SUMMARY_PROMPT,
 	REPLY_RECOVERY_PROMPT,
 	SHARED_PROTOCOL,
-	sha256Short,
 } from "./prompt.ts";
 import { guardProviderCall, providerRetryPolicy } from "./provider-guard.ts";
 import type { RoutingTrigger, TriggerResult, TriggerSource } from "./router.ts";
-import { BotRuntimeTelemetry, emptyInputMetrics, restoreLastCompaction } from "./runtime-telemetry.ts";
-import { buildBotRuntimeTools } from "./runtime-tools.ts";
+import { BotRuntimeTelemetry } from "./runtime-telemetry.ts";
+import { buildBotRuntimeTools, type BotTurn } from "./runtime-tools.ts";
 import { TELEGRAM_SERIALIZER_VERSION } from "./serialize.ts";
 import { trimSessionBeforeCompaction } from "./session-trim.ts";
 import {
@@ -112,7 +112,6 @@ import {
 	scanTurnEventWindow,
 	unseenEvents,
 } from "./token-packer.ts";
-import { toolProtocolHash } from "./tools.ts";
 
 export type ModelControlSelection = Pick<BotConfig, "provider" | "model" | "reasoningEffort">;
 export type ModelControlResult =
@@ -149,19 +148,7 @@ const delay = (ms: number) =>
 		setTimeout(resolve, ms).unref?.();
 	});
 
-/** Bounded poll for a flag another in-flight operation clears in its own finally. */
-const waitForFlag = (off: () => boolean, ms: number): Promise<void> =>
-	new Promise((resolve) => {
-		const start = Date.now();
-		const poll = () => (off() || Date.now() - start >= ms ? resolve() : setTimeout(poll, 50).unref?.());
-		poll();
-	});
-
 export class BotRuntime {
-	private db: Database;
-	private bot: BotConfig;
-	private config: AppConfig;
-	private modelRuntime: ModelRuntime;
 	private visionExecutor: VisionExecutor | null;
 	private api: BotApi;
 	private readonly botApis: ReadonlyMap<string, MediaDownloadApi>;
@@ -169,7 +156,6 @@ export class BotRuntime {
 	private model!: NonNullable<ReturnType<ModelRuntime["getModel"]>>; // resolved in init()
 	private compactionModel!: NonNullable<ReturnType<ModelRuntime["getModel"]>>;
 	private compactionReasoning: PiRequestThinkingLevel = "low";
-	private running = false;
 	// Flush state machine (REQ-AGENT-0001): `flushing` is owned locally and set synchronously
 	// at trigger time — never gated on SDK events. While flushing, triggers only coalesce
 	// into `pendingTrigger`; the flush loop drains it (burst-merge semantics unchanged).
@@ -180,8 +166,8 @@ export class BotRuntime {
 	private flushPromise: Promise<void> | null = null;
 	private cooldownUntil = 0;
 	private cooldownAfterFlush = false;
-	private controlCompacting = false;
 	private controlChangingModel = false;
+	private compactionPromise: Promise<CompactionResult> | null = null;
 	private contextFingerprintInput!: ContextFingerprintInput;
 	private createModelSession!: (
 		model: Model<Api>,
@@ -191,7 +177,7 @@ export class BotRuntime {
 	/** Last assistant message ended in error/abort; auto-compaction waits for a healthy turn. */
 	private lastTurnFailed = false;
 	/** Set by the irreversible send boundary, not by provider health or usage telemetry. */
-	private turnSendOutcome: "none" | "sent" | "unknown" = "none";
+	private turn: BotTurn = { sends: 0, outcome: "none" };
 	private lastControlCompact: RuntimeControlSnapshot["lastCompact"] = null;
 	/** While set, triggers only coalesce: the wedged turn is being aborted for /new. */
 	private resettingSession = false;
@@ -201,12 +187,18 @@ export class BotRuntime {
 	private readonly telemetry: BotRuntimeTelemetry;
 	private contextFingerprint = "";
 	private staticPrefixTokenEstimate = 0;
-	private sendsThisTurn = 0;
 	/** The provider turn in flight: new direct addresses are steered into it (steerDirectAddress). */
-	private activeTurn: { steeredThrough: number; steering: Promise<void> } | null = null;
+	private activeTurn: {
+		session: AgentSession;
+		replyIds: number[];
+		repaired: boolean;
+		steeredThrough: number;
+		steering: Promise<void>;
+	} | null = null;
 	private readonly box: WorkBox | null;
 	private readonly tasks: TaskManager | null;
 	private jobs: JobRunner | null = null;
+	private waitForTools: () => Promise<unknown> = async () => {};
 	private allowedReactions: ReadonlySet<string> | null = null;
 	private currentTriggerMessageId: number | null = null;
 	private readonly visionScheduler: VisionScheduler | null;
@@ -218,10 +210,10 @@ export class BotRuntime {
 	mediaPruneSink: (() => void) | null = null;
 
 	constructor(
-		db: Database,
-		bot: BotConfig,
-		config: AppConfig,
-		modelRuntime: ModelRuntime,
+		private readonly db: Database,
+		private readonly bot: BotConfig,
+		private readonly config: AppConfig,
+		private readonly modelRuntime: ModelRuntime,
 		options: {
 			/** Startup probe result; both media modes sample video frames through it. */
 			videoTranscoder: boolean;
@@ -234,10 +226,6 @@ export class BotRuntime {
 			tasks?: TaskManager;
 		},
 	) {
-		this.db = db;
-		this.bot = bot;
-		this.config = config;
-		this.modelRuntime = modelRuntime;
 		this.visionExecutor = options.visionExecutor ?? null;
 		this.visionScheduler = options.visionScheduler ?? null;
 		this.videoTranscoder = options.videoTranscoder;
@@ -263,7 +251,6 @@ export class BotRuntime {
 		);
 		this.epoch = Number(getBotState(db, bot.id, EPOCH_KEY) ?? "1");
 		this.visibleMessageIds = new Set(listVisibleMessageIds(db, bot.id, chatId, this.epoch));
-		this.lastControlCompact = restoreLastCompaction(db, bot.id);
 	}
 
 	async init(): Promise<void> {
@@ -282,7 +269,6 @@ export class BotRuntime {
 		const stickerCatalog =
 			this.bot.stickerSets.length > 0 ? stickerCatalogPromptBlock(this.db, this.bot.id, this.bot.stickerSets) : "";
 		const systemPrompt = buildSystemPrompt(persona, this.bot.tools, stickerCatalog);
-		this.telemetry.systemHash = sha256Short(systemPrompt);
 
 		const catalogModel = this.modelRuntime.getModel(this.bot.provider, this.bot.model);
 		if (!catalogModel) throw new Error(`model not found: ${this.bot.provider}/${this.bot.model}`);
@@ -310,7 +296,7 @@ export class BotRuntime {
 				compaction_window: this.compactionModel.contextWindow,
 			});
 
-		const { activeTools, scriptTools, declaredTools, jobs } = buildBotRuntimeTools({
+		const { activeTools, scriptTools, declaredTools, jobs, waitForTools } = buildBotRuntimeTools({
 			db: this.db,
 			bot: this.bot,
 			config: this.config,
@@ -321,27 +307,16 @@ export class BotRuntime {
 			tasks: this.tasks,
 			allowedReactions: () => this.allowedReactions,
 			triggerMessageId: () => this.currentTriggerMessageId,
-			sendsThisTurn: () => this.sendsThisTurn,
-			onSendPosted: () => {
-				this.sendsThisTurn++;
-			},
-			onSendOutcome: (outcome) => {
-				this.turnSendOutcome = outcome;
-			},
-			onPublicSend: () => this.telemetry.recordPublicSend(),
-			onSendDuration: (durationMs) => this.telemetry.recordSendDuration(durationMs),
+			turn: () => this.turn,
+			telemetry: this.telemetry,
 			onSent: (raw) => this.sentMessageSink?.(raw),
 			stopTyping: () => this.typingLease.stop(),
 			resetBox: (reason) => this.resetBox(reason),
 			markVisible: (ids) => this.markVisible(ids),
-			onImageAttached: (count) => {
-				this.telemetry.pendingInputMetrics.imagesAttached += count;
-			},
-			recordEvent: (kind, payload) => this.telemetry.recordEvent(kind, payload),
 			wakeForTask: (originMessageId, owe) => this.wakeForTask(originMessageId, owe),
 		});
 		this.jobs = jobs;
-		this.telemetry.toolsHash = toolProtocolHash(declaredTools);
+		this.waitForTools = waitForTools;
 		this.staticPrefixTokenEstimate =
 			estimateProviderTokensUpperBound(
 				`${systemPrompt}\n${JSON.stringify(activeTools.map(({ name, description, parameters }) => ({ name, description, parameters })))}`,
@@ -349,8 +324,7 @@ export class BotRuntime {
 		const payloadKey = sha256(
 			`telegram-payload-observer:${this.config.routerSecret ?? this.config.dataDir}:${this.bot.id}`,
 		);
-		this.telemetry.hmacKey = payloadKey;
-		const extensions = [
+		const extensions: InlineExtension[] = [
 			// Only hybrid mode has images in context: view_image results, resolved at projection.
 			makeTelegramContextExtension(
 				this.config.media.mode === "hybrid" ? createImageRefResolver(join(this.config.dataDir, "media")) : undefined,
@@ -360,9 +334,42 @@ export class BotRuntime {
 				this.telemetry.pendingObservation = observation;
 			}),
 			...(this.bot.tools.codemode ? [makeCodemodeExtension()] : []),
-			makeAssistantPersistencePolicyExtension((text) => {
-				this.telemetry.recordEvent("assistant_text", { text });
-			}),
+			makeAssistantPersistencePolicyExtension(),
+			{
+				name: "tg-reply-repair",
+				hidden: true,
+				factory: (pi) => {
+					pi.on("agent_before_settle", (event) => {
+						const turn = this.activeTurn;
+						if (
+							!turn ||
+							turn.repaired ||
+							event.outcome !== "completed" ||
+							this.turn.outcome !== "none" ||
+							!this.bot.tools.send ||
+							!turn.replyIds.length ||
+							this.stopping ||
+							this.resettingSession
+						)
+							return;
+						const visible = contextStateFromEntries(turn.session.sessionManager.buildContextEntries(), 0).visible;
+						const replyIds = turn.replyIds.filter((id) => visible.has(id));
+						if (!replyIds.length) return;
+						turn.repaired = true;
+						return {
+							entries: [
+								{
+									type: "custom_message",
+									customType: "telegram-reply-repair",
+									content: `${REPLY_RECOVERY_PROMPT}${replyIds.map((id) => `#${id}`).join(", ")}`,
+									display: false,
+								},
+							],
+							continue: true,
+						};
+					});
+				},
+			},
 		];
 		this.contextFingerprintInput = {
 			piVersion: PI_VERSION,
@@ -488,8 +495,6 @@ export class BotRuntime {
 			state: canResume ? "resumed" : "new",
 			epoch: this.epoch,
 			fingerprint: this.contextFingerprint.slice(0, 12),
-			system_hash: this.telemetry.systemHash,
-			tools_hash: this.telemetry.toolsHash,
 			tools: session.getActiveToolNames().join(","),
 			cache_schema: CACHE_SCHEMA_VERSION,
 		});
@@ -508,20 +513,10 @@ export class BotRuntime {
 
 	private subscribeEvents(): void {
 		if (!this.session) return;
-		this.session.subscribe((event) => {
-			const now = Date.now();
+		const session = this.session;
+		session.subscribe((event) => {
+			if (this.session !== session) return;
 			switch (event.type) {
-				case "agent_start":
-					this.running = true;
-					this.lastTurnFailed = false;
-					this.telemetry.beginRun(now);
-					break;
-				case "message_start":
-				case "message_update":
-					if (event.message.role === "assistant") {
-						this.telemetry.observeThinking(event.message, now);
-					}
-					break;
 				case "message_end": {
 					const msg = event.message;
 					if (msg.role === "assistant") {
@@ -534,22 +529,7 @@ export class BotRuntime {
 									? "provider_request_too_large"
 									: classifyPiProviderFailure(msg.errorMessage ?? "provider failed"),
 							});
-						this.telemetry.observeThinking(msg, now, true);
-						const thinking = msg.content
-							.filter((c) => c.type === "thinking")
-							.map((c) => (c as { thinking: string }).thinking)
-							.join("\n");
-						if (thinking.trim()) this.telemetry.recordEvent("thinking", { text: thinking });
-						// Failed attempts carry zero usage; recording them would create empty llm_runs
-						// rows, consume this turn's input metrics, and mark the eventual success as a
-						// tool follow-up round.
-						if (msg.usage && !this.lastTurnFailed)
-							this.telemetry.recordUsage(msg.usage, now, {
-								model: this.model,
-								epoch: this.epoch,
-								sessionId: this.session?.sessionId,
-								triggerMessageId: this.currentTriggerMessageId,
-							});
+						this.telemetry.recordUsage(msg.usage, this.model, this.epoch, session.sessionId);
 					}
 					break;
 				}
@@ -562,7 +542,7 @@ export class BotRuntime {
 					});
 					break;
 				case "tool_execution_start":
-					this.telemetry.recordEvent("tool_call", { tool: event.toolName, args: event.args });
+					this.telemetry.recordEvent("tool_call", { tool: event.toolName });
 					log.info("agent_tool", "execution_started", {
 						bot_id: this.bot.id,
 						tool: event.toolName,
@@ -570,16 +550,7 @@ export class BotRuntime {
 					});
 					break;
 				case "tool_execution_end":
-					try {
-						this.telemetry.recordEvent("tool_result", { tool: event.toolName, isError: event.isError });
-					} catch {
-						// A committed send must stay terminal even when its local record fails.
-						log.warn("agent_tool", "result_persist_failed", {
-							bot_id: this.bot.id,
-							tool: event.toolName,
-							category: "local_failure",
-						});
-					}
+					this.telemetry.recordEvent("tool_result", { tool: event.toolName, isError: event.isError });
 					log.info("agent_tool", "execution_finished", {
 						bot_id: this.bot.id,
 						tool: event.toolName,
@@ -595,7 +566,6 @@ export class BotRuntime {
 					this.session?.settingsManager.applyOverrides({
 						compaction: { keepRecentTokens: this.bot.compactionKeepRecent },
 					});
-					this.running = false;
 					this.typingLease.stop();
 					break;
 				case "compaction_end":
@@ -669,7 +639,9 @@ export class BotRuntime {
 	): Promise<{ cancel: true } | { compaction: CompactionResult }> {
 		// Preserve Pi's overflow recovery and explicit compaction; other failed turns must
 		// not multiply an outage into repeated chat + summary provider attempts.
-		if (this.skipFailedThresholdCompaction(event.reason)) return { cancel: true };
+		if (this.resettingSession || this.stopping || this.skipFailedThresholdCompaction(event.reason))
+			return { cancel: true };
+		const session = this.session!;
 		try {
 			const branchEntries = event.branchEntries;
 			const prep = event.preparation;
@@ -682,7 +654,16 @@ export class BotRuntime {
 				imageBudgetBytes: this.bot.contextImageBudgetBytes,
 				timeoutMs: this.bot.providerTimeoutMs,
 				retries: this.bot.providerRetries,
-				onUsage: (usage) => this.telemetry.recordCompactionUsage(usage, Date.now(), this.compactionModel, this.epoch),
+				onUsage: (usage) => {
+					this.telemetry.recordUsage(usage, this.compactionModel, this.epoch, session.sessionId, true);
+					if (usage.totalTokens || usage.cost.total)
+						session.sessionManager.appendUsage(
+							"compaction",
+							this.compactionModel.provider,
+							this.compactionModel.id,
+							usage,
+						);
+				},
 			});
 			if (!("summary" in gen)) {
 				// NOTE: the SDK swallows extension handler exceptions and would silently fall back
@@ -699,7 +680,6 @@ export class BotRuntime {
 					summary: gen.summary,
 					firstKeptEntryId: prep.firstKeptEntryId,
 					tokensBefore: prep.tokensBefore,
-					usage: gen.usage,
 					details: {
 						version: TELEGRAM_CONTEXT_VERSION,
 						consumedSeq: state.consumedSeq,
@@ -720,20 +700,20 @@ export class BotRuntime {
 	/** Lifecycle state used by deterministic scheduling and the Telegram control plane. */
 	samplingState(now = this.monotonicNow()): "idle" | "busy" | "cooldown" | "stopping" {
 		if (this.stopping) return "stopping";
-		if (this.flushing || this.controlCompacting || this.controlChangingModel || this.resettingSession) return "busy";
+		if (
+			this.flushing ||
+			this.compactionPromise ||
+			this.session?.isCompacting ||
+			this.controlChangingModel ||
+			this.resettingSession
+		)
+			return "busy";
 		if (now < this.cooldownUntil) return "cooldown";
 		return "idle";
 	}
 
 	/** Called by the scheduler when this bot gets a response opportunity. */
 	trigger(source: TriggerSource = "explicit", routingTrigger?: RoutingTrigger): TriggerResult {
-		// A /new reset is aborting the current turn: don't steer work into the dying
-		// session — queue one wake-up for the fresh session instead.
-		if (this.resettingSession) {
-			this.pendingTrigger = true;
-			this.pendingTriggerMessageId = routingTrigger?.messageId ?? this.pendingTriggerMessageId;
-			return "coalesced";
-		}
 		// SHARED_PROTOCOL: explicit @mention, reply-to-bot, and configured-name keyword are all
 		// direct addresses that must reach the provider even when this trigger only coalesces.
 		// A `/fire` bot-triggered address is only an opportunity: no durable obligation to answer a bot.
@@ -749,12 +729,19 @@ export class BotRuntime {
 			directReplyMessageId = routingTrigger.messageId;
 			if (created) this.telemetry.recordEvent("reply_obligation_created", { message_id: routingTrigger.messageId });
 		}
+		// A /new reset is aborting the current turn: don't steer work into the dying
+		// session — queue one wake-up for the fresh session instead.
+		if (this.resettingSession) {
+			this.pendingTrigger = true;
+			this.pendingTriggerMessageId = routingTrigger?.messageId ?? this.pendingTriggerMessageId;
+			return "coalesced";
+		}
 		const state = this.samplingState();
 		if (state === "stopping") return "skipped_stopping";
 		if (source === "probability" && state !== "idle") {
 			return state === "busy" ? "skipped_busy" : "skipped_cooldown";
 		}
-		if (this.controlCompacting || this.controlChangingModel) {
+		if (this.session?.isCompacting || this.controlChangingModel) {
 			this.pendingTrigger = true;
 			this.pendingTriggerMessageId = routingTrigger?.messageId ?? this.pendingTriggerMessageId;
 			return "coalesced";
@@ -830,8 +817,9 @@ export class BotRuntime {
 
 	/** Read a bounded immutable event window, commit its cursor, and wake the agent. */
 	private async flush(): Promise<boolean> {
-		if (!this.session) return false;
-		this.turnSendOutcome = "none";
+		const session = this.session;
+		if (!session || this.resettingSession || this.stopping) return false;
+		this.turn = { sends: 0, outcome: "none" };
 		this.lastTurnFailed = false;
 		const chatId = this.config.groupChatId;
 		const obligations = listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN);
@@ -851,12 +839,11 @@ export class BotRuntime {
 		);
 		let rowsScanned = scanned.rowsScanned;
 
-		this.telemetry.pendingInputMetrics = emptyInputMetrics();
-		this.sendsThisTurn = 0;
 		// Descriptions get a short head start, then finish in the background and arrive later as
 		// media_update events; the reply never waits on a slow vision call (view_image covers it).
 		const vision = this.ensureBatchVision([...scanned.mandatory, ...scanned.normal], obligationIds).catch(() => {});
 		await Promise.race([vision, delay(VISION_WAIT_MS)]);
+		if (this.resettingSession || this.stopping) return false;
 		// Vision descriptions land as media_update events mid-scan: pick them up so the
 		// same flush already sees the fresh descriptions.
 		const postVisionHighWater = messageEventHighWater(this.db, chatId);
@@ -874,7 +861,7 @@ export class BotRuntime {
 			);
 			rowsScanned += scanned.rowsScanned;
 		}
-		const usage = this.session.getContextUsage();
+		const usage = session.getContextUsage();
 		const suffixBudget = availableSuffixBudget({
 			contextWindow: usage?.contextWindow ?? this.model.contextWindow,
 			currentContextTokens: usage?.tokens ?? 0,
@@ -927,30 +914,28 @@ export class BotRuntime {
 		const stickerCandidateTokens = stickerCandidates ? estimateProviderTokensUpperBound(`\n\n${stickerCandidates}`) : 0;
 		const boundedStickerCandidates =
 			stickerCandidates && packed.estimatedTokens + stickerCandidateTokens <= suffixBudget ? stickerCandidates : "";
-		const boundedStickerCandidateTokens = boundedStickerCandidates
-			? estimateProviderTokensUpperBound(`\n\n${boundedStickerCandidates}`)
-			: 0;
 
 		const selectedIds = new Set(packed.visibleMessageIds);
 		const delivered = obligations.filter((obligation) => selectedIds.has(obligation.messageId));
 		this.currentTriggerMessageId ??= delivered[0]?.messageId ?? packed.events.at(-1)?.messageId ?? null;
-		this.telemetry.pendingInputMetrics = {
-			inputEvents: packed.events.length,
-			estimatedTokens: packed.estimatedTokens + boundedStickerCandidateTokens,
-			rowsScanned,
-			visionCalls: this.telemetry.pendingInputMetrics.visionCalls,
-			imagesAttached: 0, // counted by view_image during the turn
-		};
+
 		// The batch itself starts the turn: Pi runs the same pre-run threshold compaction check as
 		// for a prompt, then persists it as the turn's first message. Packed references become
 		// addressable during the turn; durable visibility commits below.
 		await this.checkContextImageBudget();
+		if (this.resettingSession || this.stopping) return false;
 		for (const messageId of packed.visibleMessageIds) this.visibleMessageIds.add(messageId);
-		this.activeTurn = { steeredThrough: highWater, steering: Promise.resolve() };
+		this.activeTurn = {
+			session,
+			replyIds: delivered.map((item) => item.messageId),
+			repaired: false,
+			steeredThrough: highWater,
+			steering: Promise.resolve(),
+		};
 		try {
 			// While streaming, Pi would only queue the batch as steering and return at once.
-			if (this.session.isStreaming) throw new Error("session is already streaming");
-			await this.session.sendCustomMessage(batchMessage(packed, highWater, boundedStickerCandidates), {
+			if (session.isStreaming) throw new Error("session is already streaming");
+			await session.sendCustomMessage(batchMessage(packed, highWater, boundedStickerCandidates), {
 				triggerTurn: true,
 			});
 		} catch (error) {
@@ -958,33 +943,14 @@ export class BotRuntime {
 			this.reconcileContextState();
 			throw error;
 		}
-		if (
-			!this.lastTurnFailed &&
-			this.turnSendOutcome === "none" &&
-			this.bot.tools.send &&
-			delivered.length > 0 &&
-			delivered.every((obligation) => this.visibleMessageIds.has(obligation.messageId)) &&
-			!this.stopping
-		) {
-			log.info("agent_runtime", "reply_repair_started", {
-				bot_id: this.bot.id,
-				trigger_message_id: this.currentTriggerMessageId,
-				obligation_count: delivered.length,
-			});
-			this.typingLease.start();
-			await this.session.prompt(
-				`${REPLY_RECOVERY_PROMPT}${delivered.map((obligation) => `#${obligation.messageId}`).join(", ")}`,
-			);
-		}
 		await this.endSteering();
 		log.info("agent_runtime", "provider_turn_settled", {
 			bot_id: this.bot.id,
 			trigger_message_id: this.currentTriggerMessageId,
 			input_events: packed.events.length,
-			provider_calls: this.telemetry.providerCallsInRun,
-			send_outcome: this.turnSendOutcome,
+			send_outcome: this.turn.outcome,
 		});
-		const turnEntries = this.session.sessionManager.buildContextEntries();
+		const turnEntries = session.sessionManager.buildContextEntries();
 		const activeState = contextStateFromEntries(turnEntries, highWater);
 		// Batches steered into this turn that actually landed in the session move the cursor and
 		// carry their own direct addresses; queued ones that never landed were dropped above.
@@ -995,10 +961,10 @@ export class BotRuntime {
 				if (steeredIds.has(obligation.messageId) && !delivered.includes(obligation)) delivered.push(obligation);
 		// Provider completion is not Telegram delivery. Unknown/partial commits are terminal;
 		// failure or silence without any remote outcome stays owed, without an unbounded loop.
-		const replyPending = this.turnSendOutcome === "none";
+		const replyPending = this.turn.outcome === "none";
 		const deliveredObligationIds = replyPending ? [] : delivered.map((obligation) => obligation.messageId);
 		if (deliveredObligationIds.length > 0) {
-			this.session.sessionManager.appendCustomEntry(TELEGRAM_CONTEXT_COMMIT_TYPE, { deliveredObligationIds });
+			session.sessionManager.appendCustomEntry(TELEGRAM_CONTEXT_COMMIT_TYPE, { deliveredObligationIds });
 		}
 		commitConsumedContext(this.db, {
 			botId: this.bot.id,
@@ -1025,7 +991,7 @@ export class BotRuntime {
 		for (const obligation of delivered) {
 			this.telemetry.recordEvent("reply_obligation_delivered", {
 				message_id: obligation.messageId,
-				outcome: this.turnSendOutcome,
+				outcome: this.turn.outcome,
 			});
 		}
 		return replyObligationCount(this.db, this.bot.id, chatId) > 0;
@@ -1046,7 +1012,7 @@ export class BotRuntime {
 	controlSnapshot(): RuntimeControlSnapshot {
 		const contextUsage = this.session?.getContextUsage();
 		return {
-			state: this.controlCompacting ? "compacting" : this.samplingState(),
+			state: this.session?.isCompacting ? "compacting" : this.samplingState(),
 			epoch: this.epoch,
 			provider: this.model.provider,
 			model: this.model.id,
@@ -1056,6 +1022,7 @@ export class BotRuntime {
 			routingP: this.bot.routingP,
 			samplingCooldownMs: this.bot.samplingCooldownMs,
 			lastCompact: this.lastControlCompact,
+			stats: this.session?.getSessionStats(),
 		};
 	}
 
@@ -1103,14 +1070,15 @@ export class BotRuntime {
 	}
 
 	/** Manual/image-pressure paths need the same pre-preparation accounting as native auto-compaction. */
-	private async compactSession(): Promise<CompactionResult> {
+	private compactSession(): Promise<CompactionResult> {
+		if (this.compactionPromise) return this.compactionPromise;
 		const session = this.session!;
 		this.refreshCompactionBudget();
-		try {
-			return await session.compact();
-		} finally {
+		this.compactionPromise = session.compact().finally(() => {
+			this.compactionPromise = null;
 			session.settingsManager.applyOverrides({ compaction: { keepRecentTokens: this.bot.compactionKeepRecent } });
-		}
+		});
+		return this.compactionPromise;
 	}
 
 	/** Manual compact that never passes instructions and never aborts an active response. */
@@ -1124,7 +1092,6 @@ export class BotRuntime {
 		if (branch.at(-1)?.type === "compaction" || !branch.some((entry) => entry.type === "message")) {
 			return { ok: false, code: "nothing_to_compact" };
 		}
-		this.controlCompacting = true;
 		try {
 			const result = await this.compactSession();
 			this.lastControlCompact = { at: Date.now(), outcome: "ok" };
@@ -1133,7 +1100,6 @@ export class BotRuntime {
 			this.lastControlCompact = { at: Date.now(), outcome: "failed" };
 			return { ok: false, code: "failed" };
 		} finally {
-			this.controlCompacting = false;
 			this.rearmPendingTrigger();
 		}
 	}
@@ -1196,23 +1162,19 @@ export class BotRuntime {
 		if (!this.session) return { ok: false, code: "unavailable" };
 		if (this.resettingSession || this.controlChangingModel) return { ok: false, code: "busy" };
 		this.resettingSession = true;
+		const resetThrough = messageEventHighWater(this.db, this.config.groupChatId);
 		try {
 			// Stop everything that could outlive the session or hold it busy.
 			this.jobs?.stopAll();
-			this.tasks?.cancelAllForBot(this.bot.id);
+			const taskStops = this.tasks?.cancelAllForBot(this.bot.id);
 			const session = this.session;
-			session.abortCompaction();
-			session.abortRetry();
-			if (this.controlCompacting) await waitForFlag(() => !this.controlCompacting, 10_000);
-			await Promise.race([session.abort().catch(() => {}), delay(15_000)]);
-			if (this.flushPromise) await Promise.race([this.flushPromise.catch(() => {}), delay(15_000)]);
-			// The dying flush may leave flags unset if it never emitted agent_settled.
-			this.running = false;
-			await this.endSteering().catch(() => {});
-			this.pendingTrigger = false;
-			this.pendingTriggerMessageId = null;
-			this.turnSendOutcome = "none";
-			const result = await this.replaceSessionForControl(this.model, this.bot.reasoningEffort);
+			await Promise.all([session.abort(), this.box?.interrupt(), taskStops]);
+			await this.waitForTools();
+			await this.compactionPromise?.catch(() => {});
+			await this.flushPromise;
+			await this.endSteering();
+			this.turn = { sends: 0, outcome: "none" };
+			const result = await this.replaceSessionForControl(this.model, this.bot.reasoningEffort, { resetThrough });
 			if (result.ok) {
 				log.info("agent_runtime", "session_reset", { bot_id: this.bot.id, epoch: result.epoch });
 				try {
@@ -1235,8 +1197,9 @@ export class BotRuntime {
 		if (!this.session) return "unavailable";
 		if (
 			this.flushing ||
-			this.running ||
-			this.controlCompacting ||
+			this.resettingSession ||
+			this.compactionPromise ||
+			this.session?.isCompacting ||
 			this.controlChangingModel ||
 			this.session.isStreaming
 		)
@@ -1248,7 +1211,7 @@ export class BotRuntime {
 	private async replaceSessionForControl(
 		nextModel: Model<Api>,
 		reasoningEffort: BotConfig["reasoningEffort"],
-		hooks: { beforeCommit?: () => void; afterCommit?: () => void } = {},
+		hooks: { beforeCommit?: () => void; afterCommit?: () => void; resetThrough?: number } = {},
 	): Promise<{ ok: true; epoch: number } | { ok: false; code: "stopping" | "failed" }> {
 		this.controlChangingModel = true;
 		let nextSession: AgentSession | null = null;
@@ -1278,11 +1241,12 @@ export class BotRuntime {
 				replaceVisibleMessageIds(this.db, this.bot.id, chatId, epoch, []);
 				// A fresh session cannot answer for bytes it never saw; drop the old
 				// session's obligations atomically with the swap.
-				removeReplyObligations(
-					this.db,
-					this.bot.id,
-					listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN),
-				);
+				const through = hooks.resetThrough ?? messageEventHighWater(this.db, chatId);
+				this.db
+					.query(`DELETE FROM reply_obligations WHERE bot_id = ? AND chat_id = ? AND message_id IN
+					(SELECT message_id FROM message_events WHERE chat_id = ? AND ingest_seq <= ? AND kind = 'message')`)
+					.run(this.bot.id, chatId, chatId, through);
+				setConsumedSeq(this.db, this.bot.id, chatId, Math.max(through, getConsumedSeq(this.db, this.bot.id, chatId)));
 				setSessionManifest(this.db, {
 					botId: this.bot.id,
 					sessionId: committed.sessionId,
@@ -1327,7 +1291,13 @@ export class BotRuntime {
 
 	/** A trigger coalesced while busy must run once the blocking operation releases the bot. */
 	private rearmPendingTrigger(): void {
-		if (this.pendingTrigger && !this.stopping) {
+		if (
+			this.pendingTrigger &&
+			!this.stopping &&
+			!this.resettingSession &&
+			!this.controlChangingModel &&
+			!this.session?.isCompacting
+		) {
 			this.pendingTrigger = false;
 			this.trigger("explicit");
 		}
@@ -1351,12 +1321,7 @@ export class BotRuntime {
 		try {
 			await ensureVision(this.db, this.api, this.bot.id, fileUniqueId, this.visionExecutor, {
 				cacheDir: join(this.config.dataDir, "media"),
-				onTelemetry: (telemetry) => {
-					if (telemetry.providerCalled) {
-						this.telemetry.pendingInputMetrics.visionCalls++;
-					}
-					this.telemetry.recordEvent("vision", telemetry);
-				},
+				onTelemetry: (telemetry) => this.telemetry.recordEvent("vision", telemetry),
 				scheduler: this.visionScheduler ?? undefined,
 				botApis: this.botApis,
 				videoTranscoder: this.videoTranscoder,
@@ -1375,7 +1340,7 @@ export class BotRuntime {
 		const turn = this.activeTurn;
 		if (!turn || !this.session) return;
 		turn.steering = turn.steering.then(async () => {
-			if (this.activeTurn !== turn || !this.session?.isStreaming) return;
+			if (this.activeTurn !== turn || this.resettingSession || !turn.session.isStreaming) return;
 			const chatId = this.config.groupChatId;
 			const through = messageEventHighWater(this.db, chatId);
 			if (through <= turn.steeredThrough) return;
@@ -1401,7 +1366,8 @@ export class BotRuntime {
 			if (!packed.text.trim()) return;
 			// reply_to may target the new messages as soon as the model can see them.
 			for (const id of packed.visibleMessageIds) this.visibleMessageIds.add(id);
-			await this.session.sendCustomMessage(batchMessage(packed, through, ""), { deliverAs: "steer" });
+			await turn.session.sendCustomMessage(batchMessage(packed, through, ""), { deliverAs: "steer" });
+			turn.replyIds.push(...packed.visibleMessageIds.filter((id) => owed.has(id) && !turn.replyIds.includes(id)));
 			turn.steeredThrough = through;
 			log.info("agent_runtime", "turn_steered", { bot_id: this.bot.id, input_events: packed.events.length });
 		});
@@ -1413,7 +1379,7 @@ export class BotRuntime {
 		if (!turn) return;
 		await turn.steering.catch(() => {});
 		this.activeTurn = null;
-		this.session?.clearQueue();
+		turn.session.clearQueue();
 	}
 
 	taskStatusForControl(): string | null {
@@ -1479,13 +1445,11 @@ export class BotRuntime {
 	async stop(): Promise<void> {
 		this.stopping = true;
 		this.jobs?.stopAll();
-		this.session?.abortCompaction();
 		this.typingLease.stop();
-		// Bounded wait for an in-flight flush so the Pi/SQLite context commit can settle;
-		// the timeout only guards a wedged provider run.
-		if (this.flushPromise) {
-			await Promise.race([this.flushPromise.catch(() => {}), new Promise((r) => setTimeout(r, 30_000))]);
-		}
+		await Promise.all([this.session?.abort(), this.box?.interrupt()]);
+		await this.waitForTools();
+		await this.compactionPromise?.catch(() => {});
+		await this.flushPromise;
 		this.session?.dispose();
 	}
 }

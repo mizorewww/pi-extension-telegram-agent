@@ -61,11 +61,13 @@ export interface SearchHit {
 
 export interface SearchOptions {
 	timeoutMs?: number;
+	signal?: AbortSignal;
 	endpoint?: string; // local-test override
 }
 
 export interface FetchOptions {
 	timeoutMs?: number;
+	signal?: AbortSignal;
 	endpoint?: string; // local-test override
 }
 
@@ -212,7 +214,10 @@ export async function tinyFishSearch(apiKey: string, query: string, opts: Search
 		target.toString(),
 		{
 			headers: { "X-API-Key": apiKey },
-			signal: AbortSignal.timeout(opts.timeoutMs ?? SEARCH_TIMEOUT_MS),
+			signal: AbortSignal.any([
+				AbortSignal.timeout(opts.timeoutMs ?? SEARCH_TIMEOUT_MS),
+				...(opts.signal ? [opts.signal] : []),
+			]),
 		},
 		MAX_SEARCH_BODY_BYTES,
 	);
@@ -263,7 +268,10 @@ export async function tinyFishFetch(apiKey: string, inputUrl: string, opts: Fetc
 			method: "POST",
 			headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
 			body: JSON.stringify({ urls: [target.url], format: "markdown", links: false, image_links: false }),
-			signal: AbortSignal.timeout(opts.timeoutMs ?? FETCH_TIMEOUT_MS),
+			signal: AbortSignal.any([
+				AbortSignal.timeout(opts.timeoutMs ?? FETCH_TIMEOUT_MS),
+				...(opts.signal ? [opts.signal] : []),
+			]),
 		},
 		MAX_FETCH_BODY_BYTES,
 	);
@@ -359,7 +367,9 @@ export async function runTinyFishTool(
 	apiKey: string,
 	params: TinyFishToolParams,
 	deps: TinyFishToolDependencies = {},
+	signal?: AbortSignal,
 ): Promise<TinyFishToolExecution> {
+	signal?.throwIfAborted();
 	const queryProvided = Object.hasOwn(params, "query");
 	const urlProvided = Object.hasOwn(params, "url");
 	const query = typeof params.query === "string" ? params.query.trim() : "";
@@ -376,7 +386,7 @@ export async function runTinyFishTool(
 
 	if (query) {
 		try {
-			const hits = await (deps.search ?? tinyFishSearch)(apiKey, query);
+			const hits = await (deps.search ?? tinyFishSearch)(apiKey, query, { signal });
 			return {
 				content: formatSearchResults(hits),
 				details: { mode: "query", hits: hits.length },
@@ -395,7 +405,7 @@ export async function runTinyFishTool(
 	}
 	try {
 		const fetchPage = deps.fetchPage ?? tinyFishFetch;
-		const page = await cachedFetch(validated.url, (url) => fetchPage(apiKey, url));
+		const page = await cachedFetch(validated.url, (url) => fetchPage(apiKey, url, { signal }));
 		const view = formatFetchedPage(page, params.offset ?? 0);
 		const tokens = estimatedTokens(view.text);
 		const truncated = page.truncated || view.nextOffset !== undefined;

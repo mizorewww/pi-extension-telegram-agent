@@ -4,13 +4,15 @@
 import type { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { validateToolArguments, type JsonValue } from "@earendil-works/pi-ai";
+import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { BotRuntimeTelemetry } from "./runtime-telemetry.ts";
 import type { CodemodeJsonSchema } from "@earendil-works/pi-codemode";
 import type { AppConfig, BotConfig } from "../config.ts";
 import { groupMessage } from "../db/message-events.ts";
 import { downloadSource, MEDIA_DOWNLOAD_MAX_BYTES, type MediaDownloadApi } from "../media/local-cache.ts";
 import { ensureViewImages } from "../media/prepare-images.ts";
 import type { WorkBox } from "../sandbox/box.ts";
-import { JobError, JobRunner } from "../tasks/jobs.ts";
+import { JobRunner } from "../tasks/jobs.ts";
 import { TaskError, type TaskManager } from "../tasks/manager.ts";
 import type { BotApi } from "../telegram/api.ts";
 import { MessageQueryError, queryMessages, type MessageQuery } from "../tools/messages.ts";
@@ -43,6 +45,11 @@ function structured<T extends object>(value: T) {
 	};
 }
 
+export interface BotTurn {
+	sends: number;
+	outcome: "none" | "sent" | "unknown";
+}
+
 export interface BotRuntimeToolHost {
 	db: Database;
 	bot: BotConfig;
@@ -54,17 +61,12 @@ export interface BotRuntimeToolHost {
 	tasks: TaskManager | null;
 	allowedReactions: () => ReadonlySet<string> | null;
 	triggerMessageId: () => number | null;
-	sendsThisTurn: () => number;
-	onSendPosted: () => void;
-	onSendOutcome: (outcome: "sent" | "unknown") => void;
-	onPublicSend: () => void;
-	onSendDuration: (durationMs: number) => void;
+	turn: () => BotTurn;
+	telemetry: Pick<BotRuntimeTelemetry, "recordEvent">;
 	onSent: (raw: unknown) => void;
 	stopTyping: () => void;
 	resetBox: (reason: "tool") => Promise<void>;
 	markVisible: (ids: readonly number[]) => void;
-	onImageAttached: (count: number) => void;
-	recordEvent: (kind: string, payload: unknown) => void;
 	wakeForTask: (originMessageId: number, owe: boolean) => void;
 }
 
@@ -72,11 +74,13 @@ async function executeSend(host: BotRuntimeToolHost, params: SendParams, endsTur
 	// Scripts may send several times in one turn (an acknowledgement, then the result). The cap
 	// only guards a looping script against flooding the group with messages; reactions post
 	// nothing and are not counted.
+	const turn = host.turn();
 	const posts = Boolean(params.message || params.sticker || params.files?.length);
-	if (posts && host.sendsThisTurn() >= MAX_SENDS_PER_TURN)
+	if (posts && turn.sends >= MAX_SENDS_PER_TURN)
 		throw new Error(
 			`send failed: ${MAX_SENDS_PER_TURN} messages already this turn, which looks like a runaway loop; stop and tell the group what happened`,
 		);
+	if (posts) turn.sends++;
 	const result = await executeAgentSend(params, {
 		db: host.db,
 		api: host.api,
@@ -85,31 +89,28 @@ async function executeSend(host: BotRuntimeToolHost, params: SendParams, endsTur
 		allowedReactions: host.allowedReactions(),
 		box: host.box,
 		triggerMessageId: host.triggerMessageId(),
-		recordPublicSend: () => host.onPublicSend(),
 		markVisible: (ids) => host.markVisible(ids),
 		onSent: (raw) => host.onSent(raw),
-		recordEvent: (kind, payload) => host.recordEvent(kind, payload),
+		recordEvent: (kind, payload) => host.telemetry.recordEvent(kind, payload),
 		stopTyping: () => {
 			if (endsTurn) host.stopTyping();
 		},
-		recordDuration: (durationMs) => host.onSendDuration(durationMs),
 	});
-	if (posts && result.details.sent.length > 0) host.onSendPosted();
 	// Both successful sends and degraded terminal outcomes forbid an automatic resend.
 	// A reaction-only turn created no message, so a direct address is still owed a reply.
 	if ("outcome" in result.details) {
-		host.onSendOutcome(result.details.outcome === "unknown" ? "unknown" : "sent");
+		turn.outcome = result.details.outcome === "unknown" ? "unknown" : "sent";
 	} else if (result.details.sent.length > 0) {
-		host.onSendOutcome("sent");
+		turn.outcome = "sent";
 	}
 	return result;
 }
 
 /** view_image: prepare one message's image files and return refs; bytes join at projection. */
-async function executeViewImage(host: BotRuntimeToolHost, params: ViewImageParams) {
+async function executeViewImage(host: BotRuntimeToolHost, params: ViewImageParams, signal?: AbortSignal) {
 	const chatId = host.config.groupChatId;
 	const fail = (category: string): never => {
-		host.recordEvent("tool_view_image", { ok: false, category });
+		host.telemetry.recordEvent("tool_view_image", { ok: false, category });
 		throw new Error(`view_image failed: ${category}`);
 	};
 	const row = groupMessage(host.db, chatId, params.message_id);
@@ -120,11 +121,11 @@ async function executeViewImage(host: BotRuntimeToolHost, params: ViewImageParam
 		cacheDir: join(host.config.dataDir, "media"),
 		botApis: host.botApis,
 		videoTranscoder: host.videoTranscoder,
+		signal,
 	});
 	if (!prepared.ok) return fail(prepared.outcome);
 	host.markVisible([row.message_id]);
-	host.onImageAttached(prepared.images.length);
-	host.recordEvent("tool_view_image", { ok: true, images: prepared.images.length });
+	host.telemetry.recordEvent("tool_view_image", { ok: true, images: prepared.images.length });
 	const line = renderMessageLine(host.db, row);
 	const details: ViewImageDetails = { messageId: row.message_id, images: prepared.images };
 	return {
@@ -138,39 +139,34 @@ async function executeViewImage(host: BotRuntimeToolHost, params: ViewImageParam
 /** The task tool: start, steer, cancel or list this bot's background tasks. */
 async function executeTask(host: BotRuntimeToolHost, params: TaskParams): Promise<string> {
 	const tasks = host.tasks!;
-	try {
-		switch (params.action) {
-			case "start": {
-				const origin = params.for_message ?? host.triggerMessageId();
-				if (!params.workflow || !params.title?.trim() || !params.brief?.trim())
-					throw new TaskError("start needs workflow, title and brief");
-				if (origin == null) throw new TaskError("start needs for_message: the requester's message #id");
-				const id = await tasks.start(host.bot.id, origin, params.workflow, params.title.trim(), params.brief.trim());
-				host.recordEvent("task_started", { task_id: id, workflow: params.workflow });
-				return `started ${id}; tell the requester now, the result will arrive as [task ${id} …]`;
-			}
-			case "message":
-				if (!params.task_id || !params.text?.trim()) throw new TaskError("message needs task_id and text");
-				tasks.message(host.bot.id, params.task_id, params.text.trim());
-				return `forwarded to ${params.task_id}`;
-			case "cancel":
-				if (!params.task_id) throw new TaskError("cancel needs task_id");
-				tasks.cancel(host.bot.id, params.task_id);
-				return `cancelled ${params.task_id}`;
-			case "status":
-				return tasks.describe(host.bot.id);
+	switch (params.action) {
+		case "start": {
+			const origin = params.for_message ?? host.triggerMessageId();
+			if (!params.workflow || !params.title?.trim() || !params.brief?.trim())
+				throw new TaskError("start needs workflow, title and brief");
+			if (origin == null) throw new TaskError("start needs for_message: the requester's message #id");
+			const id = await tasks.start(host.bot.id, origin, params.workflow, params.title.trim(), params.brief.trim());
+			host.telemetry.recordEvent("task_started", { task_id: id, workflow: params.workflow });
+			return `started ${id}; tell the requester now, the result will arrive as [task ${id} …]`;
 		}
-	} catch (error) {
-		if (error instanceof TaskError) throw new Error(`task failed: ${error.message}`);
-		throw error;
+		case "message":
+			if (!params.task_id || !params.text?.trim()) throw new TaskError("message needs task_id and text");
+			tasks.message(host.bot.id, params.task_id, params.text.trim());
+			return `forwarded to ${params.task_id}`;
+		case "cancel":
+			if (!params.task_id) throw new TaskError("cancel needs task_id");
+			tasks.cancel(host.bot.id, params.task_id);
+			return `cancelled ${params.task_id}`;
+		case "status":
+			return tasks.describe(host.bot.id);
 	}
-	throw new Error("task failed: unknown action");
 }
 
 /** tg_download: any attachment, by this bot's (or a sibling bot's) file_id, into /work/inbox. */
 async function downloadToBox(
 	host: BotRuntimeToolHost,
 	messageId: number,
+	signal?: AbortSignal,
 ): Promise<{ path: string; size: number; kind: string }> {
 	const chatId = host.config.groupChatId;
 	const row = groupMessage(host.db, chatId, messageId);
@@ -185,41 +181,38 @@ async function downloadToBox(
 	// with an attachment always resolves; only a removed sibling bot leaves it dangling.
 	const source = downloadSource(host.db, host.api, host.bot.id, media.file_unique_id, host.botApis);
 	if (!source) throw new Error("tg_download failed: file_id_unavailable");
-	const file = await source.api.getFile(source.fileId).catch((error: unknown) => {
+	const file = await source.api.getFile(source.fileId, signal).catch((error: unknown) => {
 		if (error instanceof Error && /file is too big/i.test(error.message)) throw new Error(tooBig);
 		throw error;
 	});
 	if (!file.file_path) throw new Error("tg_download failed: telegram_file_unavailable");
-	const bytes = await source.api.downloadFile(file.file_path);
+	const bytes = await source.api.downloadFile(file.file_path, signal);
 	const extension = /\.[A-Za-z0-9]{1,8}$/.exec(file.file_path)?.[0] ?? "";
+	signal?.throwIfAborted();
 	const path = await host.box!.writeFile(`inbox/${messageId}${extension}`, bytes);
-	host.recordEvent("tool_tg_download", { kind: media.kind, bytes: bytes.byteLength });
+	host.telemetry.recordEvent("tool_tg_download", { kind: media.kind, bytes: bytes.byteLength });
 	return { path, size: bytes.byteLength, kind: media.kind };
 }
 
 export function buildBotRuntimeTools(host: BotRuntimeToolHost) {
 	const chatId = host.config.groupChatId;
 	const sendDef = host.box ? sendToolWithFiles() : TOOL_DEFS[0];
-	const sendTool = {
-		name: "send",
-		label: "Send",
-		description: sendDef.description,
-		parameters: sendDef.parameters,
+	const sendTool = defineTool({
+		...sendDef,
+		executionMode: "sequential",
 		exposure: TOOL_EXPOSURE.send,
 		// A script's send (nested id "<parent>/<n>") keeps typing on: the script is still working.
-		execute: async (toolCallId: string, params: SendParams) => {
+		execute: async (toolCallId: string, params: SendParams, signal?: AbortSignal) => {
+			signal?.throwIfAborted();
 			return await executeSend(host, params, !toolCallId.includes("/"));
 		},
-	};
+	});
 	const searchTool = {
-		name: "search",
-		label: "Search",
-		description: TOOL_DEFS[1].description,
-		parameters: TOOL_DEFS[1].parameters,
+		...TOOL_DEFS[1],
 		exposure: TOOL_EXPOSURE.search,
-		execute: async (_toolCallId: string, params: SearchParams) => {
-			const result = await runTinyFishTool(host.config.tinyfishApiKey, params);
-			host.recordEvent(result.event.kind, result.event.payload);
+		execute: async (_toolCallId: string, params: SearchParams, signal?: AbortSignal) => {
+			const result = await runTinyFishTool(host.config.tinyfishApiKey, params, {}, signal);
+			host.telemetry.recordEvent(result.event.kind, result.event.payload);
 			return {
 				content: [{ type: "text" as const, text: result.content }],
 				details: result.details,
@@ -227,12 +220,10 @@ export function buildBotRuntimeTools(host: BotRuntimeToolHost) {
 		},
 	};
 	const viewImageTool = {
-		name: TOOL_DEFS[2].name,
-		label: TOOL_DEFS[2].label,
-		description: TOOL_DEFS[2].description,
-		parameters: TOOL_DEFS[2].parameters,
+		...TOOL_DEFS[2],
 		exposure: TOOL_EXPOSURE.view_image,
-		execute: async (_toolCallId: string, params: ViewImageParams) => await executeViewImage(host, params),
+		execute: async (_toolCallId: string, params: ViewImageParams, signal?: AbortSignal) =>
+			await executeViewImage(host, params, signal),
 	};
 	const taskTool = {
 		...taskToolDefinition(host.tasks?.workflows ?? []),
@@ -248,12 +239,8 @@ export function buildBotRuntimeTools(host: BotRuntimeToolHost) {
 		execute: async (_toolCallId: string, params: MessageQuery) => {
 			try {
 				const result = queryMessages(host.db, chatId, params);
-				host.recordEvent("tool_messages", { rows: result.rows.length });
-				return {
-					content: [{ type: "text" as const, text: JSON.stringify(result) }],
-					details: { rows: result.rows.length },
-					structuredContent: result as unknown as JsonValue,
-				};
+				host.telemetry.recordEvent("tool_messages", { rows: result.rows.length });
+				return structured(result);
 			} catch (error) {
 				if (error instanceof MessageQueryError) throw new Error(error.message);
 				throw error;
@@ -266,15 +253,19 @@ export function buildBotRuntimeTools(host: BotRuntimeToolHost) {
 				{
 					...downloadDef,
 					exposure: "codemode" as const,
-					execute: async (_toolCallId: string, params: { message_id: number }) =>
-						structured(await downloadToBox(host, params.message_id)),
+					execute: async (_toolCallId: string, params: { message_id: number }, signal?: AbortSignal) =>
+						structured(await downloadToBox(host, params.message_id, signal)),
 				},
 				{
 					...execDef,
 					exposure: "codemode" as const,
-					execute: async (_toolCallId: string, params: { command: string; timeout_s?: number }) => {
-						const result = await host.box!.exec(params.command, params.timeout_s);
-						host.recordEvent("tool_sh_exec", {
+					execute: async (
+						_toolCallId: string,
+						params: { command: string; timeout_s?: number },
+						signal?: AbortSignal,
+					) => {
+						const result = await host.box!.exec(params.command, params.timeout_s, signal);
+						host.telemetry.recordEvent("tool_sh_exec", {
 							exit_code: result.exit_code,
 							timed_out: result.timed_out,
 							bytes: result.output.length,
@@ -309,7 +300,7 @@ export function buildBotRuntimeTools(host: BotRuntimeToolHost) {
 							description: tool.description,
 							inputSchema: tool.parameters as unknown as CodemodeJsonSchema,
 							...("outputSchema" in tool ? { outputSchema: tool.outputSchema as unknown as CodemodeJsonSchema } : {}),
-							execute: async (args: unknown) => {
+							execute: async (args: unknown, context) => {
 								// A job's sandbox calls tools directly, outside Pi's tool pipeline: validate like a turn does.
 								const params = validateToolArguments(tool as never, {
 									type: "toolCall",
@@ -317,7 +308,9 @@ export function buildBotRuntimeTools(host: BotRuntimeToolHost) {
 									name: tool.name,
 									arguments: args as never,
 								});
-								const result = await (tool.execute as (id: string, params: unknown) => Promise<any>)("job", params);
+								const result = await (
+									tool.execute as (id: string, params: unknown, signal: AbortSignal) => Promise<any>
+								)("job", params, context.signal);
 								return (
 									result.structuredContent ??
 									result.content.map((block: { text?: string }) => block.text ?? "").join("\n")
@@ -333,39 +326,49 @@ export function buildBotRuntimeTools(host: BotRuntimeToolHost) {
 		execute: async (_toolCallId: string, params: JobParams) => {
 			const origin = params.for_message ?? host.triggerMessageId();
 			if (origin == null) throw new Error("job failed: needs for_message, the requester's message #id");
-			try {
-				const id = jobs!.start(origin, params.title.trim(), params.code);
-				host.recordEvent("job_started", { job_id: id });
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text: `started ${id}; tell the requester now, the result will arrive as [job ${id} …]`,
-						},
-					],
-					details: {},
-				};
-			} catch (error) {
-				if (error instanceof JobError) throw new Error(`job failed: ${error.message}`);
-				throw error;
-			}
+			const id = jobs!.start(origin, params.title.trim(), params.code);
+			host.telemetry.recordEvent("job_started", { job_id: id });
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `started ${id}; tell the requester now, the result will arrive as [job ${id} …]`,
+					},
+				],
+				details: {},
+			};
 		},
 	};
 
 	// Tool order is cache-visible protocol: never reorder (docs/cache.md).
-	const enabled: Record<string, boolean> = {
-		send: host.bot.tools.send,
-		search: host.bot.tools.search,
-		view_image: host.bot.tools.viewImage,
-		task: host.tasks != null,
-		job: jobs != null,
-	};
-	const activeTools = [sendTool, searchTool, viewImageTool, taskTool, jobTool].filter((tool) => enabled[tool.name]);
+	const activeTools = [
+		...(host.bot.tools.send ? [sendTool] : []),
+		...(host.bot.tools.search ? [searchTool] : []),
+		...(host.bot.tools.viewImage ? [viewImageTool] : []),
+		...(host.tasks ? [taskTool] : []),
+		...(jobs ? [jobTool] : []),
+	];
 	// Pi renders the codemode declaration from the callable tools; it is pinned by the Pi
 	// version and these tools, both already in the fingerprint.
 	const declaredTools: readonly ProviderToolProtocol[] = host.bot.tools.codemode
 		? [...activeTools, CODEMODE_FINGERPRINT_ENTRY, ...scriptTools]
 		: activeTools;
 
-	return { activeTools, scriptTools, declaredTools, jobs };
+	// Pi can abort a codemode VM before its host tool finishes. Join those host effects before
+	// replacing the session or closing SQLite; native signals prevent queued calls from starting.
+	const pending = new Set<Promise<unknown>>();
+	for (const tool of [...activeTools, ...scriptTools] as ToolDefinition[]) {
+		const execute = tool.execute;
+		tool.execute = (...args) => {
+			const work = Promise.resolve()
+				.then(() => {
+					args[2]?.throwIfAborted();
+					return execute(...args);
+				})
+				.finally(() => pending.delete(work));
+			pending.add(work);
+			return work;
+		};
+	}
+	return { activeTools, scriptTools, declaredTools, jobs, waitForTools: () => Promise.allSettled([...pending]) };
 }

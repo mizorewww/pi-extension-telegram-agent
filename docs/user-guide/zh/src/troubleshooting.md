@@ -1,6 +1,6 @@
 # 故障排查
 
-先跑一次只读诊断，它会指出问题卡在哪一步：
+先跑一次只读诊断，结合最近请求、回复义务和日志定位问题：
 
 ```bash
 bun run debug -- --since 30m
@@ -10,7 +10,7 @@ bun run debug -- --since 30m
 
 ## 启动时报配置错误
 
-错误会一次列出所有有问题的字段和原因（token 等值不会回显）。按提示改 `telegram.config.ts` 或 `.env` 后重启；模型未就绪时用 Pi `/login`、`/model` 修好。
+配置错误会列出有问题的字段和原因（token 等值不会回显）。按提示改 `telegram.config.ts` 或 `.env` 后重启；模型未就绪时用 Pi `/login`、`/model` 修好。
 
 ## 配置有效但 bot 没上线
 
@@ -23,7 +23,7 @@ systemctl --user status telegram-agent
 ## 群里 @ 了 bot 但没反应
 
 - 确认 BotFather 里已关闭 group privacy，bot 在正确的群里且能发言。
-- 跑 `bun run debug`：`pending_reply_obligation` 表示还欠着这条回复（bot 会在下次触发或重启时补上）；`route_without_run` 表示路由了但没发起请求，看日志里的 `flush_failed` / `provider_attempt_failed`。
+- 跑 `bun run debug`：`context.pending_reply_obligations > 0` 表示还有待答消息（bot 会在下次触发或重启时补上）；对比 `claims` 与 `runs`，并看日志里的 `flush_failed` / `provider_attempt_failed`。
 - 401：token 被撤销，修正 `.env` 后重启。
 - 409：同一个 token 被另一个进程使用。确认只有一个 daemon 在运行（不要在 systemd 之外再 `bun run start` 一份，也不要在另一台机器上用同一 token 启动）。
 
@@ -33,7 +33,7 @@ bot 的上下文可能被某个误解带偏了（摘要会把它延续下去）�
 
 ## 视频没被理解
 
-`bun run debug` 报 `video_transcoder_unavailable` 表示缺少 `ffmpeg`/`ffprobe`。安装后重启即可，其它功能不受影响。超过 20 MiB 的视频不会处理。
+启动日志报 `video_transcoder_unavailable` 表示缺少 `ffmpeg`/`ffprobe`。安装后重启即可，其它功能不受影响。超过 20 MiB 的视频不会处理。
 
 ## 搜索或读网页失败
 

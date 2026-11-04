@@ -34,12 +34,10 @@ interface AgentSendContext {
 	/** The bot's work box; `files` are only accepted when it has one. */
 	box: WorkBox | null;
 	triggerMessageId: number | null;
-	recordPublicSend(): void;
 	markVisible(ids: number[]): void;
 	onSent(raw: Record<string, unknown>): void;
 	recordEvent(kind: string, payload: unknown): void;
 	stopTyping(): void;
-	recordDuration(durationMs: number): void;
 }
 
 interface SendFailure {
@@ -87,23 +85,6 @@ async function prepareFiles(files: readonly SendFile[] | undefined, box: WorkBox
 		}
 	}
 	return prepared;
-}
-
-/** Own the entire irreversible send boundary, including every observer and finalizer. */
-export async function executeAgentSend(params: SendParams, context: AgentSendContext) {
-	const startedAt = Date.now();
-	try {
-		return await sendAttempt(params, context);
-	} finally {
-		try {
-			context.recordDuration(Date.now() - startedAt);
-		} catch (error) {
-			log.warn("agent_send", "duration_observer_failed", {
-				bot_id: context.botId,
-				category: localFailureCategory(error),
-			});
-		}
-	}
 }
 
 /** Reject before any network call; returns the params to send and the sticker file_id, if any. */
@@ -160,7 +141,7 @@ function preflight(
 	throw new Error(`candidate invariant violated: sticker ${params.sticker} is not sendable by this bot (no file_id)`);
 }
 
-async function sendAttempt(requested: SendParams, context: AgentSendContext) {
+export async function executeAgentSend(requested: SendParams, context: AgentSendContext) {
 	const { params, stickerFileId } = preflight(requested, context);
 	let files: PreparedFiles;
 	try {
@@ -183,13 +164,6 @@ async function sendAttempt(requested: SendParams, context: AgentSendContext) {
 		trigger_message_id: context.triggerMessageId,
 	});
 	const chatId = context.chatId;
-	const primaryComponent = params.message
-		? "message"
-		: params.files?.length
-			? "file"
-			: params.sticker
-				? "sticker"
-				: "message";
 	const sent: number[] = [];
 	const failures: SendFailure[] = [];
 	let reactedTo: number | null = null;
@@ -223,24 +197,13 @@ async function sendAttempt(requested: SendParams, context: AgentSendContext) {
 				stage: "canonical_persist",
 				category: localFailureCategory(persistFailure),
 			});
-		await local(component, "telemetry_failed", () => context.recordPublicSend());
 		await local(component, "visibility_failed", () => context.markVisible([messageId]));
 		await local(component, "broadcast_failed", () => context.onSent(raw));
-		if (eventKind)
-			await local(component, "event_failed", () => context.recordEvent(eventKind, { message_id: messageId }));
+		if (eventKind) context.recordEvent(eventKind, { message_id: messageId });
 	};
 	const finish = async (outcome: SendDegradedOutcome | null) => {
-		if (outcome == null || sent.length > 0)
-			await local(primaryComponent, "event_failed", () =>
-				context.recordEvent("send", {
-					reply_to: params.reply_to ?? null,
-					sticker: params.sticker ?? null,
-					reaction: params.reaction ?? null,
-					reacted_to: reactedTo,
-					sent,
-				}),
-			);
-		await local(primaryComponent, "typing_stop_failed", () => context.stopTyping());
+		if (outcome == null || sent.length > 0) context.recordEvent("send", { sent, reacted_to: reactedTo });
+		context.stopTyping();
 		if (outcome == null && failures.length === 0) {
 			log.info("agent_send", "committed", {
 				bot_id: context.botId,
@@ -253,13 +216,7 @@ async function sendAttempt(requested: SendParams, context: AgentSendContext) {
 		const primary =
 			(degraded === "partial" ? failures.find((failure) => failure.stage === "telegram_create") : undefined) ??
 			failures[0]!;
-		try {
-			await retrySqliteBusy(() =>
-				context.recordEvent("send_degraded", { outcome: degraded, sent: [...sent], failures }),
-			);
-		} catch {
-			// The bounded, redacted process log remains available when SQLite/event sinks are unavailable.
-		}
+		context.recordEvent("send_degraded", { outcome: degraded, sent, failures });
 		log.warn("agent_send", "degraded", {
 			bot_id: context.botId,
 			outcome: degraded,
@@ -370,9 +327,7 @@ async function sendAttempt(requested: SendParams, context: AgentSendContext) {
 				target_message_id: params.reply_to,
 				trigger_message_id: context.triggerMessageId,
 			});
-			await local("message", "event_failed", () =>
-				context.recordEvent("reaction_failed", { message_id: params.reply_to, category }),
-			);
+			context.recordEvent("reaction_failed", { message_id: params.reply_to, category });
 		}
 	}
 	return await finish(null);

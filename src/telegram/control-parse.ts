@@ -1,6 +1,5 @@
 import { FIRE_BOT_TRIGGER_BUDGET } from "../agent/router.ts";
 import type { ManualCompactResult } from "../agent/runtime.ts";
-import { botStatusFields, type BotStatusView } from "../observability/status.ts";
 import { extractUpdateMessage } from "./normalize.ts";
 
 const MAX_REPLY_CHARS = 3500;
@@ -224,26 +223,6 @@ export function bounded(value: string): string {
 
 export function boundedReply(value: string): string {
 	return value.length <= MAX_REPLY_CHARS ? value : `${value.slice(0, MAX_REPLY_CHARS - 1)}…`;
-}
-
-function escapeMarkdown(value: string): string {
-	return bounded(value).replace(/[\\`*_[\]{}()#+\-.!|>]/g, "\\$&");
-}
-
-function escapeStatusValue(value: string): string {
-	return value.replace(/[\\`*_[\]]/g, "\\$&");
-}
-
-export function boundedMarkdownStatus(view: BotStatusView): string {
-	const section = [
-		`## ${escapeMarkdown(view.name)} · ${escapeMarkdown(view.id)}`,
-		...botStatusFields(view, true).map((field) =>
-			field.key === "context_breakdown"
-				? `- **${field.label}**：\n${field.value}`
-				: `- **${field.label}**：${escapeStatusValue(field.value)}`,
-		),
-	].join("\n");
-	return boundedReply(`# Telegram Agent 状态\n\n${section}`);
 }
 
 export const USAGE_TEXT = [

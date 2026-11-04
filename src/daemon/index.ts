@@ -255,12 +255,12 @@ const onMessage = async (result: IngestResult, update: unknown, botId: string) =
 		.get(result.chatId, result.messageId) as MessageRow | null;
 	if (!row) return;
 	const command = parseTelegramControlCommand(update, botId, identities);
-	if (command) await telegramControlCoordinator.handle(command);
+	if (command) telegramControlCoordinator.dispatch(command);
 	else router.route(result, row);
 };
 const onCallback = async (update: unknown, botId: string) => {
 	const command = parseTelegramControlCallback(update, botId, config.groupChatId);
-	if (command) await telegramControlCoordinator.handle(command);
+	if (command) telegramControlCoordinator.dispatch(command);
 };
 const pollers = config.bots.map(
 	(bot) => new Poller(db, bot.id, botApis.get(bot.id)!, config.groupChatId, onMessage, onCallback),
@@ -296,6 +296,7 @@ async function shutdown(signal: string, exitCode = 0) {
 	// wait for the poller loops to actually exit; stop() aborts any in-flight long
 	// poll or backoff sleep, so this returns promptly inside the hard shutdown bound
 	await Promise.allSettled([pollerRuns]);
+	await telegramControlCoordinator.drain();
 	db.close();
 	clearTimeout(hardTimer);
 	process.exit(exitCode);

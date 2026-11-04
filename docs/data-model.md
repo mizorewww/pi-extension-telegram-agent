@@ -49,3 +49,5 @@ SQLite（WAL），默认 `data/agent.db`，schema 在 `src/db/schema.sql`，启�
 启动时和之后每 24 小时执行：`agent_events` 与 `llm_runs` 90 天，`raw_updates` 30 天，`message_events` 365 天。旧 `message_events` 只有在所有已配置 bot 的 cursor 都已越过、且没有回复义务或 pending dispatch 引用时才删除。canonical 消息、revision、media 行与 session 文件不按时间清理；本地媒体文件由成功压缩后的引用回收处理（见 [architecture.md](architecture.md#媒体)）。
 
 `data/daemon.log` 不是业务数据，见 [debugging-guide.md](engineering/debugging-guide.md)。
+
+`llm_runs` 的历史诊断列（payload 分叉、耗时、构成估算、输入/发送计数等）保留 schema 与已有数据，Pi 1.5 重构后不再填充。当前写入字段与统计口径见 [telemetry.md](telemetry.md)。

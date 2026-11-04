@@ -11,12 +11,11 @@ import type { BotConfig, TelegramAdmin } from "../config.ts";
 import { loadBotStats } from "../db/usage.ts";
 import { log } from "../observability/log.ts";
 import type { RuntimeControlSnapshot } from "../observability/usage.ts";
-import { buildBotStatusView, renderBotStatusPlain } from "../observability/status.ts";
+import { renderBotStatus } from "../observability/status.ts";
 import { updateBotConfigField, updateBotModelConfig } from "../onboarding/config-core.ts";
 import type { InlineKeyboardMarkup } from "./api.ts";
 import {
 	bounded,
-	boundedMarkdownStatus,
 	boundedReply,
 	type ControlBotIdentity,
 	type ControlSender,
@@ -68,15 +67,12 @@ export interface TelegramControlResult {
 	replyToMessageId: number;
 	replyBotId: string;
 	text: string | null;
-	/** Markdown sent as classic Telegram entities (old clients cannot show Rich Messages). */
-	markdown?: string;
 	replyMarkup?: InlineKeyboardMarkup;
 	callbackNotice?: string;
 }
 
 interface ControlExecutionResult {
 	text: string;
-	markdown?: string;
 	replyMarkup?: InlineKeyboardMarkup;
 	callbackNotice?: string;
 	outcome: string;
@@ -118,16 +114,16 @@ export class TelegramControlCommandService {
 			return this.result(command, "权限不足：此操作仅限 telegram_admins 白名单。");
 		}
 
-		if (mutation) {
+		if (command.action.kind === "set" || command.action.kind === "model") {
 			return await this.enqueueMutation(async () => {
 				const executed = await this.execute(command);
 				this.audit(command, true, executed.outcome, startedAt);
-				return { ...this.result(command, executed.text, executed.markdown), replyMarkup: executed.replyMarkup };
+				return { ...this.result(command, executed.text), replyMarkup: executed.replyMarkup };
 			});
 		}
 		const executed = await this.execute(command);
 		this.audit(command, true, executed.outcome, startedAt);
-		return this.result(command, executed.text, executed.markdown);
+		return this.result(command, executed.text);
 	}
 
 	private async handleCallback(command: ParsedTelegramControlCommand): Promise<TelegramControlResult> {
@@ -241,12 +237,7 @@ export class TelegramControlCommandService {
 	private formatStatus(botId: string): ControlExecutionResult {
 		const bot = this.bot(botId);
 		const snapshot = this.runtime(botId).controlSnapshot();
-		const view = buildBotStatusView(bot, loadBotStats(this.db, bot.id), snapshot);
-		return {
-			text: renderBotStatusPlain(view),
-			markdown: boundedMarkdownStatus(view),
-			outcome: "ok",
-		};
+		return { text: renderBotStatus(bot, snapshot, loadBotStats(this.db, bot.id)), outcome: "ok" };
 	}
 
 	/** Button menu; a choice writes through to the config file, the only source of truth. */
@@ -364,42 +355,32 @@ export class TelegramControlCommandService {
 	}
 
 	private audit(command: ParsedTelegramControlCommand, authorized: boolean, outcome: string, startedAt: number): void {
-		const target = [
-			"status",
-			"compact",
-			"new",
-			"set",
-			"model",
-			"fire",
-			"box_reset",
-			"task_status",
-			"task_cancel",
-		].includes(command.action.kind)
-			? command.replyBotId
-			: null;
 		const finishedAt = Date.now();
-		this.db.query("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES (?, ?, ?, ?)").run(
-			command.replyBotId,
-			finishedAt,
-			CONTROL_COMMAND_AUDIT_EVENT,
-			JSON.stringify({
-				command: command.action.kind,
-				target,
-				sender_id: command.sender.id,
-				authorized,
-				outcome,
-				duration_ms: Math.max(0, finishedAt - startedAt),
-			}),
-		);
+		try {
+			this.db.query("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES (?, ?, ?, ?)").run(
+				command.replyBotId,
+				finishedAt,
+				CONTROL_COMMAND_AUDIT_EVENT,
+				JSON.stringify({
+					command: command.action.kind,
+					target: command.replyBotId,
+					sender_id: command.sender.id,
+					authorized,
+					outcome,
+					duration_ms: Math.max(0, finishedAt - startedAt),
+				}),
+			);
+		} catch {
+			log.warn("telegram_control", "audit_failed", { bot_id: command.replyBotId });
+		}
 	}
 
-	private result(command: ParsedTelegramControlCommand, text: string | null, markdown?: string): TelegramControlResult {
+	private result(command: ParsedTelegramControlCommand, text: string | null): TelegramControlResult {
 		return {
 			chatId: command.chatId,
 			replyToMessageId: command.messageId,
 			replyBotId: command.replyBotId,
 			text: text == null ? null : boundedReply(text),
-			...(markdown ? { markdown } : {}),
 		};
 	}
 

@@ -10,14 +10,18 @@
 - **加密思维链签名是 provider 计费、本地不可见的成本。** Devin `sealed` signature 随每条 assistant 回放（实测 ~39K token/请求），Pi `estimateTokens` 只算 thinking 文本；`compactionTextBudget` 按 /4 折入 keepRecent 成本。
 - **`/new` 必须能打断让它不得不按的那次卡死。** 抢占式：abort run/retry/compaction + 停本 bot 任务 + 换 session（事务内清 obligations：新 session 看不见旧上下文）+ 重置工作区。
 - **图片预算必须在 Pi 准备压缩之前换算。** 文字小于预算时 Pi 在触发 `session_before_compact` 之前就返回，钩子来不及；所以在 `agent_end` / `compact()` 前临时调整 `keepRecentTokens`。
-- **升级 Pi 时复核的行为差异。** `COMPACTION_SUMMARY_PREFIX` 不再导出（`src/agent/extensions/cache-observer.ts` 的本地常量）；`context` handler 收不到 system message；每轮用 `sendCustomMessage(batch, { triggerTurn: true })` 启动：Pi 1.4.0 的 custom 触发与 `prompt()` 走同一个 `_prepareRun`（含压缩检查），但不校验认证、正在 streaming 时会改为 steer 并立即返回，所以 runtime 在调用前先检查 `isStreaming`。
+- **升级 Pi 时复核的行为差异。** `context` handler 收不到 system message；每轮用 `sendCustomMessage(batch, { triggerTurn: true })` 启动：Pi 1.5.0 的 custom 触发与 `prompt()` 走同一个 `_prepareRun`（含压缩检查），但不校验认证、正在 streaming 时会改为 steer 并立即返回，所以 runtime 在调用前先检查 `isStreaming`。
 - **脚本执行用 Pi 原生 codemode，不自建沙箱。** 自建的 `run_js`（子进程 + bubblewrap）已删除；QuickJS VM 的边界由 Pi 维护，本仓库只加宿主侧约束（脚本图片不进 session；脚本里的 `send` 不结束本轮）。需要真实命令行时走每 bot 的 rootless Docker 工作区，而不是放宽 VM。
 - **2026-11-01 审计确认仍需自写、不能换成 Pi 的部分**：摘要器（Pi 模板固定英文、不收图、保留 thinking）、`provider-guard`（Pi `timeoutMs` 不是整流截止）、`session-trim`（无公开 API）、任务 RPC 帧（`RpcClient` 写死 `spawn("node")`）、`cache-observer` 的 miss 估算（Pi 的 `core/cache-stats` 未导出）。不采用：运行中换工具集 / `context_edit` / 会话内 `setModel`（改写前缀）、skills 与 prompt templates（加 system 字节）。
 - **bot session 不加载项目或用户 extension**（`noExtensions`），shared `ModelRuntime` 只加载用户级已安装的 provider extension 以获得模型目录与认证。
+- **Pi 1.5 的 `agent_before_settle` 接管补答续轮。** 只在健康完成、直接点名仍欠公开回复时追加一次持久化 custom message，并请求 `continue`。不另开第二次 `prompt()`，重试、自动压缩和工具执行状态由 Pi 维护；发送结果未知时不补发。
+- **原生 abort 之外仍要等待业务工作结束。** `/new` 等待实际 flush、手动压缩与宿主工具 Promise（codemode VM 取消不代表宿主工具已结束）；不能用超时竞速后换 session，否则旧任务会把 cursor、可见集或义务写进新 epoch。Docker 工作区和任务在换 session 前停止。
+- **配置结构校验由 Pi schema 负责，编辑器类型从同一 schema 推导。** 保留跨字段与部署约束。配置入口用 Jiti `evalModule` 每次执行最新源码，依赖仍走原生加载；直接 require 配置会被 Bun 模块缓存留住旧值，而全量禁用原生加载会破坏部分依赖；`/set`、`/model` 继续验证临时副本并原子写回。
+- **保留事实，删除自建诊断推断。** 实时 session/context 用 Pi API；SQLite 留原始用量、费用和严格 prefix cache 估算。删除占比图、payload 字节快照、自动 findings；遥测失败只在集中 sink 捕获，不能改变业务结果。
 
 ## 正确性边界
 
-- **发到群里的消息一律不用 Telegram Rich Message。** 部分群友的客户端没更新，看不到 Rich Message，而 Bot API 不会因此报错，没法退回。bot 发言和 `/status` 都走本地 Markdown → entities（`src/telegram/markdown.ts`）的经典 `sendMessage`。收到的 Rich Message 仍会被解析成纯文本给模型看。
+- **发到群里的消息一律不用 Telegram Rich Message。** 部分群友的客户端没更新，看不到 Rich Message，而 Bot API 不会因此报错，没法退回。bot 发言走本地 Markdown → entities（`src/telegram/markdown.ts`），`/status` 走纯文本，均使用经典 `sendMessage`。收到的 Rich Message 仍会被解析成纯文本给模型看。
 - **Telegram create 是不可回滚的提交点。** 只有确定性 4xx 且尚无任何提交时才把错误还给模型；其余一律结果未知、不重发。这是重复消息与漏发之间有意的取舍。
 - **概率路由 busy/cooldown 时跳过，不改投。** 改投会让概率分布依赖运行时状态，并放大调用量。
 - **最近 assistant 失败时取消阈值压缩。** provider 故障期间叠加摘要请求只会把一次故障放大成多次付费失败；overflow 恢复仍走 Pi 原生路径。

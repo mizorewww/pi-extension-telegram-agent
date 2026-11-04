@@ -1,10 +1,10 @@
 // Loaded into every task run (pi -e /opt/tg-task-bridge/index.ts). The `report` tool is how a
-// task tells the Telegram bot what it is doing; the daemon reads the call from the RPC event
-// stream, so the tool itself only acknowledges.
+// task tells the Telegram bot what it is doing; the daemon consumes successful tool results from the RPC event stream.
 
 import { Type } from "typebox";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-export default function (pi: any) {
+export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "report",
 		label: "Report",
@@ -19,7 +19,7 @@ export default function (pi: any) {
 				}),
 			),
 		}),
-		execute: async (_id: string, params: { kind: string }) => ({
+		execute: async (_id: string, params) => ({
 			content: [
 				{
 					type: "text",
@@ -27,6 +27,8 @@ export default function (pi: any) {
 				},
 			],
 			details: {},
+			structuredContent: params,
+			terminate: params.kind !== "progress",
 		}),
 	});
 }

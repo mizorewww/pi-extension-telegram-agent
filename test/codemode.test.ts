@@ -1,6 +1,7 @@
 // Codemode boundary: scripts get no host capabilities and reach only callable tools.
 
-import { createAssistantMessageEventStream, Type } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

@@ -58,6 +58,8 @@ systemctl --user restart telegram-agent     # 部署新代码后
 
 ## 部署新代码
 
+Pi 升级到 1.5.0 时，宿主依赖与任务镜像必须一起更新（镜像构建见 [sandbox runbook](sandbox.md)），并更新服务器安装的 provider 扩展以兼容 1.5。cache schema v47 会启用新 session/epoch；旧 session 文件与 SQLite schema 保留。
+
 ```bash
 git pull --ff-only
 bun install --frozen-lockfile

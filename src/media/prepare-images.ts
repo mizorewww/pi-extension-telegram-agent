@@ -6,7 +6,7 @@
 // pruning and projection need no record of them. No provider call happens here.
 
 import type { Database } from "bun:sqlite";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { convertToPng, resizeImage } from "@earendil-works/pi-coding-agent";
@@ -101,7 +101,8 @@ export async function prepareMediaImages(
 		const images: PreparedImage[] = [];
 		for (const frame of frames.frames) {
 			const bounded = await boundImage(options.resize ?? resizeImage, frame.bytes, frame.mimeType);
-			images.push(bounded ? { ...bounded, position: frame.position } : frame);
+			if (!bounded) return { ok: false, outcome: "conversion_failed" };
+			images.push({ ...bounded, position: frame.position });
 		}
 		return { ok: true, kind: "video", images };
 	}
@@ -114,11 +115,8 @@ export async function prepareMediaImages(
 		bytes = new Uint8Array(Buffer.from(converted.data, "base64"));
 		mimeType = converted.mimeType;
 	}
-	// A resize failure falls back to the converted/original image rather than dropping it.
 	const resized = await boundImage(options.resize ?? resizeImage, bytes, mimeType);
-	if (resized) return { ok: true, kind: "static", images: [resized] };
-	if (mimeType !== "image/png" && mimeType !== "image/jpeg") return { ok: false, outcome: "conversion_failed" };
-	return { ok: true, kind: "static", images: [{ bytes, mimeType }] };
+	return resized ? { ok: true, kind: "static", images: [resized] } : { ok: false, outcome: "conversion_failed" };
 }
 
 /** One image under the provider budget, or null when Pi cannot resize or encode it. */
@@ -128,7 +126,12 @@ async function boundImage(
 	mimeType: string,
 ): Promise<PreparedImage | null> {
 	const resized = await resize(bytes, mimeType, MEDIA_IMAGE_RESIZE).catch(() => null);
-	if (!resized || (resized.mimeType !== "image/png" && resized.mimeType !== "image/jpeg")) return null;
+	if (
+		!resized ||
+		resized.data.length > MEDIA_IMAGE_RESIZE.maxBytes ||
+		(resized.mimeType !== "image/png" && resized.mimeType !== "image/jpeg")
+	)
+		return null;
 	return { bytes: new Uint8Array(Buffer.from(resized.data, "base64")), mimeType: resized.mimeType };
 }
 
@@ -157,7 +160,12 @@ function existingImages(cacheDir: string, fileUniqueId: string): ImageRef[] {
 	const found = (slot: string): ImageRef | null => {
 		for (const mime of PREPARED_MIMES) {
 			const name = mediaCacheFileName(`${fileUniqueId}#${slot}`, extensionFor(mime));
-			if (existsSync(join(cacheDir, name))) return { name, mime };
+			try {
+				const bytes = statSync(join(cacheDir, name)).size;
+				if (bytes > 0 && Math.ceil(bytes / 3) * 4 <= MEDIA_IMAGE_RESIZE.maxBytes) return { name, mime };
+			} catch {
+				/* Missing cache files are regenerated below. */
+			}
 		}
 		return null;
 	};
@@ -181,7 +189,7 @@ export function createImageRefResolver(cacheDir: string): (ref: ImageRef) => Ima
 		if (!ref.name || basename(ref.name) !== ref.name || ref.name.includes("\0")) return null;
 		try {
 			const bytes = readFileSync(join(cacheDir, ref.name));
-			if (bytes.byteLength === 0) return null;
+			if (bytes.byteLength === 0 || Math.ceil(bytes.byteLength / 3) * 4 > MEDIA_IMAGE_RESIZE.maxBytes) return null;
 			return { type: "image", data: Buffer.from(bytes).toString("base64"), mimeType: ref.mime };
 		} catch {
 			return null;

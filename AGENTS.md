@@ -74,7 +74,7 @@
 - `bun test` 强制 UTC：涉时间序列化的测试必须 pin TZ（参考 `test/cache.test.ts`，生产为 Asia/Singapore）。
 - 本机 `telegram.config.ts`/`.env` 可能与生产共用 bot token：不要在开发机启动 daemon 或跑 e2e，两个 poller 会抢同一 token（409）并造成线上停摆。需要真实验证时在服务器上做。
 - `.env` 是 `key: value` 冒号格式，由 `src/config.ts` 自解析，不是 dotenv 的 `KEY=value`。
-- Pi 各包（agent-core、ai、coding-agent、tui，以及后台 job 直接用的 pi-codemode）精确锁定 registry `1.4.0`；升级必须同一原子提交一起更新 manifest、lock 并做兼容性验证。
+- Pi 各包（agent-core、ai、coding-agent、tui、schema，以及后台 job 直接用的 pi-codemode）精确锁定 registry `1.5.0`；升级必须同一原子提交一起更新 manifest、lock 并做兼容性验证。
 - sticker / alias 的 short_id 用 rowid 分配，不用 COUNT+1（并发 / 删除下撞号）。
 - `streamFunction` 包装（`src/agent/runtime.ts`）是 Pi 的官方注入形态（`Agent.streamFunction` 是公开可变字段，函数包函数注入 `cacheRetention`）；`createAgentSession()` 不接受 streamFn 选项，只能事后覆盖。升级 Pi 时仍必须验证该包装（见 `docs/engineering/decisions.md`）。
 

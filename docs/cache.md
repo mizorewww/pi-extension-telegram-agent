@@ -29,7 +29,7 @@ provider prefix cache 是本项目的第一成本杠杆。本文是“哪些字�
 2. 跑 `bun test test/cache.test.ts`，确认失败的正是你预期改变的那几项 golden，再更新 expected；
 3. 部署后每个 bot 会新建 session（新 epoch），首个请求冷缓存，旧 session 文件保留。
 
-当前 schema v46：工作区指引建议将带 LaTeX 公式的 Markdown 渲染为图片后发送，并加入 Markdown-it + KaTeX → Chromium 截图 → send files 的完整示例。渲染依赖在工作区按需安装；这是固定 prefix 的一次性变更，不给每轮追加动态提示。
+当前 schema v47：升级 Pi 1.5.0，补答通过 `agent_before_settle` 返回持久化 custom message 和 `continue: true`；新增 `tg-reply-repair` 扩展。工具 schema、共享 prompt 与消息序列化 grammar 不变。升级时 fingerprint 改变，每个 bot 新建 session 和 epoch，旧 session 文件保留。
 
 golden 意外失败是报警：先查原因，不要直接改 expected。
 
@@ -76,6 +76,6 @@ tools:    send, search, view_image, task[, codemode]（按 bot 开关与媒体�
 
 ## 遥测
 
-`tg-cache-observer` 在 `before_provider_request` 对 payload 分段（system / tools / 每条 message / 完整 payload）计算 deployment 本地 HMAC，记录相对上一请求的首个分叉位置，并按形状估算 system/tools/摘要/messages 的 token 占比。不保存明文。
+`tg-cache-observer` 在 `before_provider_request` 对 system、tools 与每条 message 计算 deployment 本地 HMAC，只在内存保留上一请求的 hash 列表，用于判断 prefix 是否可复用。不保留 payload 快照，不计算字节分叉位置或上下文构成占比。
 
 provider 没有返回 cache 用量时，若同一 cache cohort（provider/api/model/epoch/session/retention）的相邻两次请求 system、tools 相同，且上一次的 message hash 列表是这一次的严格前缀（上一次的列表只保存在内存里，重启后第一次请求不估算），就把上一次的 prompt token 记为 `cache_read_estimated`，界面用 `≈` 标出。这是结构上可复用的量，不是 provider 实际命中，也不改写原始 usage 与费用。字段口径见 [telemetry.md](telemetry.md)。
