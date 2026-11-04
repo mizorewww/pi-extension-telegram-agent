@@ -186,7 +186,9 @@ install -o root -g root -m 0644 "$release/deploy/telegram-agent.service" /etc/sy
 install -o root -g root -m 0755 "$release/deploy/telegram-agent" /usr/local/bin/telegram-agent
 systemctl daemon-reload
 systemctl stop telegram-agent.service
-systemctl reset-failed telegram-agent.service
+if systemctl is-failed --quiet telegram-agent.service; then
+  systemctl reset-failed telegram-agent.service
+fi
 ln -sfn "releases/$version" "$app/current.next"
 mv -Tf "$app/current.next" "$app/current"
 systemctl daemon-reload
