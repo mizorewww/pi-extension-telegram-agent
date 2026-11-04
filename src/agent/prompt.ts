@@ -1,4 +1,4 @@
-// Cache-visible protocol: changes start a new context epoch (docs/cache.md).
+// Cache-visible protocol: changes start a new context epoch.
 import { createHash } from "node:crypto";
 
 export const CACHE_SCHEMA_VERSION = 48; // Native Durable sessions, tools, images and compaction.

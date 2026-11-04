@@ -1,4 +1,4 @@
-// Serialize immutable Telegram events into the fixed LLM grammar (docs/cache.md, schema v8).
+// Serialize immutable Telegram events into the fixed LLM grammar (schema v8).
 // Grammar stability is a cache invariant: never change existing output shape.
 //
 // Media renders as a text placeholder (`[图片]` / `[sticker 😄]` / `[video]` ...); set names never

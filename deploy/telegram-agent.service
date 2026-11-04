@@ -1,0 +1,42 @@
+[Unit]
+Description=Pi Telegram agent
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=pi-telegram-agent
+Group=pi-telegram-agent
+SupplementaryGroups=tgbox
+WorkingDirectory=/var/lib/pi-telegram-agent
+Environment=HOME=/var/lib/pi-telegram-agent
+Environment=TG_CONFIG_DIR=/etc/pi-telegram-agent
+Environment=TG_STATE_DIR=/var/lib/pi-telegram-agent
+Environment=PI_CODING_AGENT_DIR=/var/lib/pi-telegram-agent/pi-agent
+Environment=PATH=/opt/pi-telegram-agent/node/bin:/usr/local/bin:/usr/bin:/bin
+Environment=TZ=Asia/Singapore
+ExecStartPre=/opt/pi-telegram-agent/node/bin/node /opt/pi-telegram-agent/current/deploy/rotate-log.mjs
+ExecStart=/opt/pi-telegram-agent/node/bin/node /opt/pi-telegram-agent/current/dist/src/daemon/index.js
+StandardOutput=append:/var/lib/pi-telegram-agent/daemon.log
+StandardError=append:/var/lib/pi-telegram-agent/daemon.log
+UMask=0077
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+ReadWritePaths=/etc/pi-telegram-agent /var/lib/pi-telegram-agent
+
+[Install]
+WantedBy=multi-user.target

@@ -1,49 +1,41 @@
 # AGENTS.md
 
-本文件是 agent 会话自动加载的唯一常载文档：短、稳定、高信号。详细内容一律在 `docs/`，这里只放哲学、路由、硬约束和坑。
+本文件是 agent 会话自动加载的唯一常载文档：短、稳定、高信号。用户说明统一在 `README.md`，发布变化在 `CHANGELOG.md`；这里保留工程约束。
 
 ## 1. 项目哲学
 
 - **极简，最少机制**：一套设计，不留兼容层。Breaking change 随时可以做，只要求迁移干净、一步到位。
-- **Pi 原生优先**：动手前先查 `node_modules/@earendil-works` 各包导出了什么；Pi 能做的事不自造轮子（结论见 `docs/engineering/decisions.md`）。
-- **不花冤枉钱**：能用确定性代码解决的不花 LLM token；任何功能先评估 cache hit 率与每 turn 新增 token（`docs/cache.md`）。
+- **Pi 原生优先**：动手前先查 `node_modules/@earendil-works` 各包导出了什么；Pi 能做的事不自造轮子。
+- **不花冤枉钱**：能用确定性代码解决的不花 LLM token；任何功能先评估 cache hit 率与每 turn 新增 token。
 - 删代码优先于加抽象；防御代码只防真实可能的分支。
 
 ## 2. 仓库地图
 
-- `docs/index.md` — 文档总索引
-- `docs/project.md` — 三个世界、行为约束、术语、部署边界
-- `docs/architecture.md` — 消息路径、发送边界、上下文、媒体、控制命令
-- `docs/cache.md` — provider 可见字节、fingerprint、改动流程（CACHE_SCHEMA_VERSION）
-- `docs/data-model.md` — SQLite schema 与保留期
-- `docs/telemetry.md` — 用量字段与公式
-- `docs/testing.md` — 验证漏斗与规范命令
-- `docs/engineering/debugging-guide.md` — 诊断报告、证据梯、日志契约
-- `docs/engineering/decisions.md` — 长期有效的设计取舍与生产事故（新结论加在这里）
-- `docs/runbooks/daemon.md` — 启停、systemd、部署、故障恢复
-- `docs/user-guide/` — 双语用户指南
-
-动手前只读与受影响边界相关的章节，不要把无关文档塞进上下文。
+- `README.md` — 安装、交互配置、使用与开发
+- `CHANGELOG.md` — 发布变化
+- `deploy/install.sh`、`deploy/configure.mjs` — 安装与配置的执行来源
+- `src/config.ts`、`src/db/schema.sql` — 配置与归档 schema
+- `scripts/release.mjs` — 发布产物与打包验证
 
 ## 3. 硬约束
 
-- **Cache invariant**：永不改写已存在的 provider prefix；动态内容只以新 suffix 追加。每个请求必须是下一请求的严格前缀：不要做“只挂在最后一条”的动态尾部。每批的 sticker 附注只经原生 `beforeRequest` 投影为紧跟该批的〔系统附注〕消息并永久保留，永不写入持久化 entry.model——compaction 直接读持久化字节。cache-visible 协议（system prompt shape、persona 序列化、tool schema 与顺序、消息 / 摘要序列化 grammar、sticker catalog block）任一变化：bump `CACHE_SCHEMA_VERSION`、更新 `test/cache.test.ts` golden、同步 `docs/cache.md`。
+- **Cache invariant**：永不改写已存在的 provider prefix；动态内容只以新 suffix 追加。每个请求必须是下一请求的严格前缀：不要做“只挂在最后一条”的动态尾部。每批的 sticker 附注只经原生 `beforeRequest` 投影为紧跟该批的〔系统附注〕消息并永久保留，永不写入持久化 entry.model——compaction 直接读持久化字节。cache-visible 协议（system prompt shape、persona 序列化、tool schema 与顺序、消息 / 摘要序列化 grammar、sticker catalog block）任一变化：bump `CACHE_SCHEMA_VERSION`、更新 `test/cache.test.ts` golden。
 - Secret 不进日志、测试 fixture、commit；`.env` 不入库。
 - daemon 生产模块只用 `src/observability/log.ts` 结构化日志；不记正文 / prompt / response / tool args / 完整 URL 与 path；业务正确性不得依赖日志。
 - 不得为通过验证而削弱测试、类型检查或安全控制（如 codemode 边界、容器沙箱）。
-- 不改 SQLite schema、消息序列化 grammar，除非有明确需求并同步文档。
+- 不改 SQLite schema、消息序列化 grammar，除非有明确需求并更新相关 schema 与发布说明。
 - 配置只有一套：`telegram.config.ts`（业务配置）+ Pi 内部 settings + `.env`（secrets）。禁止引入第二来源。
 
 ## 4. 改动路由
 
-行为放进拥有该职责的层；不为归属不清新建共享抽象。归属不清先查 `docs/architecture.md` 和现有调用点。
+行为放进拥有该职责的层；不为归属不清新建共享抽象。归属不清先查现有调用点。
 
 - Telegram API / 轮询 / normalize → `src/telegram/`
-- schema / 持久化 → `src/db/`（schema 变更必须更新 `docs/data-model.md`）
+- schema / 持久化 → `src/db/`
 - prompt / serialize / routing / runtime / provider-facing 工具 → `src/agent/`（tool description 是 cache-visible，见 `src/agent/tools.ts`）
 - 进程管理 → `src/daemon/`
 - 工具实现（search 等）→ `src/tools/`；codemode 接入 → `src/agent/extensions/codemode.ts`，注册顺序固定在 `src/agent/runtime.ts`
-- 后台任务 → `src/tasks/`；工作区容器（sandbox）→ `src/sandbox/`；镜像 `deploy/box/Dockerfile`；运维见 `docs/runbooks/sandbox.md`
+- 后台任务 → `src/tasks/`；工作区容器（sandbox）→ `src/sandbox/`；镜像 `deploy/box/Dockerfile`
 - 配置文件写回（`/set`、`/model`）→ `src/onboarding/config-core.ts`
 
 ## 5. 测试规则
@@ -57,10 +49,10 @@
 1. `npm run build && node --import ./dist/test/network-guard.js --test dist/test/<相关文件>.js` → `npm test`
 2. `npm run check`（tsc --noEmit）
 3. `npm run lint`（Biome lint + format check；`npm run format` 自动修）
-4. `npm run docs:check`（文档站构建 + 链接检查）
+4. `bash -n deploy/*.sh`、`shellcheck deploy/install.sh deploy/telegram-agent`（部署改动）
 5. opt-in e2e：`scripts/e2e-*.ts`（需 `.env`，触真实服务，用户明确授权才跑）
 
-规范命令以 `docs/testing.md` 为准；仓库已有脚本时不要猜底层命令。
+规范命令以 package.json 与部署脚本为准。
 
 ## 7. 提交规范
 
@@ -76,7 +68,7 @@
 - `.env` 是 `key: value` 冒号格式，由 `src/config.ts` 自解析，不是 dotenv 的 `KEY=value`。
 - Pi 各包（含 durable、env、chord、ai、coding-agent、schema、codemode）精确锁定 registry `1.5.0`；升级必须同一原子提交一起更新 manifest、lock 并做兼容性验证。
 - sticker / alias 的 short_id 用 rowid 分配，不用 COUNT+1（并发 / 删除下撞号）。
-- Pi Durable 拥有会话与执行恢复，`guardModels` 只包装完整 provider deadline、413 归一化与有效规划窗口；不要再引入 AgentSession 状态机。升级时验证 unsafe send 重启边界与原生 task journal（见 `docs/engineering/decisions.md`）。
+- Pi Durable 拥有会话与执行恢复，`guardModels` 只包装完整 provider deadline、413 归一化与有效规划窗口；不要再引入 AgentSession 状态机。升级时验证 unsafe send 重启边界与原生 task journal。
 
 ## 9. 指南更新规则
 

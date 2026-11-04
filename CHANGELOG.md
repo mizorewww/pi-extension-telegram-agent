@@ -1,0 +1,14 @@
+# v1.0.0
+
+这是一次不兼容升级。旧版的仓库内运行、Bun、systemd user unit 和原后台任务部署方式全部废弃；不提供兼容入口或旧会话导入。
+
+- 发布 Linux x64 安装包和 `install.sh`，附 `SHA256SUMS`。安装器校验官方校验和后，将 Node.js 24 私有安装到 `/opt/pi-telegram-agent/node`；程序包包含编译结果和锁定的生产依赖，不需要在服务器编译项目或更改系统 Node。
+- 安装向导逐项配置 bot、模型、persona、媒体、容器与任务，保留已有值供修改；下载、校验、预检和启动显示当前阶段及预计耗时。
+- 程序安装在 `/opt/pi-telegram-agent`，配置放在 `/etc/pi-telegram-agent`，状态与 Pi 认证放在 `/var/lib/pi-telegram-agent`，通过独立服务用户和 systemd system service 运行。群内配置写回继续保留。
+- 全面采用 Pi 1.5.0 原生会话、SQLite 持久化、队列、压缩、工具、子会话和后台任务恢复，移除自建会话状态与 RPC 子进程管理。
+- 文件和 shell 工具通过 Pi 原生 ExecutionEnv 进入工作容器；codemode 使用 Pi 原生沙箱。容器不再携带模型认证或独立 agent 引擎。
+- `task` 的工作流改为 `AGENTS.md`；`job` 使用可恢复的原生脚本工具任务，不消耗模型 token。发送结果不确定时保持 `no_retry`，不会在恢复后重复发送。
+- 保留 hybrid 媒体描述与按需观察原图；原生图片内容可进入 Pi 会话。
+- 用户文档统一到根目录 `README.md`，删除独立中英文手册、文档站及其构建发布流程。
+
+安装前先停止旧 daemon，并自行保管旧配置、认证和数据。新安装器以本版本的目录和服务布局为准。

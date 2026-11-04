@@ -15,9 +15,6 @@ pids
 *.seed
 *.pid.lock
 
-# Generated bilingual documentation site
-/build/docs/
-
 # Sensitive runtime data (agent.db = all chat history, sessions/ = provider context, media/)
 data/
 
@@ -158,7 +155,6 @@ personas/*.md
 !personas/template.zh.md
 !personas/template.en.md
 .DS_Store
-docs/dev/req.md
 
 # pi-subagents run artifacts
 .pi/subagents/

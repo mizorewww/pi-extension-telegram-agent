@@ -1,6 +1,5 @@
 import { transaction as atomic } from "../db/db.ts";
 // Ingestion: raw update -> raw_updates -> canonical messages. Idempotent.
-// See docs/data-model.md for dedupe rules.
 
 import type { DatabaseSync as Database } from "node:sqlite";
 import { log } from "../observability/log.ts";

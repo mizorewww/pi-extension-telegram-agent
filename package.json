@@ -1,19 +1,18 @@
 {
 	"name": "pi-telegram-agent",
 	"private": true,
-	"version": "0.1.0",
+	"version": "1.0.0",
 	"type": "module",
 	"description": "Configurable Telegram group companions powered by Pi SDK",
 	"scripts": {
 		"build": "node scripts/build.mjs",
 		"start": "node dist/src/daemon/index.js",
 		"debug": "node dist/scripts/debug-report.js",
-		"docs:build": "npm run build && node dist/scripts/docs-site.js build",
-		"docs:check": "npm run build && node dist/scripts/docs-site.js check",
 		"test": "npm run build && TZ=UTC node --import ./dist/test/network-guard.js --test dist/test/*.test.js",
 		"check": "tsc --noEmit",
 		"lint": "biome check .",
-		"format": "biome check --write ."
+		"format": "biome check --write .",
+		"release:package": "npm run build && node scripts/release.mjs"
 	},
 	"dependencies": {
 		"@earendil-works/pi-agent-core": "1.5.0",

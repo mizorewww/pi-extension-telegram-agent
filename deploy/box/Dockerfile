@@ -1,4 +1,4 @@
-# Image for Pi native coding tools and background tasks (docs/runbooks/sandbox.md). Both run
+# Image for Pi native coding tools and background tasks. Both run
 # with a read-only root, so runtime tools are installed here; uv environments and user installs
 # live under /work (HOME=/work/.home) and vanish with the weekly reset.
 # Pi needs Node >= 22.19, hence the Node base rather than plain Debian.

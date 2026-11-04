@@ -1,5 +1,5 @@
 // Normalize a Telegram message object into our canonical message row.
-// See docs/data-model.md. Grammar for LLM serialization lives elsewhere (Phase 3).
+// Provider serialization lives in agent/serialize.ts.
 
 import { stickerMime } from "../media/sticker-catalog.ts";
 import { normalizeRichMessage, RICH_MESSAGE_UNAVAILABLE } from "./rich-message.ts";

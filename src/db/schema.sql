@@ -1,4 +1,4 @@
--- Telegram archive schema. See docs/data-model.md. Applied idempotently at daemon start.
+-- Telegram archive schema, applied idempotently at daemon start.
 -- Legacy runtime tables are left untouched; new databases use Pi for runtime state.
 
 PRAGMA journal_mode = WAL;

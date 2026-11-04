@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish (for example v1.0.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - name: Verify release version
+        run: node -e 'if (process.env.RELEASE_TAG !== `v${require("./package.json").version}`) throw new Error("Tag does not match package version")'
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Run offline tests
+        run: npm test
+      - name: Type-check and lint
+        run: npm run check && npm run lint
+      - name: Package and verify Linux artifact
+        run: npm run release:package
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "dist/release/pi-telegram-agent-${RELEASE_TAG}-linux-x64.tar.gz" \
+            dist/release/install.sh dist/release/SHA256SUMS \
+            --verify-tag --title "$RELEASE_TAG" --notes-file CHANGELOG.md

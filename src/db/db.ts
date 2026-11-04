@@ -1,4 +1,4 @@
-// SQLite access layer (node:sqlite). See docs/data-model.md.
+// SQLite access layer (node:sqlite).
 
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";

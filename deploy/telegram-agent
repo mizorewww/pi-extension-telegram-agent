@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+action=${1:-status}
+case $action in
+  start|stop|restart|status) exec systemctl "$action" telegram-agent.service ;;
+  logs) exec tail -n 100 -F /var/lib/pi-telegram-agent/daemon.log ;;
+  configure)
+    [[ $(id -u) == 0 ]] || { echo 'Use sudo to configure the service.' >&2; exit 1; }
+    shift
+    version=$(/opt/pi-telegram-agent/node/bin/node -p 'require("/opt/pi-telegram-agent/current/package.json").version')
+    exec bash /opt/pi-telegram-agent/current/deploy/install.sh "v$version" "$@"
+    ;;
+  debug|check)
+    [[ $(id -u) == 0 ]] || { echo 'Use sudo for private service state.' >&2; exit 1; }
+    action=$1; shift
+    script=debug-report
+    [[ $action == check ]] && script=check-config
+    entry="dist/scripts/$script.js"
+    runuser -u pi-telegram-agent -- env HOME=/var/lib/pi-telegram-agent \
+      TG_CONFIG_DIR=/etc/pi-telegram-agent TG_STATE_DIR=/var/lib/pi-telegram-agent \
+      PI_CODING_AGENT_DIR=/var/lib/pi-telegram-agent/pi-agent \
+      PATH=/opt/pi-telegram-agent/node/bin:/usr/local/bin:/usr/bin:/bin \
+      /opt/pi-telegram-agent/node/bin/node "/opt/pi-telegram-agent/current/$entry" "$@"
+    ;;
+  *) echo 'Usage: telegram-agent {status|start|stop|restart|logs|debug|check|configure}' >&2; exit 2 ;;
+esac
