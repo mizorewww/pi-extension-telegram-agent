@@ -1,5 +1,5 @@
 // tg_messages: read-only search over the configured group's canonical message history, for
-// codemode scripts. Returns a fixed DTO (never SQL or table rows) so the schema stays private and
+// direct tool calls and codemode scripts. Returns a fixed DTO (never SQL or table rows) so the schema stays private and
 // the model-facing contract is the declared output type. Control commands and their replies are
 // excluded, like everywhere else the model sees the group. Pi validates the arguments against the
 // tool schema (src/agent/tools.ts) before this runs; only semantic checks live here.
@@ -97,10 +97,24 @@ export function queryMessages(db: Database, chatId: number, query: MessageQuery)
 		where.push("m.sender_id = ?");
 		args.push(query.sender);
 	} else if (query.sender !== undefined) {
-		const name = query.sender.trim().replace(/^@/, "");
-		if (!name) throw new MessageQueryError("sender: expected a user id, @username or u<N> alias");
-		where.push("(lower(m.username) = lower(?) OR a.alias = ?)");
-		args.push(name, name);
+		const sender = query.sender.trim();
+		if (!sender || sender === "@")
+			throw new MessageQueryError("sender: expected a user id, @username, u<N> alias or display name");
+		if (sender.startsWith("@")) {
+			// Telegram usernames are ASCII; NOCASE is not Unicode nickname case folding.
+			where.push("m.username = ? COLLATE NOCASE");
+			args.push(sender.slice(1));
+		} else if (/^u\d+$/.test(sender)) {
+			where.push("a.alias = ?");
+			args.push(sender);
+		} else {
+			// A historical name identifies every matching sender, including their other names.
+			// The direct match also covers messages with no sender_id (e.g. anonymous senders).
+			where.push(`(m.display_name = ? COLLATE NOCASE OR m.sender_id IN (
+				SELECT sender_id FROM messages WHERE chat_id = ? AND display_name = ? COLLATE NOCASE
+			))`);
+			args.push(query.sender, chatId, query.sender);
+		}
 	}
 	const kind = query.has_media;
 	if (kind === "any") where.push("m.media IS NOT NULL");
