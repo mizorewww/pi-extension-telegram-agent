@@ -50,6 +50,7 @@ export class Poller {
 	async run(): Promise<void> {
 		let backoffMs = 1000;
 		let ingestFailures = 0;
+		let connected = false;
 		while (!this.stopped) {
 			if (!(await this.deliverPending())) {
 				await this.sleep(backoffMs);
@@ -60,6 +61,10 @@ export class Poller {
 			let updates: unknown[];
 			try {
 				updates = await this.api.getUpdates(this.offset(), POLL_TIMEOUT_SEC, this.abort.signal);
+				if (!connected) {
+					connected = true;
+					log.info("telegram_poller", "connected", { bot_id: this.botId, pid: process.pid });
+				}
 				backoffMs = 1000;
 			} catch (err) {
 				// an abort rejection is the normal stop path, not an error
