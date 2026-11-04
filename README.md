@@ -2,144 +2,99 @@
 
 [中文](README.md) · [English](README.en.md) · [在线文档](https://mizorewww.github.io/pi-extension-telegram-agent/zh/)
 
-基于 [Pi SDK](https://github.com/earendil-works/pi) 的自托管 Telegram 群聊 Agent 守护进程。
+基于 [Pi Durable 1.5.0](https://github.com/earendil-works/pi) 的自托管 Telegram 群聊 agent。一个或多个不同人设的 bot 长期住在同一个群里：被点名时回应，平时按概率接话，需要时查资料、翻历史、处理文件并交付结果。
 
-它不是一问一答的指令机器人，而是把 **一个或多个不同人设的 AI 群友** 长期放进同一个 Telegram 群里：平时看群聊、按概率接话或保持沉默；被点名时必定回应；需要时能翻历史记录、上网查资料、写脚本算数据、在独立 Linux 容器里处理文件并把生成的图表/文档发回群里。
+本项目只维护 Telegram 封装。Pi 管理会话、持久化队列、压缩、重试、工具执行、后台任务和累计用量；模型目录与认证继续使用 Pi 已安装的 provider。Pi Durable 是实验性接口，各包精确锁定 1.5.0。
 
----
+## 能做什么
 
-## 核心特性
-
-### 1. 像真群友一样的对话与路由
-- **确定性触发，不白花 Token**：是否调用模型由本地代码决定。人类 `@bot`、回复 bot 或在消息里提到它的名字（`name`）时**必定回应**（持久化为回复义务，网络波动或重启后自动补回）；普通群消息按 `routing_p` 概率分配给至多一个空闲且不在冷却期的 bot。
-- **允许沉默**：即使被概率抽中，模型若觉得没必要插嘴，不调 `send` 即可保持沉默，不会往群里发废话。
-- **原生群聊表达**：通过唯一的公开输出通道 `send` 发送 Markdown 消息（自动转为经典 Telegram entities，兼容旧客户端）、贴纸（Sticker 目录或群友发过的贴纸）、Emoji Reaction，以及工作区产出的图片与文件。
-- **可控的 Bot 互动（`/fire`）**：默认忽略其他 bot 的消息以防死循环；管理员开启 `/fire` 后，本群 bot 之间可按正常路由互相接话（每次人类发言后最多连续触发 3 次）。
-
-### 2. 按需开启的分层工具集
-每个 bot 可在配置中独立开关工具，未开启的工具不会出现在该 bot 的提示词中：
-
-| 工具 / 模式 | 作用 | 开启方式 |
+| 能力 | 配置 | 行为 |
 |---|---|---|
-| `send` | 在群里发文字、发 sticker、点 reaction、发工作区文件（关掉即为纯观察 bot） | `tools.send`（默认 `true`） |
-| `hybrid` 视觉 | 便宜的视觉模型将每张新图 / 贴纸 / 视频（FFmpeg 抽 1–3 帧）转成文字描述存入 SQLite 并跨 bot 共享；需要看细节时主模型按需调用 `view_image` 查看原图 | 顶层 `media.mode: "hybrid"` |
-| `search` | 通过 TinyFish 联网搜索（最多 5 条摘要）或分页读取公开网页正文（自动拦截内网与回环地址） | `tools.search: true` + `.env` 配置 `tiny_fish_api_key` |
-| `codemode` + `tg_messages` | 在 Pi 的 QuickJS（Wasm）沙箱中运行 JavaScript：精确计算、并行组合工具调用、用 `tg_messages`（SQLite FTS5 trigram 全文索引）检索本群完整历史消息。脚本内可先 `send` 一句“我去查一下”，干完活再发结果 | `tools.codemode: true` |
-| `job` | 将几分钟的批量 `codemode` 脚本放到后台执行，不阻塞当前对话，跑完后自动唤醒 bot 回复发起人 | `tools.codemode` 与 `tools.send` 同开时自动注册 |
-| `sandbox`（工作区） | 每 bot 一个隔离的 rootless Docker Linux 容器（Python / Node / FFmpeg / ImageMagick / Poppler / Git）：用 `tg_download` 拷入群附件、`sh_exec` 跑命令处理数据或画图，再通过 `send.files` 直接发回群里 | `tools.sandbox: true` + 顶层 `sandbox` 配置 |
-| `tasks`（后台任务） | 启动一次性容器运行完整的 Pi 研究工作流（支持 `.pi` 下的 `pi-subagents` 与 skills），长耗时调研完成后唤醒 bot 汇报结论并附带产出文件 | `tools.tasks: true` + 顶层 `tasks` 配置 |
+| 群内发言 | `tools.send`，默认开启 | 唯一公开通道，发送文字、sticker、reaction、图片和文件；关闭后只观察 |
+| 图片与视频 | `media.mode: "hybrid"` | 同一媒体描述一次并跨 bot 共享；`view_image` 按需把原图或视频帧作为 Pi 原生图片交给模型 |
+| 搜索 | `tools.search` + TinyFish key | 搜索或分页读取公开网页，拒绝内网与回环地址 |
+| 脚本与历史检索 | `tools.codemode` | Pi QuickJS 中组合工具、计算、筛选结果；`tg_messages` 查询本群归档 |
+| Linux 工作区 | `tools.sandbox` + `sandbox` | 原生 read/write/edit/bash 经 pi-env 在 rootless Docker 里执行；`tg_download` 拷入附件，send 交付产物 |
+| 后台研究 | `tools.tasks` + `tasks` | 工作流目录的 `AGENTS.md` 指导 Pi child conversation，共享隔离工作区和宿主认证 |
+| 后台脚本 | codemode 与 send 同开 | `job` 运行 Pi 原生工具任务，不额外调用模型 |
 
-### 3. 围绕 Prompt Cache 设计的省钱架构
-- **SQLite 为唯一事实来源**：所有群消息、编辑、引用快照、视觉描述都以不可变事件写入本地 SQLite（`data/agent.db`），重启不丢上下文。
-- **严格前缀（Strict Prefix Invariant）**：System Prompt、人设、Sticker 目录与工具定义严格固定；新消息、编辑和媒体描述只作为新批次追加在末尾，**永不改写已发出的历史消息前缀**，最大化命中 Provider Prompt Cache。
-- **双阈值自动压缩**：当上下文接近窗口上限或上下文图片字节超预算时，自动调用便宜的 `compaction_model` 将旧对话压缩为状态摘要（自动剥离模型内部 thinking 以防推测变“事实”）。
+@、回复和配置名称由确定性代码路由；普通消息按概率交给至多一个 bot，忙碌时跳过。直接点名的待答内容持久化，健康结束却没回应时最多补答一次。默认忽略 bot 触发，管理员可用 `/fire` 开启有次数限制的互动。
 
----
+只有 send 会发到群里。文字转换为转义 HTML，使用经典 Telegram 消息；结果未知的发送不自动重发。后台任务在重启后按 Pi 的工具恢复规则继续，已经开始但结果未知的 unsafe 操作不会盲目重做。
+
+## 上下文与成本
+
+群消息归档在 `data/agent.db`，每个 bot 的 Pi 会话、任务和用量在 `data/pi/<bot>.sqlite`。同一上下文片段内只追加输入，保留已有前缀；压缩、换模型和 `/new` 建立新前缀。
+
+压缩使用当前聊天模型和 reasoning effort，固定预留 16,384 token。有效规划窗口取模型目录、`context_window`、`compaction_threshold + 16,384` 的最小值；摘要输出最多 13,107 token，并受模型输出上限约束。Pi 1.5.0 不会自动分块超大的摘要输入，也不能精确估算加密 thinking 签名成本。
+
+hybrid 平时使用缓存描述，只有需要细节才看原图；图片字节由 Pi 持久化。`/status` 展示 Pi 原生累计账本，包含 child 与历史，`/new` 不清零；费用以 provider 账单为准。
 
 ## 快速开始
 
-### 1. 环境准备
-- [Node.js 24+](https://nodejs.org/)（运行 daemon 与测试）
-- 本机安装 [Pi CLI](https://github.com/earendil-works/pi)（用于登录模型 Provider，凭据保存在 `~/.pi/agent/auth.json`）
-- 一个 Telegram Supergroup，以及在 [@BotFather](https://t.me/BotFather) 创建并**关闭了 Group Privacy** 的 bot（已拉入群并有发言权限）
-- （可选）主机安装 `ffmpeg`（用于视频抽帧理解）与 rootless Docker（用于 `sandbox` 工作区与 `tasks`，详见 [工作区运维手册](docs/runbooks/sandbox.md)）
-
-### 2. 安装与登录模型
+需要 Node.js 24+、已安装的 Pi CLI，以及在 BotFather 创建、关闭 group privacy 并加入目标 supergroup 的 bot。视频理解需要主机 FFmpeg；工作区需要 Linux rootless Docker 和 `tg-box:4`，见[工作区运维](docs/runbooks/sandbox.md)。
 
 ```bash
 git clone https://github.com/mizorewww/pi-extension-telegram-agent.git
 cd pi-extension-telegram-agent
 npm ci
 npm run build
-
-# 打开 Pi 完成模型 Provider 登录与默认模型选择（完成后退出即可）
 pi
-# 在 Pi 内输入：/login  和  /model
-```
-
-### 3. 编写配置并启动
-
-```bash
+# 在 Pi 中用 /login 登录，用 /model 选择默认模型，然后退出。
 cp telegram.config.example.ts telegram.config.ts
 cp personas/template.zh.md personas/friend.local.md
 ```
 
-新建 `.env`（注意使用 `key: value` **冒号格式**）：
+新建 `.env`，使用冒号格式：
 
-```yaml
-telegram_bot_token: 123456789:AAH...
-# 若开启 tools.search 则填：
-# tiny_fish_api_key: tf-...
+```text
+telegram_bot_token: 123456:REPLACE_WITH_BOTFATHER_TOKEN
 ```
 
-编辑 `telegram.config.ts`（最小可用示例，完整字段说明见 [`telegram.config.example.ts`](telegram.config.example.ts)）：
+编辑 `telegram.config.ts`，填群 ID、bot 名称和 persona 路径。省略 provider/model 可沿用 Pi 的默认选择。最小示例：
 
 ```ts
 import { defineConfig } from "./src/config.ts";
 
 export default defineConfig({
-  group_peer_id: 1234567890, // 你的 Telegram 群 ID（支持正数、负数或 -100 前缀）
-  provider: "openai-codex",
-  model: "gpt-5.6-luna",
-  media: { mode: "hybrid" }, // 开启图片/视频理解
-  telegram_admins: [987654321], // 管理员的数字 Telegram user_id（可私聊 @userinfobot 获取）
-  bots: [
-    {
-      id: "friend",
-      name: "小雪", // 群里叫这个名字也会触发回应
-      token_env: "telegram_bot_token",
-      persona_path: "personas/friend.local.md",
-      routing_p: 0.1, // 普通群消息 10% 概率接话
-      tools: { send: true, search: false, codemode: true },
-    },
-  ],
+  group_peer_id: 1234567890,
+  telegram_admins: [987654321],
+  bots: [{
+    id: "friend",
+    name: "小雪",
+    token_env: "telegram_bot_token",
+    persona_path: "personas/friend.local.md",
+    routing_p: 0.1,
+  }],
 });
 ```
 
-前台启动测试：
+`npm start` 前台启动；看到 `ready` 后在群里 @ bot 或使用 `/status`。长期运行交给 systemd，更新后先执行 `npm ci && npm run build` 再重启。同一 token 不要在开发机和服务器上同时轮询。
 
-```bash
-npm start
-```
+## 群内控制
 
-看到日志输出 `"event":"ready"` 后，去 Telegram 群里 `@你的bot` 或发送 `/status` 即可测试。长期运行建议使用 systemd 托管，详见 [Daemon 运维手册](docs/runbooks/daemon.md)。
-
----
-
-## 群内控制命令
-
-所有控制命令直接在 Telegram 群内发送（多 bot 时可用 `/command@bot_username` 定向）。命令与回复**永远不会进入模型的对话上下文**。
-
-| 命令 | 权限 | 说明 |
+| 命令 | 权限 | 作用 |
 |---|---|---|
-| `/help` | 全员 | 查看命令列表与说明 |
-| `/status` | 全员 | 查看该 bot 运行状态、上下文构成色块条、Token 用量、Cache 命中率、速度与累计费用 |
-| `/fire status` | 全员 | 查看其他 bot 消息触发本 bot 的开关状态与剩余额度 |
-| `/task` | 全员 | 查看该 bot 最近的后台任务状态与 Token 消耗 |
-| `/model` | 管理员 | 弹出内联按钮菜单，从 Pi 已认证的全部模型中分页切换（自动写回 `telegram.config.ts` 并开新会话） |
-| `/set` | 管理员 | 弹出内联按钮菜单，调整插话概率（`routing_p`）与冷却时间（`cooldown_ms`），立即生效并写回配置 |
-| `/new` | 管理员 | 丢弃当前上下文并开启全新会话（当 bot 被误解带偏时使用） |
-| `/compact` | 管理员 | 立即触发一次上下文摘要压缩 |
-| `/fire [on\|off]` | 管理员 | 开启 / 关闭 / 切换其他 bot 消息对本 bot 的触发 |
-| `/box reset` | 管理员 | 立即重置该 bot 的 Linux 工作区容器（平时每周一 05:00 自动清空） |
-| `/task cancel tN` | 管理员 | 取消正在运行的后台任务 `tN` |
+| `/help`、`/status` | 所有人 | 帮助、当前状态、上下文估算与 Pi 累计用量 |
+| `/fire status`、`/task` | 所有人 | bot 互动额度、后台任务状态 |
+| `/model`、`/set` | 管理员 | 按钮选择模型或路由参数，立即应用并原子写回 `telegram.config.ts` |
+| `/new` | 管理员 | 等待旧回复和后台工作停止后重置会话及工作区 |
+| `/compact` | 管理员 | 使用当前聊天模型执行原生压缩，会产生费用 |
+| `/fire [on\|off]` | 管理员 | 控制其他 bot 是否可以触发本 bot |
+| `/box reset`、`/task cancel tN` | 管理员 | 清空工作区、取消后台任务 |
 
----
+多 bot 时用 `/command@bot_username` 指定目标。控制消息和回复不进入模型上下文。完整配置见 [配置示例](telegram.config.example.ts)。
 
 ## 诊断与文档
 
-当 bot 没反应或行为异常时，先在主机上运行只读诊断工具（不联网、不写库、不暴露密钥）：
-
 ```bash
-npm run debug -- --since 30m
-npm run debug -- --bot friend --since 2h
+npm run debug -- --bot friend --since 30m
 ```
 
-- **用户指南**（[中文在线版](https://mizorewww.github.io/pi-extension-telegram-agent/zh/) · [本地目录](docs/user-guide/zh/src/README.md)）：
-  - [它能做什么](docs/user-guide/zh/src/features.md) · [安装与首次配置](docs/user-guide/zh/src/getting-started.md) · [配置与添加 bot](docs/user-guide/zh/src/configuration.md) · [日常运维与群内命令](docs/user-guide/zh/src/operations.md) · [故障排查](docs/user-guide/zh/src/troubleshooting.md) · [设计与哲学](docs/user-guide/zh/src/design.md)
-- **主机运维（Runbooks）**：
-  - [Daemon 与 systemd 托管](docs/runbooks/daemon.md) · [Bot 工作区与后台任务容器（Rootless Docker）](docs/runbooks/sandbox.md)
-- **架构与工程文档**：
-  - [文档总索引](docs/index.md) · [系统架构](docs/architecture.md) · [Cache 工程](docs/cache.md) · [数据模型](docs/data-model.md) · [开发指南（AGENTS.md）](AGENTS.md)
+诊断只读归档、路由事实和结构化日志；实时 Pi 状态用 `/status`。备份整个 `data/` 以及私有配置、persona 和 `.env`。从旧 AgentSession 版本升级时，旧 JSONL 不导入新 Harness，群消息归档继续保留；升级流程见运维文档。
 
-基于 BSD 2-Clause 协议开源，详见 [LICENSE](LICENSE)。
+- [用户指南](docs/user-guide/zh/src/README.md)：[安装](docs/user-guide/zh/src/getting-started.md) · [配置](docs/user-guide/zh/src/configuration.md) · [操作](docs/user-guide/zh/src/operations.md) · [排障](docs/user-guide/zh/src/troubleshooting.md) · [设计](docs/user-guide/zh/src/design.md)
+- [Daemon 与 systemd](docs/runbooks/daemon.md) · [Rootless 工作区](docs/runbooks/sandbox.md)
+- [文档索引](docs/index.md) · [架构](docs/architecture.md) · [Cache](docs/cache.md) · [用量](docs/telemetry.md) · [开发约束](AGENTS.md)
+
+BSD 2-Clause，见 [LICENSE](LICENSE)。

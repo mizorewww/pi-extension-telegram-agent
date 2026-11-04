@@ -1,53 +1,50 @@
 # 数据模型
 
-SQLite（WAL），默认 `data/agent.db`，schema 在 `src/db/schema.sql`，启动时幂等执行。早于当前 schema 的库不迁移，`openDb` 直接报错（移走旧库重新开始）。改 schema 必须同步本文。
+Telegram archive 使用 SQLite（WAL），默认 `data/agent.db`，schema 在 `src/db/schema.sql`，启动时幂等执行。每个 bot 的会话、执行队列、任务与用量由 Pi Durable 独立保存在 `data/pi/<botId>.sqlite`。本项目不复制 Pi 的内部表结构或执行状态。
 
-`messages` 是最新读模型（UI 用）；provider 只消费不可变的 `message_events`。
+升级保留现有 archive 和不可变事件。旧库中的 `bot_cursors`、`bot_visible_messages`、`bot_session_manifest`、`reply_obligations`、`tasks`、`agent_events`、`llm_runs` 原样保留，停止读写；新库不再创建这些表。`openDb` 只检查仍在使用的 Telegram archive 字段，不要求旧运行态表存在。早于 `messages.reply_snapshot` 的 archive 仍需单独迁移。
+
+`messages` 是最新读模型；进入 Pi 的新输入来自不可变的 `message_events`。已进入 Pi 的历史正文不因后来的 edit、元数据补齐或图片描述而改写。
 
 ## Telegram 来源
 
 | 表 | 主键 | 用途 |
 |---|---|---|
-| `raw_updates` | `(bot_id, update_id)` | 完整 update JSON，去重与诊断；默认保留 30 天，仍被 pending dispatch 引用的不删 |
+| `raw_updates` | `(bot_id, update_id)` | 完整 update JSON，去重与诊断；仍被 pending dispatch 引用的不删 |
 | `pending_telegram_dispatch` | `bot_id` | 每个 poller 至多一条未交付的 routing/control handoff，与 ingest、offset 同事务写入；回调成功后删除 |
 | `messages` | `(chat_id, message_id)` | canonical 最新投影：发送者、reply/quote/forward、text/caption/entities、Rich Message（source ≤256 KiB，`text` 是确定性纯文本投影）、`reply_snapshot`、media JSON |
 | `message_revisions` | `(chat_id, message_id, edit_date)` | 被替换的旧版本，key 用旧版本自己的时间 |
-| `message_events` | `ingest_seq`（自增），`event_key` 唯一 | 不可变事件流：`message`、`edit`、`metadata`、`media_update`（由 trigger 在同一事务追加）与 `note`（任务进展 / 后台脚本结果 / 系统通知，payload 带 `bot_id` 与 `source: task | job | system`，只进入该 bot 的上下文；`message_id` 是任务的发起消息或 0） |
-| `telegram_control_messages` | `(chat_id, message_id)` | 控制命令与回复的永久排除名单，不受遥测保留期影响 |
+| `message_events` | `ingest_seq`（自增），`event_key` 唯一 | 不可变事件流：`message`、`edit`、`metadata`、`media_update` 与指定 bot 的 `note`；`message_id` 是关联消息或 0 |
+| `telegram_control_messages` | `(chat_id, message_id)` | 控制命令与回复的永久排除名单，不受保留期影响 |
+| `messages_fts` | `rowid`（= `messages.rowid`） | FTS5 trigram 外部内容索引（text、caption），由 trigger 同步；支持 `tg_messages` 的 3 字以上子串查询与 relevance 排序 |
 
 - 只更新更大的 `edit_date`；多个 poller 乱序送达的旧 edit 不会回退 canonical。
-- 第二个 bot 的副本只能补齐空缺的 `reply_to_sender_id` / `reply_snapshot`，并追加一条 metadata event。
-- `idx_messages_media_identity` 是 `CAST(json_extract(media, '$.file_unique_id') AS TEXT)` 的表达式索引，media lifecycle 必须使用完全相同的表达式。
-- trigger 用 `CREATE TRIGGER IF NOT EXISTS`；改 trigger body 需要新库或手工 DROP。
+- 第二个 bot 的副本只能补齐空缺的 `reply_to_sender_id` / `reply_snapshot`，并追加 metadata event。
+- message、edit、metadata 由 trigger 在 canonical 写入事务中追加；media_update 使用单条 `INSERT … SELECT`，可加入 ingest 事务，也可独立提交。event key 保证同一内容幂等。
+- `idx_messages_media_identity` 是 `CAST(json_extract(media, '$.file_unique_id') AS TEXT)` 的表达式索引，引用媒体身份的查询使用相同表达式。
+- 事件 payload 与 trigger body 保持原有 grammar；trigger 用 `CREATE TRIGGER IF NOT EXISTS`，本次迁移不替换它们。
 
-## 每 bot 状态
+## 交付状态与 Pi 状态
 
-| 表 | 主键 | 用途 |
+| 所有者 | 数据 | 用途 |
 |---|---|---|
-| `bot_cursors` | `(bot_id, chat_id)` | 已消费到的 `ingest_seq`，只增不减 |
-| `bot_visible_messages` | `(bot_id, chat_id, message_id)` + `context_epoch` | 当前 context 真正包含完整内容的消息；压缩或换 session 时整组替换 |
-| `bot_session_manifest` | `bot_id` | 当前 session id、文件路径、完整 fingerprint |
-| `tasks` | `task_id`（`t<rowid>`） | 后台任务：所属 bot、发起消息、工作流、标题、状态（running / need_input / done / failed / cancelled / interrupted），以及任务主会话累计的 provider 用量（`input_tokens` 含缓存读写、`output_tokens`、`cost`；任务内 subagent 是独立进程，不计入） |
-| `messages_fts` | `rowid`（= `messages.rowid`） | FTS5 trigram 外部内容索引（text、caption），由 trigger 同步。`tg_messages` 的 3 字以上子串查询与 relevance 排序用它 |
-| `reply_obligations` | `(bot_id, chat_id, message_id)` | 直接点名后待回复的消息身份（不存正文） |
-| `routing_claims` | `(chat_id, message_id, bot_id, route_version)` | 防止同一消息对同一 bot 重复启动 |
-| `bot_state` | `(bot_id, key)` | epoch、Telegram offset、bot user id / username |
-| `daemon_state` | `key` | router secret、当前 cache schema、每个 bot 工作区上次每周清空时间（`box_reset_at:<bot>`）、后台脚本序号（`job_seq:<bot>`）等单例 |
+| archive | `routing_claims(chat_id, message_id, bot_id, route_version)` | 同一消息的 routing 幂等证据 |
+| archive | `bot_state(bot_id, key)` | Telegram poll offset、bot user id / username |
+| archive | `daemon_state(key)` | router secret、每个工作区上次每周清空时间等 daemon 状态 |
+| Pi Durable | `telegram.state` Doc | `admittedSeq`、`epoch`、配置 fingerprint、待回复身份与已序列化原文、任务回复游标 |
+| Pi Durable | 原生 conversation、task、usage | 历史、排队、执行、恢复、压缩与累计用量 |
 
-- daemon 启动删除已不在配置中的 bot 的 cursor 与回复义务，否则它们会永久卡住 `message_events` 的保留期清理。
+`admittedSeq` 表示输入已由 Pi 持久接收，不表示模型已经处理。待回复原文随 Pi Doc 持久化，因此它不依赖 archive 保留窗口；是否已经请求补答，直接看 Pi 历史中已持久化的恢复消息。只有当前配置的 bot 参与 archive 清理水位计算；删除 bot 不需要扫描或删除旧 cursor 表。Pi 文件只通过原生 API 读写，离线 `npm run debug` 只读取 archive 的 offset、待交付行、routing claims 和结构化日志；运行态通过 `/status` 查询。
 
-## 媒体、事件与遥测
+## 媒体
 
-- `media`：`file_unique_id` 是共享身份；`short_id` 由 rowid 分配（不能用 COUNT+1）；`vision`（hybrid 模式描述 JSON）按身份持久化、跨 bot 复用；`local_path` 只存 `data/media` 下的文件名。view_image 用的派生图片不入库：文件名由身份和槽位（`#ctx` / `#frameN`）哈希得出，随源文件一起清理。
-- `media_file_ids(bot_id, file_id, file_unique_id)`：bot 专属的可发送/可下载能力。
-- `aliases(chat_id, user_id) → u<N>`：无 username 发送者的稳定别名（rowid 分配）。
-- `agent_events`：只追加的本地行为流（assistant 文本、thinking、tool、send、错误、压缩、控制审计……）。不存 token、prompt、完整 URL 或路径。
-- `llm_runs`：每次成功 provider 响应一行：usage、费用、延迟、thinking/send 耗时、provider/api/model、session hash、system/tools/完整 payload 的 HMAC 与首个分叉位置（逐条消息的 hash 列表只在内存中用于前缀估算）、上下文构成估算、trigger、公开发送数、图片数等。口径见 [telemetry.md](telemetry.md)。
+- `media`：`file_unique_id` 是共享身份；`short_id` 由 rowid 分配；`vision` 保存共享的 hybrid 描述 JSON；`local_path` 只存 `data/media` 下的文件名。
+- `media_file_ids(bot_id, file_id, file_unique_id)` 保存各 bot 的发送/下载能力。
+- `aliases(chat_id, user_id) → u<N>` 为没有 username 的发送者分配稳定别名，使用 rowid。
+- Pi 持久化实际使用的图片内容；本地源文件是可重新下载的缓存，七天没有新消息引用后可回收。无需维护跨 session 的图片路径引用表。
 
 ## 保留期
 
-启动时和之后每 24 小时执行：`agent_events` 与 `llm_runs` 90 天，`raw_updates` 30 天，`message_events` 365 天。旧 `message_events` 只有在所有已配置 bot 的 cursor 都已越过、且没有回复义务或 pending dispatch 引用时才删除。canonical 消息、revision、media 行与 session 文件不按时间清理；本地媒体文件由成功压缩后的引用回收处理（见 [architecture.md](architecture.md#媒体)）。
+`raw_updates` 默认保留 30 天，`message_events` 默认保留 365 天。每个事务每张表最多删除 1,024 行；每日维护分批清理到截止点，在批次间让出事件循环，避免高流量积压永久超过保留期。事件必须早于时间截止点、`ingest_seq` 不大于所有已配置 bot 的最小 `admittedSeq`，且没有 pending dispatch 引用；raw update 同样不能被 pending dispatch 引用。清理在同一事务内完成。
 
-`data/daemon.log` 不是业务数据，见 [debugging-guide.md](engineering/debugging-guide.md)。
-
-`llm_runs` 的历史诊断列（payload 分叉、耗时、构成估算、输入/发送计数等）保留 schema 与已有数据，Pi 1.5 重构后不再填充。当前写入字段与统计口径见 [telemetry.md](telemetry.md)。
+canonical 消息、revision、media 行不按时间删除。旧运行态表不再清理；Pi 会话数据由 Pi 自己管理，不能拿 archive 的保留期去删 Pi 内部表。媒体缓存每批最多回收 256 个源文件，见 [architecture.md](architecture.md#媒体)。`data/daemon.log` 不是业务数据，见 [debugging-guide.md](engineering/debugging-guide.md)。

@@ -1,4 +1,5 @@
--- Schema v1. See docs/data-model.md. Applied idempotently at daemon start.
+-- Telegram archive schema. See docs/data-model.md. Applied idempotently at daemon start.
+-- Legacy runtime tables are left untouched; new databases use Pi for runtime state.
 
 PRAGMA journal_mode = WAL;
 
@@ -176,92 +177,11 @@ CREATE TABLE IF NOT EXISTS media_file_ids (
 	PRIMARY KEY (bot_id, file_id)
 );
 
-CREATE TABLE IF NOT EXISTS agent_events (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	bot_id TEXT NOT NULL,
-	ts INTEGER NOT NULL, -- unix ms
-	kind TEXT NOT NULL, -- assistant_text|thinking|tool_call|tool_result|vision|usage|compaction|error|send
-	payload TEXT NOT NULL -- JSON
-);
-CREATE INDEX IF NOT EXISTS idx_agent_events_ts ON agent_events(ts);
-
-CREATE TABLE IF NOT EXISTS llm_runs (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	bot_id TEXT NOT NULL,
-	ts INTEGER NOT NULL,
-	model TEXT NOT NULL,
-	epoch INTEGER NOT NULL,
-	context_tokens INTEGER,
-	cache_read INTEGER,
-	cache_write INTEGER NOT NULL DEFAULT 0,
-	cache_read_estimated INTEGER, -- local strict-prefix estimate; cache_read remains provider-raw
-	cache_miss INTEGER,
-	output_tokens INTEGER,
-	reasoning_tokens INTEGER,
-	latency_ms INTEGER,
-	cost REAL,
-	compaction INTEGER NOT NULL DEFAULT 0,
-	system_hash TEXT,
-	tools_hash TEXT,
-	provider TEXT,
-	api TEXT,
-	session_id_hash TEXT,
-	cache_retention TEXT,
-	full_payload_hash TEXT,
-	first_divergent_segment TEXT,
-	first_divergent_message_index INTEGER,
-	first_divergent_byte_offset INTEGER,
-	trigger_message_id INTEGER,
-	public_send_count INTEGER NOT NULL DEFAULT 0,
-	vision_calls INTEGER NOT NULL DEFAULT 0,
-	images_attached INTEGER NOT NULL DEFAULT 0,
-	tool_followup_rounds INTEGER NOT NULL DEFAULT 0,
-	input_events INTEGER NOT NULL DEFAULT 0,
-	input_tokens_estimated INTEGER NOT NULL DEFAULT 0,
-	rows_scanned INTEGER NOT NULL DEFAULT 0,
-	system_tokens INTEGER NOT NULL DEFAULT 0,
-	tools_tokens INTEGER NOT NULL DEFAULT 0,
-	compacted_history_tokens INTEGER NOT NULL DEFAULT 0,
-	message_tokens INTEGER NOT NULL DEFAULT 0,
-	thinking_ms INTEGER NOT NULL DEFAULT 0,
-	send_ms INTEGER NOT NULL DEFAULT 0,
-	send_samples INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_llm_runs_ts ON llm_runs(ts);
-
 CREATE TABLE IF NOT EXISTS bot_state (
 	bot_id TEXT NOT NULL,
 	key TEXT NOT NULL,
 	value TEXT NOT NULL,
 	PRIMARY KEY (bot_id, key)
-);
-
--- Business consumption is monotonic and independent from Pi compaction/context visibility.
-CREATE TABLE IF NOT EXISTS bot_cursors (
-	bot_id TEXT NOT NULL,
-	chat_id INTEGER NOT NULL,
-	consumed_seq INTEGER NOT NULL,
-	updated_at INTEGER NOT NULL,
-	PRIMARY KEY (bot_id, chat_id)
-);
-
--- Message ids whose full content is genuinely present in the current Pi context generation.
-CREATE TABLE IF NOT EXISTS bot_visible_messages (
-	bot_id TEXT NOT NULL,
-	chat_id INTEGER NOT NULL,
-	message_id INTEGER NOT NULL,
-	context_epoch INTEGER NOT NULL,
-	PRIMARY KEY (bot_id, chat_id, message_id)
-);
-
--- Exact session identity for a cache-visible context fingerprint. Old session files are retained
--- but are never resumed when the fingerprint changes.
-CREATE TABLE IF NOT EXISTS bot_session_manifest (
-	bot_id TEXT PRIMARY KEY,
-	session_id TEXT NOT NULL,
-	session_file TEXT NOT NULL,
-	context_fingerprint TEXT NOT NULL,
-	created_at INTEGER NOT NULL
 );
 
 -- Durable idempotency evidence for insert/enrichment routing windows.
@@ -277,35 +197,6 @@ CREATE TABLE IF NOT EXISTS routing_claims (
 	PRIMARY KEY (chat_id, message_id, bot_id, route_version)
 );
 CREATE INDEX IF NOT EXISTS idx_routing_claims_message ON routing_claims(chat_id, message_id, status);
-
--- Human direct replies that must enter a specific bot's next provider suffix.
--- Background tasks a bot started in its work box (src/tasks/). Progress reaches the bot as
--- message_events of kind 'note'; this table is the task's own lifecycle.
-CREATE TABLE IF NOT EXISTS tasks (
-	task_id TEXT PRIMARY KEY, -- t<rowid>
-	bot_id TEXT NOT NULL,
-	chat_id INTEGER NOT NULL,
-	origin_message_id INTEGER NOT NULL, -- the message that asked for it; the result replies to it
-	workflow TEXT NOT NULL,
-	title TEXT NOT NULL,
-	status TEXT NOT NULL CHECK (status IN ('running', 'need_input', 'done', 'failed', 'cancelled', 'interrupted')),
-	created_at INTEGER NOT NULL,
-	updated_at INTEGER NOT NULL,
-	-- Provider usage of the task's main Pi session; subagents run as separate processes and are not included.
-	input_tokens INTEGER NOT NULL DEFAULT 0, -- including cache reads and writes
-	output_tokens INTEGER NOT NULL DEFAULT 0,
-	cost REAL NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_tasks_bot_status ON tasks(bot_id, status);
-
-CREATE TABLE IF NOT EXISTS reply_obligations (
-	bot_id TEXT NOT NULL,
-	chat_id INTEGER NOT NULL,
-	message_id INTEGER NOT NULL,
-	created_at INTEGER NOT NULL,
-	PRIMARY KEY (bot_id, chat_id, message_id)
-);
-CREATE INDEX IF NOT EXISTS idx_reply_obligations_bot ON reply_obligations(bot_id, created_at, message_id);
 
 CREATE TABLE IF NOT EXISTS aliases (
 	chat_id INTEGER NOT NULL,

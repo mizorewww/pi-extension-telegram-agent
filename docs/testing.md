@@ -18,10 +18,11 @@ npm run docs:check        # 5. 文档站构建 + 链接检查
 
 ```bash
 node dist/scripts/smoke-pi.js --bot <id>         # 单次真实 provider 请求
-node dist/scripts/e2e-agent.js --bot <id>        # 真实链路
+node dist/scripts/e2e-agent.js --bot <id> --message <真实群消息ID> # 真实链路
 node dist/scripts/e2e-compaction.js --bot <id>   # 通过公开 control 入口压缩
-node dist/scripts/e2e-examples.js --photo <id> --pdf <id> --thread <id> --sender @user   # 提示词里每个【脚本】示例对真实工具跑一遍；改 tool-examples.md 后必跑
 ```
+
+e2e-agent 与 e2e-compaction 必须先停止 daemon；脚本复用 pid lock 拒绝并行运行。agent 使用真实已归档的人类消息，不伪造 reply target；已被 Pi 接纳的消息会去重，应选新消息。
 
 ## 守卫
 

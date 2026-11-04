@@ -17,11 +17,10 @@
 
 | 术语 | 含义 |
 |---|---|
-| context epoch | 一代 provider context；成功压缩、换 session（`/model`、`/new`、fingerprint 变化）都会进入下一代 |
+| context epoch | 一代 provider context；换 session（`/model`、`/new`、fingerprint 变化）进入下一代；原生 compaction 管理自己的上下文边界 |
 | context fingerprint | 所有 cache 可见身份（Pi/provider/model、协议、persona、序列化、工具……）的摘要；恢复 session 前必须精确匹配 |
 | `CACHE_SCHEMA_VERSION` | fingerprint 里的强制失效字段，cache 可见协议一变就 bump |
-| consumed cursor | 每 bot 已处理到的不可变事件位置，只增不减 |
-| visible refs | 当前 context 真正包含完整内容的消息 id；可被压缩替换，不等于消费状态 |
+| admitted cursor | 每 bot 已原子交给 Pi 的不可变事件位置，只增不减 |
 | canonical message | 群消息的本地统一表示，身份为 `(chat_id, message_id)` |
 | 回复义务 | 直接点名后尚未回复的消息，结清前不会丢 |
 

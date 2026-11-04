@@ -34,7 +34,7 @@ Only people in `telegram_admins`:
 |---|---|
 | `/model` | pick any model Pi is logged into using buttons; it is saved to the configuration and a new session starts at once |
 | `/new` | drop the current context and start a new session; the bot only sees later messages. Useful when a bot is stuck on a misunderstanding |
-| `/compact` | summarize the context now (calls the summary model, which costs a little) |
+| `/compact` | summarize the context now (uses the current chat model and reasoning effort, incurring model charges) |
 | `/set` | open a button menu to pick how often the bot joins in (0–1) and the pause after a spontaneous reply; takes effect at once |
 | `/fire on` / `/fire off` | let other bots' messages trigger this bot, or stop it; a bare `/fire` toggles |
 | `/box reset` | wipe this bot's work box now (only with `tools.sandbox`); it is also wiped every Monday at 05:00 |
@@ -42,7 +42,8 @@ Only people in `telegram_admins`:
 
 - `/model` and `/set` are written back to `telegram.config.ts` and survive restarts.
 - While a bot is replying, `/model` and `/compact` ask you to retry later. `/new` cancels the active reply, compaction and background tasks, waits for them to stop, then resets the session and workspace.
-- After a model change or `/new`, the old session file stays on your machine.
+- After a model change or `/new`, old records remain in `data/pi/<bot>.sqlite`; `/new` cancels background tasks and clears the current task list.
+- Pi cumulative usage in `/status` includes this bot's root, children and history; `/new` does not reset it. Task usage is already included in the total. Context tokens are estimates; cacheRead/cacheWrite come from the provider.
 
 ## Letting other bots trigger a bot (`/fire`)
 
@@ -61,7 +62,7 @@ By default a bot only reacts to people. `/fire on` lets messages from other bots
 2. copy `telegram.config.ts`, `.env`, `personas/*.local.md` and the whole `data/` directory (work box files are not included; they are wiped weekly anyway);
 3. keep `.env` and private personas somewhere safe.
 
-SQLite (`data/agent.db`) is the only copy of the chat history; Telegram cannot be used to restore it.
+`data/agent.db` holds Telegram history; `data/pi/<bot>.sqlite` holds Pi conversations, tasks and cumulative usage. Back up both. Telegram cannot restore this local state.
 
 ## Another group
 

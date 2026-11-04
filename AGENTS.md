@@ -27,7 +27,7 @@
 
 ## 3. 硬约束
 
-- **Cache invariant**：永不改写已存在的 provider prefix；动态内容只以新 suffix 追加。每个请求必须是下一请求的严格前缀：不要做“只挂在最后一条”的动态尾部。每批的 sticker 附注只经 `context` 事件投影为紧跟该批的〔系统附注〕消息并永久保留，永不写入持久化 custom message content——compaction 直接读持久化字节。cache-visible 协议（system prompt shape、persona 序列化、tool schema 与顺序、消息 / 摘要序列化 grammar、sticker catalog block）任一变化：bump `CACHE_SCHEMA_VERSION`、更新 `test/cache.test.ts` golden、同步 `docs/cache.md`。
+- **Cache invariant**：永不改写已存在的 provider prefix；动态内容只以新 suffix 追加。每个请求必须是下一请求的严格前缀：不要做“只挂在最后一条”的动态尾部。每批的 sticker 附注只经原生 `beforeRequest` 投影为紧跟该批的〔系统附注〕消息并永久保留，永不写入持久化 entry.model——compaction 直接读持久化字节。cache-visible 协议（system prompt shape、persona 序列化、tool schema 与顺序、消息 / 摘要序列化 grammar、sticker catalog block）任一变化：bump `CACHE_SCHEMA_VERSION`、更新 `test/cache.test.ts` golden、同步 `docs/cache.md`。
 - Secret 不进日志、测试 fixture、commit；`.env` 不入库。
 - daemon 生产模块只用 `src/observability/log.ts` 结构化日志；不记正文 / prompt / response / tool args / 完整 URL 与 path；业务正确性不得依赖日志。
 - 不得为通过验证而削弱测试、类型检查或安全控制（如 codemode 边界、容器沙箱）。
@@ -74,9 +74,9 @@
 - `npm test` 强制 UTC：涉时间序列化的测试必须 pin TZ（参考 `test/cache.test.ts`，生产为 Asia/Singapore）。
 - 本机 `telegram.config.ts`/`.env` 可能与生产共用 bot token：不要在开发机启动 daemon 或跑 e2e，两个 poller 会抢同一 token（409）并造成线上停摆。需要真实验证时在服务器上做。
 - `.env` 是 `key: value` 冒号格式，由 `src/config.ts` 自解析，不是 dotenv 的 `KEY=value`。
-- Pi 各包（agent-core、ai、coding-agent、tui、schema，以及后台 job 直接用的 pi-codemode）精确锁定 registry `1.5.0`；升级必须同一原子提交一起更新 manifest、lock 并做兼容性验证。
+- Pi 各包（含 durable、env、chord、ai、coding-agent、schema、codemode）精确锁定 registry `1.5.0`；升级必须同一原子提交一起更新 manifest、lock 并做兼容性验证。
 - sticker / alias 的 short_id 用 rowid 分配，不用 COUNT+1（并发 / 删除下撞号）。
-- `streamFunction` 包装（`src/agent/runtime.ts`）是 Pi 的官方注入形态（`Agent.streamFunction` 是公开可变字段，函数包函数注入 `cacheRetention`）；`createAgentSession()` 不接受 streamFn 选项，只能事后覆盖。升级 Pi 时仍必须验证该包装（见 `docs/engineering/decisions.md`）。
+- Pi Durable 拥有会话与执行恢复，`guardModels` 只包装完整 provider deadline、413 归一化与有效规划窗口；不要再引入 AgentSession 状态机。升级时验证 unsafe send 重启边界与原生 task journal（见 `docs/engineering/decisions.md`）。
 
 ## 9. 指南更新规则
 

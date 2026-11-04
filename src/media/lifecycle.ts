@@ -1,129 +1,35 @@
-import type { DatabaseSync as Database } from "node:sqlite";
+import type { Database } from "../db/db.ts";
 import { unlinkSync } from "node:fs";
-import { join } from "node:path";
 import { resolveMediaSourcePath } from "./local-cache.ts";
-import { derivedImageNames } from "./prepare-images.ts";
 
 export const MEDIA_PRUNE_BATCH_LIMIT = 256;
-
 export interface MediaPruneResult {
 	scanned: number;
 	deleted: number;
 	stale: number;
 	failed: number;
 }
-
-export interface MediaPruneOptions {
-	limit?: number;
-	remove?: (path: string) => "deleted" | "missing";
-}
-
-const ACTIVE_MEDIA_REFERENCE_SQL = `EXISTS (
-	SELECT 1
-	  FROM messages message
-	 WHERE message.media IS NOT NULL
-       AND CAST(json_extract(message.media, '$.file_unique_id') AS TEXT) = media.file_unique_id
-	   AND (
-	     EXISTS (
-	       SELECT 1
-	         FROM bot_visible_messages visible
-	         JOIN json_each(?1) configured ON configured.value = visible.bot_id
-	        WHERE visible.chat_id = message.chat_id
-	          AND visible.message_id = message.message_id
-	     )
-	     OR EXISTS (
-	       SELECT 1
-	         FROM reply_obligations obligation
-	         JOIN json_each(?1) configured ON configured.value = obligation.bot_id
-	        WHERE obligation.chat_id = message.chat_id
-	          AND obligation.message_id = message.message_id
-	     )
-	     OR EXISTS (
-	       SELECT 1
-	         FROM message_events event
-	         JOIN json_each(?1) configured ON TRUE
-	        WHERE event.chat_id = message.chat_id
-	          AND event.message_id = message.message_id
-	          AND event.kind <> 'media_update'
-	          AND event.ingest_seq > COALESCE(
-	            (
-	              SELECT cursor.consumed_seq
-	                FROM bot_cursors cursor
-	               WHERE cursor.bot_id = configured.value
-	                 AND cursor.chat_id = event.chat_id
-	            ),
-	            0
-	          )
-	     )
-	   )
-)`;
-
-function configuredBotIdsJson(configuredBotIds: readonly string[]): string | null {
-	const botIds = [...new Set(configuredBotIds.filter(Boolean))];
-	return botIds.length > 0 ? JSON.stringify(botIds) : null;
-}
-
-const defaultRemove: NonNullable<MediaPruneOptions["remove"]> = (path) => {
-	try {
-		unlinkSync(path);
-		return "deleted";
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
-		throw error;
-	}
-};
-
-/**
- * Delete a bounded batch of reproducible local media after compaction visibility is committed.
- * Derived view_image files are removed together with their source file and the DB ref is
- * cleared for every scanned row (unlink failures are counted, never retried).
- * Canonical messages, file-id mappings, short ids and vision results remain untouched.
- */
-export function pruneUnreferencedMediaCache(
-	db: Database,
-	mediaDir: string,
-	configuredBotIds: readonly string[],
-	options: MediaPruneOptions = {},
-): MediaPruneResult {
-	const botIdsJson = configuredBotIdsJson(configuredBotIds);
-	if (!botIdsJson) return { scanned: 0, deleted: 0, stale: 0, failed: 0 };
-	const limit = Math.min(MEDIA_PRUNE_BATCH_LIMIT, Math.max(1, Math.floor(options.limit ?? MEDIA_PRUNE_BATCH_LIMIT)));
+/** Pi stores image bytes. Source files are disposable after seven days without a new message. */
+export function pruneMediaCache(db: Database, mediaDir: string, now = Date.now()): MediaPruneResult {
 	const rows = db
-		.prepare(`
-			SELECT media.file_unique_id AS fileUniqueId, media.local_path AS localPath
-			  FROM media
-			 WHERE media.local_path IS NOT NULL
-			   AND NOT ${ACTIVE_MEDIA_REFERENCE_SQL}
-			 ORDER BY media.rowid
-			 LIMIT ?2
-		`)
-		.all(botIdsJson, limit) as Array<{ fileUniqueId: string; localPath: string }>;
+		.prepare(`SELECT file_unique_id AS id, local_path AS path FROM media
+		WHERE local_path IS NOT NULL AND NOT EXISTS (
+			SELECT 1 FROM messages WHERE CAST(json_extract(messages.media, '$.file_unique_id') AS TEXT) = media.file_unique_id AND date > ?
+		) ORDER BY rowid LIMIT ?`)
+		.all(Math.floor(now / 1000) - 7 * 86400, MEDIA_PRUNE_BATCH_LIMIT) as { id: string; path: string }[];
 	const result: MediaPruneResult = { scanned: rows.length, deleted: 0, stale: 0, failed: 0 };
-	const clear = db.prepare("UPDATE media SET local_path = NULL WHERE file_unique_id = ? AND local_path IS ?");
-	const remove = options.remove ?? defaultRemove;
 	for (const row of rows) {
-		const path = resolveMediaSourcePath(mediaDir, row.localPath);
-		if (path) {
-			try {
-				if (remove(path) === "deleted") result.deleted++;
-				else result.stale++;
-			} catch {
-				result.failed++;
-			}
-		} else {
-			result.stale++;
+		const path = resolveMediaSourcePath(mediaDir, row.path);
+		try {
+			if (path) {
+				unlinkSync(path);
+				result.deleted++;
+			} else result.stale++;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") result.stale++;
+			else result.failed++;
 		}
-		for (const name of derivedImageNames(row.fileUniqueId)) {
-			try {
-				remove(join(mediaDir, name));
-			} catch {
-				result.failed++;
-			}
-		}
-		// Refs are cleared even when an unlink failed: a file this process cannot delete would
-		// otherwise sit at the head of the rowid-ordered batch on every compaction and starve the
-		// rest. The leaked file is reported through `failed`; the identity stays re-downloadable.
-		clear.run(row.fileUniqueId, row.localPath);
+		db.prepare("UPDATE media SET local_path = NULL WHERE file_unique_id = ? AND local_path = ?").run(row.id, row.path);
 	}
 	return result;
 }

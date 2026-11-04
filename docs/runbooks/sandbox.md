@@ -1,6 +1,6 @@
 # Runbook：bot 工作区（沙箱）
 
-bot 的 `sh_exec` / `tg_download` / `sh_reset` 跑在每个 bot 一个的常驻容器 `tg-box-<bot>` 里，由**独立 Linux 用户 `tgbox` 的 rootless Docker** 托管。设计与威胁模型见 [architecture.md](../architecture.md#沙箱威胁模型)。
+Pi 的原生 `read` / `write` / `edit` / `bash` 通过 `pi-env` 在每个 bot 一个的常驻容器 `tg-box-<bot>` 里执行；Telegram 的 `tg_download` / `sh_reset` 使用同一工作区，由**独立 Linux 用户 `tgbox` 的 rootless Docker** 托管。设计与威胁模型见 [architecture.md](../architecture.md#沙箱威胁模型)。
 
 ## 一次性主机准备（Arch Linux）
 
@@ -44,10 +44,10 @@ DOCKER_HOST=unix:///run/tgbox/docker.sock docker run --rm --memory 256m alpine c
 
 ```bash
 rsync -a deploy/box/ <host>:/tmp/tgbox-build/
-DOCKER_HOST=unix:///run/tgbox/docker.sock docker build -t tg-box:3 /tmp/tgbox-build
+DOCKER_HOST=unix:///run/tgbox/docker.sock docker build -t tg-box:4 /tmp/tgbox-build
 ```
 
-改了 Dockerfile 就换新 tag（例如 `tg-box:4`），改 `telegram.config.ts` 的 `sandbox.image` 后 `/box reset` 或等每周清空，旧容器才会用新镜像重建。
+改了 Dockerfile 就换新 tag（例如 `tg-box:5`），改 `telegram.config.ts` 的 `sandbox.image` 后 `/box reset` 或等每周清空，旧容器才会用新镜像重建。
 
 镜像包含固定版本 uv/uvx、fontconfig、Noto Sans CJK 和彩色 emoji。Python 依赖优先用 uv：
 
@@ -65,41 +65,36 @@ fc-match "Noto Sans CJK SC"
 
 ### 所有 bot 容器的总资源上限
 
-`sandbox.memory/cpus` 只限制单个工作容器，后台任务各有独立配额。要让专用 `tgbox` 用户下的全部容器合计最多 4 核 / 8 GiB，使用持久化 systemd slice 上限（包含 rootless Docker 自身的小额开销）：
+`sandbox.memory/cpus` 限制单个工作容器；主会话与其后台任务共用这个配额。要让专用 `tgbox` 用户下的全部容器合计最多 4 核 / 8 GiB，使用持久化 systemd slice 上限（包含 rootless Docker 自身的小额开销）：
 
 ```bash
 sudo systemctl set-property user-$(id -u tgbox).slice CPUQuota=400% MemoryMax=8G MemorySwapMax=0
 systemctl show user-$(id -u tgbox).slice -p CPUQuotaPerSecUSec -p MemoryMax -p MemorySwapMax
 ```
 
-这是主机运维限制，不是第二份 bot 业务配置。`400%` 是最多四核的累计 CPU 时间，不绑核、不预留；8 GiB 是硬上限，触顶可能 OOM，不是每个容器都能同时拿到 8 GiB。后台任务可保留每个 2 核 / 3 GiB、最多两个并发，共享同一总预算。daemon 在另一个用户下，不受此 slice 限制。
+这是主机运维限制，不是第二份 bot 业务配置。`400%` 是最多四核的累计 CPU 时间，不绑核、不预留；8 GiB 是硬上限，触顶可能 OOM，不是每个容器都能同时拿到 8 GiB。后台任务使用 Pi Durable 子会话，模型运行留在宿主进程，文件和命令操作复用所属 bot 的工作容器。daemon 在另一个用户下，不受此 slice 限制；任务并发由 `tasks.max_running` 控制。
 
-### 任务凭证卷
+### Pi 执行环境
 
-任务容器把 `tg-pihome-<bot>` 挂成 Pi 的 agent 目录。脚本把任务用的 OpenAI 兼容模型（provider 名为 `devin`，工作流里写 `devin/<model>`）和主机 `~/.pi/agent/auth.json` 里的 ollama-cloud key 直接流进卷里，不落盘、不打印：
+镜像包含固定版本 `@earendil-works/pi-env@1.5.0`，其 daemon 安装在 `/usr/local/bin/pi-env`。宿主通过 `docker --host <rootless socket> exec --interactive tg-box-<bot> /usr/local/bin/pi-env` 建立原生协议连接；Pi 管理文件读写、输出截断、命令取消和进程终止。本仓库只负责容器生命周期和 Telegram 附件出入边界。
 
-```bash
-TASK_LLM_BASE_URL=https://<你的代理>/v1 TASK_LLM_KEY_FILE=<key 文件> [TASK_LLM_MODEL=swe-2] [TASK_LLM_THINKING=medium] \
-  deploy/box/init-task-home.sh <bot_id> tg-box:3
-```
+容器不再运行另一份 Pi coding-agent，不加载工作流插件，也不挂载 `tg-pihome-*` 凭证卷。模型与搜索凭证全部留在宿主进程。旧凭证卷不再使用；确认旧任务已结束后可单独移除。迁移时先停止 daemon，重建镜像并删除旧 `tg-box-*` 容器，保留 `tg-work-*` 卷，然后再启动新版本。
 
-任务主会话默认用模型支持的最低思考强度（swe-2 是 medium）；工作流里的 subagent 可以自己指定更强的模型。key 文件里放裸 key，或一行名字以 KEY 结尾的 `NAME=value`（例如 `AUTH_KEY=…`）。不要把 Devin CLI 的 OAuth 凭证复制进任务卷：两份 refresh token 各自刷新可能互相作废，把主 bot 的认证一起弄掉；用一个 OpenAI 兼容代理（例如自建的 devin-openai-proxy）提供模型。
-
-换 key 或改模型设置后重跑即可。工作流目录要在主机上（例如 `rsync -a ~/pi-tasks/ <host>:pi-tasks/`）。
+附件拷出仍先解析容器内真实路径，要求位于 `/work`；随后通过 Pi 的 `noFollow` 文件句柄检查普通文件类型和大小，读取最多发送上限加一字节。原生工具本身不是沙箱，不能把宿主的 `NodeExecutionEnv` 配给群聊会话。
 
 ## 配置
 
 ```ts
-sandbox: { image: "tg-box:3", docker_host: "unix:///run/tgbox/docker.sock", memory: "8g", cpus: 4, pids: 256, network: true },
+sandbox: { image: "tg-box:4", docker_host: "unix:///run/tgbox/docker.sock", memory: "8g", cpus: 4, pids: 256, network: true },
 bots: [{ ..., tools: { codemode: true, sandbox: true } }],
 ```
 
-`tools.sandbox` 需要 `tools.codemode`（这些工具只能从脚本调用）和顶层 `sandbox` 段。
+`tools.sandbox` 需要顶层 `sandbox` 段。原生 coding tools 的暴露方式由会话注册的工具集合决定。
 
 后台任务：
 
 ```ts
-tasks: { workflows: { search: "~/pi-tasks/search" }, max_running: 2, timeout_minutes: 45, memory: "3g", cpus: 2 },
+tasks: { workflows: { search: "~/pi-tasks/search" }, max_running: 2, timeout_minutes: 45 },
 bots: [{ ..., tools: { codemode: true, sandbox: true, tasks: true } }],
 ```
 
@@ -110,5 +105,5 @@ bots: [{ ..., tools: { codemode: true, sandbox: true, tasks: true } }],
 | 清空某个 bot 的工作区 | 群里管理员 `/box reset`（多 bot 时 `/box reset@bot_username`），或 bot 自己调 `sh_reset` |
 | 每周清空 | 每周一 05:00（进程本地时间）后的第一次检查（10 分钟一次）；上次清空时间存在 `daemon_state` 的 `box_reset_at:<bot>`，重启不重复清 |
 | 查看容器 | `DOCKER_HOST=unix:///run/tgbox/docker.sock docker ps --filter label=tg-box` |
-| 查看任务 | `docker ps --filter label=tg-task`；数据库 `SELECT * FROM tasks ORDER BY created_at DESC` |
+| 查看任务 | 群里 `/task`，任务状态由 Pi Durable 持久化 |
 | 手动删除 | `docker rm -f tg-box-<bot> && docker volume rm tg-work-<bot>`（下次调用自动重建） |

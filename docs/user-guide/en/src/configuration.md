@@ -45,7 +45,7 @@ Omitted fields use defaults. An invalid configuration fails at startup with ever
 3. append an entry to `bots` (`id` must be unique and contain only letters, digits, `_` and `-`);
 4. restart and check it with `/status` in the group.
 
-Each bot has its own token, personality, session and statistics. They share the group's history and see each other's messages, but do not trigger each other unless an admin turns on `/fire` (see below).
+Each bot has its own token, personality, Pi Durable conversation and cumulative usage. They share the group's history and see each other's messages, but do not trigger each other unless an admin turns on `/fire` (see below).
 
 ## When a bot replies
 
@@ -58,7 +58,6 @@ Each bot has its own token, personality, session and statistics. They share the 
 
 - `provider` / `model` can be set at the top level (shared by all bots) or overridden per bot; when you change the provider you must also set `model`. If omitted, Pi's `/model` default is used.
 - `reasoning_effort` defaults to `off` and must be a level the model actually supports (Pi `/model` shows them); otherwise startup fails.
-- `compaction_model` is a cheap model used to summarize context (`provider/model:effort`). If a summary fails, the old context is kept; it never falls back to the main model.
 - For your own gateway or proxy, register it in Pi's `~/.pi/agent/models.json` (`baseUrl`, `api: "openai-completions"`, `apiKey`, and each model's `input`, `contextWindow`, `maxTokens`), confirm it in Pi `/model`, then reference it here. No project change is needed.
 - Admins can switch models from the group with `/model` buttons; see [Group commands](operations.md#group-commands).
 
@@ -75,7 +74,7 @@ tools: { send: true, search: false, codemode: false, sandbox: false, tasks: fals
 | `send` | post in the group, send stickers, add reactions; turn it off for a bot that only watches | nothing |
 | `search` | web search (up to 5 snippets) or read one public page, paging through long ones; localhost and private addresses are refused | `tiny_fish_api_key` in `.env` |
 | `codemode` | the bot writes JavaScript scripts (Pi's native QuickJS sandbox) for exact calculations, to call other tools in bulk and filter the results, and to search the group's whole message history. Scripts have no network or file system, and can call `send` | nothing |
-| `sandbox` | the bot's own Linux work box (a Docker container): run commands from scripts and copy in files people send; `send` can post images (jpg/png/webp up to 10 MB) and files (up to 50 MB) from the box straight to the group | `codemode: true`, a top-level `sandbox` section, rootless Docker on the host |
+| `sandbox` | the bot's own Linux work box (a Docker container): use native Pi read/write/edit/bash to work with files and commands, and copy in files people send; `send` can post images (jpg/png/webp up to 10 MB) and files (up to 50 MB) from the box straight to the group | a top-level `sandbox` section, rootless Docker on the host |
 | `tasks` | hand long searches and research to a background task and reply to the requester when it is done | `sandbox: true`, a top-level `tasks` section |
 
 The `view_image` tool has no switch: every bot gets it when `media.mode` is `"hybrid"` (see below).
@@ -83,7 +82,7 @@ The `view_image` tool has no switch: every bot gets it when `media.mode` is `"hy
 ### Work box (`sandbox`)
 
 ```ts
-sandbox: { image: "tg-box:2", docker_host: "unix:///run/tgbox/docker.sock", memory: "1g", cpus: 2, pids: 256, network: true },
+sandbox: { image: "tg-box:4", docker_host: "unix:///run/tgbox/docker.sock", memory: "1g", cpus: 2, pids: 256, network: true },
 ```
 
 These are the defaults, so write only what you change, but the `sandbox` section itself must exist. Each bot with `sandbox` gets one long-lived container, run by rootless Docker under a dedicated Linux user, with no host directories mounted and no credentials inside. `network: false` takes the box offline.
@@ -95,13 +94,13 @@ These are the defaults, so write only what you change, but the `sandbox` section
 ### Background tasks (`tasks`)
 
 ```ts
-tasks: { workflows: { search: "~/pi-tasks/search" }, max_running: 2, timeout_minutes: 45, memory: "3g", cpus: 2 },
+tasks: { workflows: { search: "~/pi-tasks/search" }, max_running: 2, timeout_minutes: 45 },
 ```
 
-- `workflows` maps a name to a directory that must contain a `.pi` folder (Pi project settings, extensions, prompts). The bot picks a workflow when it starts a task; each task runs Pi with that `.pi` in a throwaway container sharing the box's `/work`, so the bot can post whatever files the task produces.
-- `max_running` is how many tasks one bot may run at once; a task running past `timeout_minutes` fails. `memory` / `cpus` cap each task container.
-- Pi inside a task needs its own model credentials, kept in a dedicated Docker volume; see the [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md#任务凭证卷).
-- In the group: the bot first says it is on it; progress, questions for you and the result reach the bot as `[task tN …]` lines, and the bot relays them and replies to whoever asked. To add details, just reply to the bot and it forwards them. A daemon restart interrupts running tasks, and the bot tells the requester.
+- `workflows` maps a name to a directory containing `AGENTS.md`: instructions describing the task, research method and expected deliverable. A native Pi child conversation reads these instructions and shares the main conversation's work box and host model authentication.
+- `max_running` limits concurrent tasks per bot. `timeout_minutes` is a persisted deadline that continues across restarts. Children share `sandbox.memory` / `sandbox.cpus`; tasks have no separate resource settings or credential volumes.
+- A task uses `report` to return progress, questions and results. The main bot decides what to post to the requester; a child cannot send to the group or create more tasks/jobs. Reply to the main bot to add requirements.
+- Pi resumes tasks and background scripts after a restart. Committed safe tool results are reused; unsafe operations with an unknown outcome are not blindly replayed, especially Telegram sends. `/new` cancels background tasks.
 
 ## Images and videos
 
@@ -112,7 +111,7 @@ tasks: { workflows: { search: "~/pi-tasks/search" }, max_running: 2, timeout_min
 | `"off"` (default) | text placeholders such as `[photo]` only | nothing |
 | `"hybrid"` | a vision model (`media.vision_model`) describes each new image or video once as text, shared by all bots; when a description is not enough, the bot calls `view_image` to open one message's actual image or video frames, including replied-to or searched older messages | a main model with image input |
 
-Use `hybrid` when the bot should understand images: it pays only for text descriptions until the bot really needs to look at the original.
+Use `hybrid` when the bot should understand images: pay once for the visual description, then reuse text in the main conversation until the bot needs to inspect the original. Pi persists actual ImageContent in the conversation; pruning the download cache cannot change existing conversation images or require old images to be downloaded again to reconstruct history.
 
 `media.max_per_turn` caps new media described per turn (default 2) and `media.concurrency` caps parallel jobs (default 2). Voice, audio, ordinary files and TGS animated stickers are placeholders in every mode (a bot with `sandbox` can copy files into its box and work on them). Videos require FFmpeg on the host.
 
@@ -120,20 +119,20 @@ Use `hybrid` when the bot should understand images: it pays only for text descri
 
 | Field | Default | Purpose |
 |---|---|---|
-| `context_window` | 65,536 | the most context the main model uses |
+| `context_window` | 65,536 | configured ceiling for the effective planning window, also capped by the model catalog |
 | `compaction_threshold` | half of `context_window` | context beyond this is summarized (at most `context_window − 16,384`) |
-| `compaction_keep_recent` | 20,000 | recent tokens kept verbatim after a summary (about 1–2 turns) |
-| `max_suffix_tokens` / `max_message_tokens` | 12,000 / 4,096 | caps on new messages per turn and on one message |
-| `context_image_budget_bytes` | 10,000,000 | an extra summary is made when images in context exceed this many bytes |
+| `compaction_keep_recent` | 20,000 | target recent tokens kept verbatim, capped at half the effective trigger threshold to leave room for the summary |
 | `provider_timeout_ms` / `provider_retries` | 300,000 / 2 | per-request timeout and automatic retries |
 | `cache_retention` | `"short"` | provider prompt cache retention |
-| `telemetry_retention_days` etc. | 90 / 30 / 365 | days to keep usage, raw updates and message events |
+| `raw_update_retention_days` / `message_event_retention_days` | 30 / 365 | retention for raw Telegram updates and message events |
 | `telegram_admins` | empty | numeric user ids of people who may use admin commands (usernames are not accepted because they can change hands) |
 
-Most of these can also be overridden per bot. Misspelled or retired fields fail at startup with a hint about what to write instead.
+Native compaction uses the current chat model and `reasoning_effort`. Its effective planning window is the minimum of the catalog window, `context_window`, and `compaction_threshold + 16,384`. A fixed 16,384-token reserve bounds summary output to at most 13,107 tokens, also capped by the model. Early background compaction is disabled. Failed compaction keeps the original context; use `/new` if needed. Pi 1.5.0 does not automatically split oversized summary inputs.
+
+Most of these can also be overridden per bot. Misspelled or retired fields fail at startup instead of being silently ignored.
 
 Don't know your numeric user id? Message [@userinfobot](https://t.me/userinfobot) privately.
 
-After you change the model, personality, tools, media mode or other settings that affect what the model sees, each bot starts a new session on restart (the old session file is kept). This is expected.
+After you change the model, personality, tools, media mode or other settings that affect what the model sees, each bot starts a new session on restart (old records remain in `data/pi/<bot>.sqlite`). This is expected.
 
 Next: [Daily operations and group commands](operations.md).

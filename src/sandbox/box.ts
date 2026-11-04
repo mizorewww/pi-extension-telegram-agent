@@ -1,19 +1,14 @@
-// Per-bot work box: one long-lived container on a dedicated rootless Docker daemon, driven
-// through the docker CLI. The box holds no credentials and mounts nothing from the host; its only
-// state is the named /work volume, which reset() (weekly, or on demand) destroys.
-// Threat model: docs/architecture.md "沙箱威胁模型". Tests: test/sandbox.test.ts.
-
-import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+// Rootless Docker owns isolation; Pi owns file access, shell execution and cancellation.
+import { execFile } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { getOrThrow, type ExecutionEnv } from "@earendil-works/pi-durable/env";
+import { Connection, RemoteExecutionEnv } from "@earendil-works/pi-env";
 
 export const BOX_WORKDIR = "/work";
 export const BOX_OUTPUT_MAX_BYTES = 1024 * 1024;
-export const BOX_DEFAULT_TIMEOUT_S = 60;
-export const BOX_MAX_TIMEOUT_S = 600;
-const DOCKER_CALL_TIMEOUT_MS = 60_000;
-
 export interface BoxConfig {
 	image: string;
 	dockerHost: string;
@@ -22,84 +17,52 @@ export interface BoxConfig {
 	pids: number;
 	network: boolean;
 }
-
 export interface DockerResult {
 	code: number;
 	stdout: Uint8Array;
 	stderr: string;
 	timedOut: boolean;
 }
-
-/** Runs one docker CLI call; injectable so tests never touch a real daemon. */
 export type DockerRunner = (
 	args: readonly string[],
-	options: { dockerHost: string; timeoutMs: number; input?: Uint8Array; maxStdout?: number },
+	options: { dockerHost: string; timeoutMs: number },
 ) => Promise<DockerResult>;
-
-export interface ExecResult {
-	output: string;
-	exit_code: number;
-	truncated: boolean;
-	timed_out: boolean;
-	wall_ms: number;
-}
-
 export class BoxError extends Error {}
 
 export const runDocker: DockerRunner = (args, options) =>
-	new Promise((resolve, reject) => {
-		const child = spawn("docker", [...args], {
-			env: { PATH: process.env.PATH ?? "/usr/bin:/bin", DOCKER_HOST: options.dockerHost },
-			stdio: ["pipe", "pipe", "pipe"],
-		});
-		const max = options.maxStdout ?? BOX_OUTPUT_MAX_BYTES;
-		const chunks: Buffer[] = [];
-		let size = 0;
-		let stderr = "";
-		let timedOut = false;
-		const timer = setTimeout(() => {
-			timedOut = true;
-			child.kill("SIGKILL");
-		}, options.timeoutMs);
-		child.stdout.on("data", (chunk: Buffer) => {
-			if (size >= max) return;
-			chunks.push(chunk.subarray(0, max - size));
-			size += Math.min(chunk.length, max - size);
-		});
-		child.stderr.on("data", (chunk: Buffer) => {
-			if (stderr.length < 4096) stderr += chunk.toString("utf8");
-		});
-		child.on("error", (error) => {
-			clearTimeout(timer);
-			reject(error);
-		});
-		child.on("close", (code) => {
-			clearTimeout(timer);
-			resolve({ code: code ?? -1, stdout: new Uint8Array(Buffer.concat(chunks)), stderr, timedOut });
-		});
-		child.stdin.end(options.input ?? undefined);
+	new Promise((resolve) => {
+		execFile(
+			"docker",
+			["--host", options.dockerHost, ...args],
+			{
+				env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+				encoding: "buffer",
+				timeout: options.timeoutMs,
+				maxBuffer: BOX_OUTPUT_MAX_BYTES,
+			},
+			(error, stdout, stderr) =>
+				resolve({
+					code: error ? (typeof error.code === "number" ? error.code : -1) : 0,
+					stdout,
+					stderr: stderr.toString(),
+					timedOut: error?.killed ?? false,
+				}),
+		);
 	});
 
-/** Paths a bot may hand out of the box: inside /work, no traversal, no control characters. */
+/** Outbound attachments must stay under /work, including their canonical path. */
 export function normalizeBoxPath(path: string): string {
 	const value = path.startsWith("/") ? path : `${BOX_WORKDIR}/${path}`;
-	if (/[\0\n\r]/.test(value)) throw new BoxError("invalid path");
-	const parts: string[] = [];
-	for (const part of value.split("/")) {
-		if (!part || part === ".") continue;
-		if (part === "..") throw new BoxError("path must stay inside /work");
-		parts.push(part);
-	}
-	const normalized = `/${parts.join("/")}`;
+	if (/[\0\n\r]/.test(value) || value.split("/").includes("..")) throw new BoxError("path must stay inside /work");
+	const normalized = `/${value
+		.split("/")
+		.filter((part) => part && part !== ".")
+		.join("/")}`;
 	if (normalized !== BOX_WORKDIR && !normalized.startsWith(`${BOX_WORKDIR}/`))
 		throw new BoxError("path must stay inside /work");
 	return normalized;
 }
 
-/**
- * Flags every container from the box image carries, the work box and task runs alike: the box
- * user, no capabilities, no privilege gain, a read-only root, and only the bot's /work volume.
- */
 export function isolationArgs(botId: string, network: boolean): string[] {
 	return [
 		"--user",
@@ -119,24 +82,41 @@ export function isolationArgs(botId: string, network: boolean): string[] {
 }
 
 export class WorkBox {
+	readonly botId: string;
+	private readonly config: BoxConfig;
+	private readonly docker: DockerRunner;
 	readonly container: string;
 	readonly volume: string;
-	private starting: Promise<void> | null = null;
-
-	constructor(
-		readonly botId: string,
-		private readonly config: BoxConfig,
-		private readonly docker: DockerRunner = runDocker,
-	) {
+	readonly env: ExecutionEnv;
+	private readonly connection: Connection;
+	private lifecycle = Promise.resolve();
+	private resetting: Promise<void> | null = null;
+	constructor(botId: string, config: BoxConfig, docker: DockerRunner = runDocker, environment?: ExecutionEnv) {
+		this.botId = botId;
+		this.config = config;
+		this.docker = docker;
 		this.container = `tg-box-${botId}`;
 		this.volume = `tg-work-${botId}`;
+		this.connection = new Connection({
+			command: async () => {
+				await this.ensure();
+				return [
+					"docker",
+					"--host",
+					config.dockerHost,
+					"exec",
+					"--interactive",
+					this.container,
+					"/usr/local/bin/pi-env",
+				];
+			},
+		});
+		this.env =
+			environment ?? new RemoteExecutionEnv({ connection: this.connection, id: this.volume, cwd: BOX_WORKDIR });
 	}
-
-	private call(args: readonly string[], timeoutMs = DOCKER_CALL_TIMEOUT_MS, input?: Uint8Array, maxStdout?: number) {
-		return this.docker(args, { dockerHost: this.config.dockerHost, timeoutMs, input, maxStdout });
+	private call(args: readonly string[]) {
+		return this.docker(args, { dockerHost: this.config.dockerHost, timeoutMs: 60_000 });
 	}
-
-	/** The container arguments are the sandbox boundary; test/sandbox.test.ts pins them. */
 	runArgs(): string[] {
 		return [
 			"run",
@@ -164,136 +144,73 @@ export class WorkBox {
 		];
 	}
 
-	async ensure(): Promise<void> {
-		this.starting ??= this.start().finally(() => {
-			this.starting = null;
-		});
-		await this.starting;
+	private exclusive(action: () => Promise<void>): Promise<void> {
+		const work = this.lifecycle.then(action);
+		this.lifecycle = work.catch(() => {});
+		return work;
 	}
-
+	ensure(): Promise<void> {
+		return this.exclusive(() => this.start());
+	}
 	private async start(): Promise<void> {
-		const state = await this.call(["inspect", "--format", "{{.State.Running}}", this.container]);
-		if (state.code === 0 && new TextDecoder().decode(state.stdout).trim() === "true") return;
+		const state = await this.call(["inspect", "--format", "{{.State.Running}} {{.Config.Image}}", this.container]);
+		if (state.code === 0 && new TextDecoder().decode(state.stdout).trim() === `true ${this.config.image}`) return;
 		if (state.code === 0) await this.call(["rm", "--force", this.container]);
-		const run = await this.call(this.runArgs());
-		if (run.code !== 0) throw new BoxError(`box start failed: ${firstLine(run.stderr)}`);
-		// The fresh volume is root-owned; hand /work to the box user once.
-		await this.call(["exec", "--user", "0", this.container, "chown", "1000:1000", BOX_WORKDIR]);
-		await this.call(["exec", this.container, "mkdir", "-p", `${BOX_WORKDIR}/.home`, `${BOX_WORKDIR}/inbox`]);
+		for (const args of [
+			this.runArgs(),
+			["exec", "--user", "0", this.container, "chown", "1000:1000", BOX_WORKDIR],
+			["exec", this.container, "mkdir", "-p", `${BOX_WORKDIR}/.home`, `${BOX_WORKDIR}/inbox`],
+		]) {
+			if ((await this.call(args)).code !== 0) throw new BoxError("box start failed");
+		}
 	}
-
-	async exec(command: string, timeoutS = BOX_DEFAULT_TIMEOUT_S, signal?: AbortSignal): Promise<ExecResult> {
-		if (!command.trim()) throw new BoxError("empty command");
-		const seconds = Math.min(Math.max(1, Math.floor(timeoutS)), BOX_MAX_TIMEOUT_S);
-		await this.ensure();
-		signal?.throwIfAborted();
-		const started = Date.now();
-		// `timeout` inside the box ends the process tree; the host deadline backs it up.
-		const result = await this.call(
-			[
-				"exec",
-				"--interactive",
-				this.container,
-				"timeout",
-				"-s",
-				"KILL",
-				String(seconds),
-				"sh",
-				"-c",
-				// stderr joins stdout from a leading line: a suffix would break commands ending in a heredoc.
-				`exec 2>&1\n${command}`,
-			],
-			(seconds + 10) * 1000,
-			undefined,
-			BOX_OUTPUT_MAX_BYTES + 1,
-		);
-		const truncated = result.stdout.byteLength > BOX_OUTPUT_MAX_BYTES;
-		const bytes = truncated ? result.stdout.subarray(0, BOX_OUTPUT_MAX_BYTES) : result.stdout;
-		const timedOut = result.timedOut || result.code === 137;
-		return {
-			output: new TextDecoder().decode(bytes),
-			exit_code: result.code,
-			truncated,
-			timed_out: timedOut,
-			wall_ms: Date.now() - started,
-		};
+	interrupt(): Promise<void> {
+		return this.exclusive(async () => {
+			this.connection.close();
+			await this.call(["kill", this.container]);
+		});
 	}
-
-	/** /new and shutdown cancel all work for this bot; keep the volume until reset commits. */
-	async interrupt(): Promise<void> {
-		await this.starting;
-		await this.call(["kill", this.container]);
+	reset(): Promise<void> {
+		this.resetting ??= this.exclusive(() => this.remove()).finally(() => {
+			this.resetting = null;
+		});
+		return this.resetting;
 	}
-
-	/** Destroy the container and its /work volume; the next call starts from the clean image. */
-	async reset(): Promise<void> {
-		await this.call(["rm", "--force", this.container]);
-		const removed = await this.call(["volume", "rm", "--force", this.volume]);
-		if (removed.code !== 0) throw new BoxError(`box reset failed: ${firstLine(removed.stderr)}`);
+	private async remove(): Promise<void> {
+		this.connection.close();
+		if ((await this.call(["rm", "--force", this.container])).code !== 0) {
+			const exists = await this.call(["inspect", this.container]);
+			if (exists.code === 0) throw new BoxError("box removal failed");
+		}
+		if ((await this.call(["volume", "rm", "--force", this.volume])).code !== 0) throw new BoxError("box reset failed");
 	}
-
-	/** Write bytes to /work/<relative> as the box user. */
 	async writeFile(path: string, bytes: Uint8Array): Promise<string> {
 		const target = normalizeBoxPath(path);
-		await this.ensure();
-		const dir = target.slice(0, target.lastIndexOf("/")) || BOX_WORKDIR;
-		const result = await this.call(
-			["exec", "--interactive", this.container, "sh", "-c", 'mkdir -p "$1" && cat > "$2"', "sh", dir, target],
-			DOCKER_CALL_TIMEOUT_MS,
-			bytes,
-		);
-		if (result.code !== 0) throw new BoxError(`write failed: ${firstLine(result.stderr)}`);
+		getOrThrow(await this.env.createDir(dirname(target), { recursive: true }, BACKGROUND_CONTEXT));
+		getOrThrow(await this.env.writeFile(target, bytes, BACKGROUND_CONTEXT));
 		return target;
 	}
-
-	/** Unpack a tar archive into a /work directory as the box user. */
-	async extractTar(dir: string, tar: Uint8Array): Promise<string> {
-		const target = normalizeBoxPath(dir);
-		await this.ensure();
-		const result = await this.call(
-			["exec", "--interactive", this.container, "sh", "-c", 'mkdir -p "$1" && tar -x -C "$1"', "sh", target],
-			DOCKER_CALL_TIMEOUT_MS,
-			tar,
-		);
-		if (result.code !== 0) throw new BoxError(`extract failed: ${firstLine(result.stderr)}`);
-		return target;
-	}
-
-	/**
-	 * Copy one regular file out of /work into a fresh host temp dir. The path is resolved inside
-	 * the box first, so a symlink cannot point the copy outside /work.
-	 */
 	async copyOut(path: string, maxBytes: number): Promise<{ hostPath: string; size: number; cleanup: () => void }> {
-		const requested = normalizeBoxPath(path);
-		await this.ensure();
-		const resolved = await this.call(["exec", this.container, "realpath", "-e", "--", requested]);
-		if (resolved.code !== 0) throw new BoxError("file not found");
-		const real = normalizeBoxPath(new TextDecoder().decode(resolved.stdout).trim());
-		const size = await this.call(["exec", this.container, "stat", "-c", "%F %s", "--", real]);
-		const [type, bytes] = new TextDecoder()
-			.decode(size.stdout)
-			.trim()
-			.split(/ (?=\d+$)/);
-		if (size.code !== 0 || type !== "regular file") throw new BoxError("not a regular file");
-		if (Number(bytes) > maxBytes) throw new BoxError("file too large");
-		const content = await this.call(
-			["exec", this.container, "cat", "--", real],
-			DOCKER_CALL_TIMEOUT_MS,
-			undefined,
-			maxBytes + 1,
-		);
-		if (content.code !== 0 || content.stdout.byteLength > maxBytes) throw new BoxError("copy failed");
-		const dir = mkdtempSync(join(tmpdir(), "tg-box-out-"));
-		const hostPath = join(dir, basename(real));
-		writeFileSync(hostPath, content.stdout, { mode: 0o600 });
-		return {
-			hostPath,
-			size: statSync(hostPath).size,
-			cleanup: () => rmSync(dir, { recursive: true, force: true }),
-		};
+		const context = BACKGROUND_CONTEXT;
+		const real = normalizeBoxPath(getOrThrow(await this.env.canonicalPath(normalizeBoxPath(path), context)));
+		const reader = getOrThrow(await this.env.openBinaryReader(real, { noFollow: true }, context));
+		try {
+			const info = getOrThrow(await reader.info(context));
+			if (info.kind !== "file" || info.size > maxBytes) throw new BoxError("attachment must be a bounded regular file");
+			const bytes = getOrThrow(await reader.read(0, maxBytes + 1, context));
+			if (bytes.length > maxBytes) throw new BoxError("file too large");
+			const dir = mkdtempSync(join(tmpdir(), "tg-box-out-"));
+			const cleanup = () => rmSync(dir, { recursive: true, force: true });
+			try {
+				const hostPath = join(dir, basename(real));
+				writeFileSync(hostPath, bytes, { mode: 0o600 });
+				return { hostPath, size: bytes.length, cleanup };
+			} catch (error) {
+				cleanup();
+				throw error;
+			}
+		} finally {
+			await reader.close(context);
+		}
 	}
-}
-
-function firstLine(text: string): string {
-	return (text.split("\n").find((line) => line.trim()) ?? "unknown error").slice(0, 200);
 }

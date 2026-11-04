@@ -1,12 +1,7 @@
-// System prompt assembly. This is cache-visible protocol (docs/cache.md).
-// Any change here => bump CACHE_SCHEMA_VERSION and start a new context epoch.
-
+// Cache-visible protocol: changes start a new context epoch (docs/cache.md).
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 
-export const CACHE_SCHEMA_VERSION = 47; // v47: Pi 1.5 native before-settle reply repair and extension order
-
-/** Marks system-appended blocks so the model never mistakes them for a group member's message. */
+export const CACHE_SCHEMA_VERSION = 48; // Native Durable sessions, tools, images and compaction.
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
 
 interface EnabledTools {
@@ -20,135 +15,38 @@ interface EnabledTools {
 
 const SOURCE_REPOSITORY = "https://github.com/mizorewww/pi-extension-telegram-agent";
 
-const TOOL_SUMMARIES = [
-	["search", "联网搜索，也可读取一个公开网页"],
-	["codemode", "写 JavaScript 脚本做精确计算，或在脚本里批量调用其他工具并过滤结果"],
-	["view_image", "查看某条消息的原图或视频帧"],
-	["task", "把耗时的深入搜索、调研交给后台任务"],
-	["job", "把几分钟的批量脚本放到后台运行"],
-	["send", "唯一的公开发言通道"],
-] as const;
-const COUNT = ["零", "一", "两", "三", "四", "五", "六"] as const;
-
-const isEnabled = (tools: EnabledTools, name: (typeof TOOL_SUMMARIES)[number][0]): boolean =>
-	name === "search"
-		? tools.search
-		: name === "codemode"
-			? tools.codemode
-			: name === "view_image"
-				? tools.viewImage
-				: name === "task"
-					? tools.tasks
-					: name === "job"
-						? tools.codemode && tools.send
-						: tools.send;
-
-/**
- * Worked examples per tool section, tested against the real tools (tool-examples.md). They live
- * under the tool they illustrate; a bot only sees the sections for tools it has.
- */
-const TOOL_EXAMPLES: Record<string, string> = Object.fromEntries(
-	readFileSync(new URL("./tool-examples.md", import.meta.url), "utf8")
-		.split(/^## /m)
-		.filter(Boolean)
-		.map((section) => {
-			const newline = section.indexOf("\n");
-			return [section.slice(0, newline).trim(), section.slice(newline + 1).trim()];
-		}),
-);
-
-const examples = (...sections: string[]): string =>
-	`\n\n示例：\n\n${sections.map((name) => TOOL_EXAMPLES[name]!).join("\n\n")}`;
-
-/** Common mistakes, keeping only the lines about tools this bot has. */
-function commonMistakes(tools: EnabledTools): string {
-	const needs: [RegExp, boolean][] = [
-		[/view_image/, tools.viewImage],
-		[/\btask\b/, tools.tasks],
-		[/\bjob\b/, tools.send && tools.codemode],
-		[/sh_exec|files|image\(\)/, tools.sandbox],
-		[/sticker|reaction|send/, tools.send],
-		[/网页/, tools.search],
-		[/await|codemode|脚本|tg_messages|exit_code/, tools.codemode],
-	];
-	const lines = TOOL_EXAMPLES.常见错误!.split("\n").filter((line) =>
-		needs.every(([pattern, enabled]) => enabled || !pattern.test(line)),
-	);
-	return `### 常见错误\n\n${lines.join("\n")}`;
-}
-
-/** How to use each tool this bot really has; tools it lacks are never mentioned as usable. */
-function toolGuides(tools: EnabledTools): string[] {
-	const guides: string[] = [];
-	const scripted = tools.codemode && tools.send;
-	if (tools.send)
-		guides.push(
-			`### send${scripted ? "\n\n- 脚本里的 send 不结束本轮：一个脚本可以先回一句、再干活、最后发结果，也可以循环调用（比如批量点 reaction）。" : ""}${examples("send", ...(scripted ? ["send-script"] : []))}`,
-		);
-	if (tools.search)
-		guides.push(
-			`### search\n\n- 要细节就挑最相关的结果用 url 读正文；转述时注明来源，查不到就如实说。${scripted ? examples("search") : ""}`,
-		);
-	if (tools.viewImage) guides.push(`### view_image${examples("view_image")}`);
-	if (tools.codemode) {
-		const callable = [
-			tools.send ? "send" : "",
-			tools.search ? "search" : "",
-			"tg_messages（检索本群全部历史消息，包括已不在你上下文里的）",
-			tools.sandbox ? "sh_exec、tg_download、sh_reset" : "",
-			tools.tasks ? "task" : "",
-			scripted ? "job" : "",
-		]
-			.filter(Boolean)
-			.join("、");
-		guides.push(
-			`### codemode\n\n- 输入是一段 JavaScript（不是 JSON、不加代码块围栏），跑在 QuickJS 沙箱里：没有网络、文件系统和计时器，只能用 \`await tools.<名字>(参数)\` 调用工具。脚本里能用：${callable}。多个独立调用用 Promise.allSettled 并行。${scripted ? '\n- 被点名后要查资料、读源码、跑命令或处理文件时，用一个脚本做：先 send 一句（如"我去查一下"），再干活；结果可以在脚本里直接 send，也可以 return 出来看过再 send。能直接回答的就直接 send，不用写脚本。' : ""}\n- 在脚本里过滤、截取，只用 text() 或 return 输出需要的部分；image() 的输出会被丢弃。${scripted && tools.search ? examples("codemode") : ""}${tools.send ? examples("tg_messages") : ""}`,
-		);
-	}
-	if (tools.sandbox)
-		guides.push(
-			`### 工作区\n\n- 你有一台自己的 Linux 机器，在脚本里用 sh_exec、tg_download、sh_reset 操作（说明见各工具）；/work 里的文件保留到每周一 05:00 自动清空。\n- Python 缺依赖时优先用 uv 按需安装：临时脚本用 \`uv run --no-project --with 包名 python ...\`，项目用 \`uv add\` / \`uv run\`，独立 Python CLI 用 \`uvx\`。\n- 带 LaTeX 公式的 Markdown 按下面示例渲染成图片，再用 send 的 files 发；长推导拆成几张图，配一句简短说明。\n- 做出来的东西用 send 的 files 直接发到群里，不要只描述你做了什么。${tools.send ? examples("工作区") : ""}`,
-		);
-	if (tools.tasks)
-		guides.push(
-			`### task\n\n- [task tN …] 里的 ↪ #id 就是发起消息，回复发起人时 reply_to 填它。${scripted ? examples("task") : ""}`,
-		);
-	if (scripted) guides.push(`### job${examples("job")}`);
-	if (tools.send || tools.codemode) guides.push(commonMistakes(tools));
-	return guides;
-}
-
-/** Where the bot's own code lives, and how it can read it with the tools it has. */
-function selfSection(tools: EnabledTools): string {
-	const how = tools.sandbox
-		? `在工作区里用 sh_exec 执行 \`git clone --depth 1 ${SOURCE_REPOSITORY} /work/src\`（已经有就 \`git -C /work/src pull\`），再用 rg、sed 阅读。`
-		: tools.search
-			? "用 search 读 GitHub 上的页面或 raw.githubusercontent.com 上的文件。"
-			: "";
-	return `## 你自己\n\n你是一个开源的 Telegram 群聊 agent，源代码在 ${SOURCE_REPOSITORY}。被问到你是怎么工作的、某个功能怎么实现，或者你想弄清自己能做什么、限制在哪时，${how ? `可以去读源代码：${how}` : "可以把这个仓库地址告诉对方。"}说明自己的实现时以实际读到的代码为准，不要凭印象猜。`;
-}
-
-/** Describe only the tools this bot really has, so it never claims or calls a missing one. */
+/** Schemas explain tool arguments; this prompt supplies only Telegram-specific policy. */
 export function toolCapabilityDeclaration(tools: EnabledTools): string {
-	const enabled = TOOL_SUMMARIES.filter(([name]) => isEnabled(tools, name));
-	const list = enabled.map(([name, summary]) => `${name}（${summary}）`).join("、");
-	const intro = enabled.length > 0 ? `你有${COUNT[enabled.length]}个工具：${list}。` : "你没有可用工具。";
-	const search = tools.search
-		? `被问"能不能搜索/查资料/看网页"时如实说明；需要外部信息时用 search${tools.codemode && tools.send ? "（被点名时按 codemode 一节先回一句再查）" : ""}。`
-		: `你不能联网搜索或读取网页，被问到时如实说明。`;
-	const legend =
-		"下面各工具的示例里，代码块围栏只为显示；【脚本】是 codemode 的原样输入，【直接调用】是你直接发起的工具调用参数，#id 和日期要换成真实值。";
-	const silent = tools.send ? "" : "你不能在群里发言，只能观察。";
-	const guides = toolGuides(tools);
-	return [
-		`## 可用工具\n\n${intro}${search}${silent}${guides.length > 0 ? `\n\n${legend}` : ""}`,
-		...guides,
-		selfSection(tools),
-	].join("\n\n");
+	const rules = [
+		tools.send
+			? "只有 send 会公开发到群里，普通 Assistant 文字和工具结果只有你自己能看到。完成回复时单独调用一次最终 send；codemode 里的 send 可先报进展再继续做事。产物用 send 的 files 直接发给群友。发送结果未知时不重发。"
+			: "你只能观察，不能在群里发言。",
+	];
+	if (tools.search) rules.push("需要外部信息时用 search，必要时读结果正文；转述注明来源，查不到就如实说。");
+	if (tools.codemode)
+		rules.push(
+			"codemode 可批量调用已提供的工具并过滤输出，独立调用用 Promise.allSettled；只返回需要的信息。image() 把图给你看，公开图片仍要用 send。",
+		);
+	if (tools.sandbox)
+		rules.push(
+			"read、write、edit、bash 操作你的 Linux 工作区；/work 保留到每周一 05:00 自动清空。Python 临时依赖用 uv run --no-project --with 包名 python，项目用 uv add / uv run，独立 CLI 用 uvx。处理文件或生成图片后交付实际产物。",
+		);
+	if (tools.viewImage)
+		rules.push("媒体描述通常已经足够；只有需要核对细节时用 view_image 看原图或视频帧，不要反复观察同一原图。");
+	if (tools.tasks)
+		rules.push(
+			"耗时工作可交给 task 后台执行；工作流由对应目录的 AGENTS.md 描述。[task tN …] 的 ↪ #id 是发起消息，回复时引用它。任务进展只有你看得到，需要向群友公开时用 send。",
+		);
+	if (tools.codemode && tools.send) rules.push("job 用于后台执行脚本；它的状态和结果也只有你自己能看到。");
+	const readSource = tools.sandbox
+		? "可用 bash 把仓库 clone 到 /work/src，再用 read 或 rg 阅读。"
+		: tools.search
+			? "可用 search 读取 GitHub 页面或 raw 文件。"
+			: "可以把仓库地址告诉对方。";
+	return `## 工具与公开回复\n\n${rules.map((rule) => `- ${rule}`).join("\n")}\n\n## 你自己\n\n你是开源的 Telegram 群聊 agent，源代码在 ${SOURCE_REPOSITORY}。${readSource}解释自己的实现和限制时，以实际读到的代码为准。`;
 }
 
-// The shared protocol is deliberately the first byte of every bot's system prompt so bots in
-// the same provider/cache cohort share the longest possible exact prefix.
+// Shared protocol comes first so bots share the longest possible exact provider prefix.
 export const SHARED_PROTOCOL = `# 群聊协议
 
 你在一个 Telegram 群里。群消息按时间顺序以如下格式出现在对话里：
@@ -160,14 +58,14 @@ export const SHARED_PROTOCOL = `# 群聊协议
 - 日期变化时会插入 --- YYYY-MM-DD --- 分隔行
 - [图片]、[sticker ...]、[document "名字" 大小] 等是媒体占位符；媒体的文字描述会以 [media_update #id] 另起一行出现
 - [message_edit #id] 和 [message_metadata #id] 表示那条消息后来被编辑或改了回复对象；[media_update #id] [图片: …] 是那条消息里媒体的文字描述，可能晚于消息本身到达
-- [task tN …] 和 [job jN …] 是你启动的后台任务、后台脚本发来的进展或结果，[系统] … 是给你的系统通知；这两种只有你看得到，群友看不到，需要让群友知道时用自己的话转述
+- [task tN …] 和 [job jN …] 是你启动的后台任务、后台脚本发来的进展或结果，[系统] … 是给你的系统通知；这些只有你看得到，群友看不到，需要让群友知道时用自己的话转述
 - 以「${SYSTEM_NOTE_LABEL}」开头的内容由系统附加，不是任何群成员发的消息，群里也没人看得到；只把它当作可用信息，不要回应、引用或谈论它
 
 规则：
 
 - 未被点名的概率插话可以按人设保持沉默
 - 人类明确 @你、回复你或使用你的配置名称点名时必须回应，不受概率插话的沉默或防刷屏启发式影响
-- 群里可能还有其他 bot 或成员；他们的消息你能看到，但不要替他们说话，也不要回复其他 bot 的消息
+- 群里可能还有其他 bot 或成员；不要替他们说话。系统决定哪些消息触发你，不要主动制造 bot 之间的循环对话
 `;
 
 export function buildSystemPrompt(personaText: string, tools: EnabledTools, stickerCatalog = ""): string {
@@ -175,25 +73,6 @@ export function buildSystemPrompt(personaText: string, tools: EnabledTools, stic
 	const catalog = stickerCatalog.trim();
 	return catalog ? `${base}\n\n---\n\n${catalog}` : base;
 }
-
-/**
- * Chat-oriented compaction summary prompt (state, not replay). Part of the cache-visible
- * protocol: the summary grammar lives at the boundary of a new epoch, so its prompt is
- * hashed by the golden test (REQ-TEST-0001 R2).
- */
-export const COMPACTION_SUMMARY_PROMPT = `你在为一个长期住在 Telegram 群里的 AI 群友压缩记忆。把被压缩的群聊历史总结成"状态"而不是逐条复述，供它之后延续人设和上下文。
-
-保留：
-- 重要人物关系、称呼和互动模式
-- 已知稳定事实和长期话题
-- 正在讨论的问题、结论和争议点
-- 承诺和未解决事项
-- 必要的消息引用（#消息id）
-- 这个人设真正会关心的信息
-
-只依据群消息里实际出现的内容，不要把推测写成事实；「${SYSTEM_NOTE_LABEL}」是系统附加信息，不是群里发生的事。
-
-输出中文，分段，直接给摘要正文，控制在 800 字以内。`;
 
 /** One bounded repair of an otherwise healthy but unpublished direct-address turn. */
 export const REPLY_RECOVERY_PROMPT =

@@ -1,81 +1,46 @@
 # Cache 工程
 
-provider prefix cache 是本项目的第一成本杠杆。本文是“哪些字节对 provider 可见、怎样改它们”的唯一权威。
+目标是在同一原生上下文片段内，让 provider 已见过的消息保持不变，新信息只追加。原生 compaction/reset 会建立新前缀；不能把跨压缩的请求称为严格前缀。
 
 ## Invariants
 
-1. **永不改写已发出的 prefix**，新信息只作为新 suffix 追加。
-2. system prompt 顺序固定：共享群聊协议 → persona → sticker 目录。tool 的 name/description/schema 及顺序固定。
-3. Telegram 内容只以新的结构化 session entry 追加；已写入 session 的字节不重算。edit、reply metadata、vision 描述都作为 delta 追加（`message_edit` / `message_metadata` / `media_update`）。
-4. **每个请求都必须是下一个请求的严格前缀。** 生产数据显示，只要上一请求的末尾在下一请求里消失，provider 就要回退到更早的缓存点，每轮多 miss 一万多 token。所以不存在“只挂在最后一条”的动态尾部：每批消息的 sticker 附注（只列该批新出现、本 bot 能发、不在固定目录里的 sticker）存在 `details.stickerCandidates`，由 `context` 事件投影成紧跟**该批**的〔系统附注〕独立消息，之后永远原样保留；它**永不写入持久化 content**（compaction 直接读持久化字节）。
-5. 只有完整 context fingerprint 相同且 session 文件存在时才恢复 session；否则在打开旧 session **之前**新建 session、推进 epoch，旧文件保留。
-6. 日志、控制命令、本地媒体准备都不得改变 provider payload。
-7. 所有 provider 输入有界：每轮 suffix 默认 ≤12,000 token，单条消息 ≤4,096 token，网页正文每页 ≤4,096 token（更多内容经 `offset` 分页读取），每批 sticker 附注 ≤8 条。
+1. system 顺序固定为群聊协议、persona、sticker 目录；tool 名称、描述、schema 与注册顺序固定。
+2. Telegram 批次在接纳时序列化一次，edit、引用补全、vision 作为新 delta，不能用最新 canonical 行重算历史输入。
+3. 每批 sticker 候选保存在原生 entry 的 metadata，投影为紧跟该批的独立系统附注，之后原样保留；不能只挂在最新一条。附注不进入持久化模型正文，避免原生摘要把候选当成群成员已说过的话。
+4. 图片使用原生 image content；清理下载缓存不能改变 Pi 已持久化字节。模型不需要重复看图时由 hybrid 描述承接。
+5. fingerprint 不同先 reset，再启动该配置的 provider 请求；旧 Pi 记录保留。控制命令不进入模型上下文。
+6. 每批输入采用统一字符预算，近期事件与待回复原文共享上限；单条截断，未打包的待回复项继续保留。网页正文分页，sticker 候选最多八条。
 
-## 哪些东西是 cache-visible
+## Cache-visible 内容与改动流程
 
-- 共享协议、persona 及其顺序（`src/agent/prompt.ts`）；
-- tool name/description/schema 与顺序（`src/agent/tools.ts`）。机制写在 tool description，用法与策略写在 prompt 的工具一节，同一句话不在两处重复；
-- Telegram 序列化 grammar（`src/agent/serialize.ts`）、context details 版本、sticker 候选 grammar；
-- 摘要 prompt 与摘要输入 envelope、所选 compaction model；
-- extension 顺序（取自实际注册的 extension 列表）、`[no_send]` 持久化策略、补答提示；
-- provider/api/model/reasoning/cache retention、Pi 版本、`media.mode`、该 bot 的 sticker 目录快照。
+共享协议、persona、sticker 目录、工具声明/顺序、序列化 grammar、sticker 投影、补答策略、Pi 版本、模型/reasoning/cache retention 与媒体模式都会影响 cache 身份。runtime 用实际注册表与配置构建 fingerprint；原生工具声明由 Pi 负责。
 
-以上全部进入 `src/agent/context-fingerprint.ts` 的 fingerprint。
+修改任意协议时：bump `src/agent/prompt.ts` 的 `CACHE_SCHEMA_VERSION`，运行 cache guard，核对预期变化再更新 golden，并同步本文。当前 **v48** 切换到 Pi Durable：原生 input/toolResult/summary、原生图片、coding tools/codemode 与 child conversation；删除自建 context/摘要/telemetry 协议。旧 JSONL session 不导入新 Harness，archive 继续保留。
 
-## 改动 cache-visible 内容的流程
-
-1. bump `src/agent/prompt.ts` 的 `CACHE_SCHEMA_VERSION`（旁边注释写一句理由，历史看 git log）；
-2. 跑 `npm test test/cache.test.ts`，确认失败的正是你预期改变的那几项 golden，再更新 expected；
-3. 部署后每个 bot 会新建 session（新 epoch），首个请求冷缓存，旧 session 文件保留。
-
-当前 schema v47：升级 Pi 1.5.0，补答通过 `agent_before_settle` 返回持久化 custom message 和 `continue: true`；新增 `tg-reply-repair` 扩展。工具 schema、共享 prompt 与消息序列化 grammar 不变。升级时 fingerprint 改变，每个 bot 新建 session 和 epoch，旧 session 文件保留。
-
-golden 意外失败是报警：先查原因，不要直接改 expected。
-
-## Provider payload 结构
-
-```text
-system:   共享协议 --- persona [--- sticker 目录]
-messages: Telegram 批次（custom message，各自后面可能跟一条〔系统附注〕sticker 附注；每轮由批次本身
-          启动，没有额外的触发消息）、assistant/tool/summary entries
-tools:    send, search, view_image, task[, codemode]（按 bot 开关与媒体模式过滤，顺序不变；codemode 声明由 Pi 按脚本工具渲染）
+```bash
+npm run build
+TZ=UTC node --import ./dist/test/network-guard.js --test dist/test/cache.test.js
 ```
 
-- 一批 Telegram 消息投影为纯字符串（持久化 content 本身），details 只存 cursor、可见 id 与 sticker 附注；图片只出现在 view_image 结果里，投影时才把文件读成 image block。
-- send 成功后模型只看到固定 ACK（`ok sent_message_ids=#…` 或 `no_retry`），发送详情只留本地。
-- 没调 send 的 assistant 文本在 session 里替换为 `[no_send]`。
-
-## Telegram 消息 grammar
+## Provider 输入
 
 ```text
---- 2026-08-07 ---
-[17:31:42] #18452 Alice (@alice · tag:admin): 文本
-[17:31:55] #18453 Bob (u17) ↪ #18452: 文本
-[17:31:56] #18454 Bob (u17) ↪ #18455 @alice "被回复的正文": 看这个 [图片]
-[17:31:57] #18456 Bob (u17) ↪ #999999 (原消息不可见): 这个看不到
-[17:32:10] #18457 Bob (u17): 看看这个 [document "report.pdf" 1.2 MB]
-[message_edit #18453] 修改后的文本
-[message_metadata #18453] ↪ #18452
-[media_update #18453] [图片: 新的视觉描述]
-[task t3 进展] 已核对 5 个来源
-[task t3 完成 ↪ #18452] 结论……（文件：/work/tasks/t3/report.md）
-[系统] 你的工作区已被清空（每周例行），/work 里之前的文件都不在了。
+system:   群聊协议 → persona → 固定 sticker 目录
+messages: 原生 Telegram input → 该批系统附注 → assistant/toolResult → 后续 input
+          Pi 原生压缩时替换旧片段为 summary，近期原文保持原样
+tools:    实际启用的 Telegram tools、Pi coding tools 与 codemode
 ```
 
-- 无 username 的发送者用稳定别名 `u<N>`（rowid 分配）。
-- 引用父消息优先用随消息保存的 `reply_snapshot`；父消息在同一新批次里时只写裸 `↪ #id`。
-- `[task …]` / `[系统]` 来自 `note` 事件（serializer v6），只出现在它所属 bot 的上下文里；除进展外都带 `↪ #origin`。
-- `media_update` 只在 hybrid 模式出现。
+不再把未公开的 assistant 文本改写成 `[no_send]`，也不把原生图片替换成外部文件引用。公开发送只由 send 工具决定，存储方式不决定是否发群。
 
-## Compaction
+## Telegram grammar
 
-- 摘要输入 = Pi 的 `messagesToSummarize` + `turnPrefixMessages`，经 `convertToLlm` + `serializeConversation`；去掉 assistant thinking（推测不能变成“事实”）。摘要 prompt 要求只记录群消息里实际出现的内容。
-- 摘要模型支持图片时，待丢弃的图片按原位置一起发送；不支持时只发文字。输入保守估算超过摘要模型窗口则不调用、取消压缩。图片总字节超预算时只缩小这次摘要请求里的图片（Pi `resizeImage`），持久文件不动。
-- 摘要请求 `cacheRetention: "none"`。成功后替换可见集合、推进 epoch；cursor 不回退。
+既有 grammar 保持不变：`#消息ID`、发送者、`↪ #父消息`、日期分组，以及追加的 `message_edit` / `message_metadata` / `media_update`。无 username 的用户仍用 rowid 分配别名，引用优先使用消息自身的 reply_snapshot。后台任务报告由原生 `telegram.task` input 承载，附带发起消息身份。
 
-## 遥测
+## 压缩与成本
 
-`tg-cache-observer` 在 `before_provider_request` 对 system、tools 与每条 message 计算 deployment 本地 HMAC，只在内存保留上一请求的 hash 列表，用于判断 prefix 是否可复用。不保留 payload 快照，不计算字节分叉位置或上下文构成占比。
+使用 Pi 原生摘要，沿用当前模型和 reasoning effort。固定预留 16,384 token，摘要输出上限不超过 13,107 token 和模型上限的较小值。原生摘要文本不包含 image/thinking；sticker 系统附注只参与普通请求投影。
 
-provider 没有返回 cache 用量时，若同一 cache cohort（provider/api/model/epoch/session/retention）的相邻两次请求 system、tools 相同，且上一次的 message hash 列表是这一次的严格前缀（上一次的列表只保存在内存里，重启后第一次请求不估算），就把上一次的 prompt token 记为 `cache_read_estimated`，界面用 `≈` 标出。这是结构上可复用的量，不是 provider 实际命中，也不改写原始 usage 与费用。字段口径见 [telemetry.md](telemetry.md)。
+不再维护图片字节预算、签名修正估算、独立廉价摘要模型或分块摘要器。Pi 1.5.0 对加密 thinking signature 和超大摘要的限制见 [设计决策](engineering/decisions.md)。原生失败恢复有边界，不能承诺任意超大输入都压缩成功。
+
+Cache 用量直接采用 Pi/provider 计量，不维护请求 HMAC 对账或推算命中率。口径见 [telemetry.md](telemetry.md)。

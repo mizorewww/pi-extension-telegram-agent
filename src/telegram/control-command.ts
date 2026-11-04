@@ -1,4 +1,4 @@
-import type { DatabaseSync as Database } from "node:sqlite";
+import type { Database } from "../db/db.ts";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { BotFire, FIRE_BOT_TRIGGER_BUDGET } from "../agent/router.ts";
 import type {
@@ -8,7 +8,6 @@ import type {
 	NewSessionResult,
 } from "../agent/runtime.ts";
 import type { BotConfig, TelegramAdmin } from "../config.ts";
-import { loadBotStats } from "../db/usage.ts";
 import { log } from "../observability/log.ts";
 import type { RuntimeControlSnapshot } from "../observability/usage.ts";
 import { renderBotStatus } from "../observability/status.ts";
@@ -45,16 +44,13 @@ export {
 	type TelegramControlCommandToken,
 };
 
-const CONTROL_COMMAND_AUDIT_EVENT = "telegram_control";
-
 export interface TelegramControlRuntime {
-	controlSnapshot(): RuntimeControlSnapshot;
+	controlSnapshot(): Promise<RuntimeControlSnapshot>;
 	compactForControl(): Promise<ManualCompactResult>;
 	resetBoxForControl(): Promise<{ ok: true } | { ok: false; code: "unavailable" | "failed" }>;
-	taskStatusForControl(): string | null;
-	cancelTaskForControl(taskId: string): { ok: true } | { ok: false; code: "unavailable" | "unknown_task" };
+	taskStatusForControl(): Promise<string | null>;
+	cancelTaskForControl(taskId: string): Promise<{ ok: true } | { ok: false; code: "unavailable" | "unknown_task" }>;
 	newSessionForControl(): Promise<NewSessionResult>;
-	consumeControlMessage(messageId: number): void;
 	changeModelForControl(
 		provider: string,
 		model: string,
@@ -93,67 +89,47 @@ export class TelegramControlCommandService {
 	) {}
 
 	async handle(command: ParsedTelegramControlCommand): Promise<TelegramControlResult> {
-		if (command.callbackQueryId) return this.handleCallback(command);
-		const claimed = this.claim(command);
-		this.consumeEveryRuntime(command.messageId);
-		if (!claimed) return this.result(command, null);
+		const callback = Boolean(command.callbackQueryId);
+		const base = { chatId: command.chatId, replyToMessageId: command.messageId, replyBotId: command.replyBotId };
+		if (!callback && !this.claim(command)) return { ...base, text: null };
+		if (command.edited || !isHuman(command.sender)) return { ...base, text: null };
+		const authorized = !(callback || isMutation(command.action)) || this.admins.includes(command.sender.id!);
 		const startedAt = Date.now();
-		if (command.edited) {
-			this.audit(command, false, "ignored_edit", startedAt);
-			return this.result(command, null);
-		}
-		if (!isHuman(command.sender)) {
-			this.audit(command, false, "rejected_sender", startedAt);
-			return this.result(command, null);
-		}
-
-		const mutation = isMutation(command.action);
-		const authorized = !mutation || this.isAdmin(command.sender);
+		let result: ControlExecutionResult;
 		if (!authorized) {
-			this.audit(command, false, "permission_denied", startedAt);
-			return this.result(command, "权限不足：此操作仅限 telegram_admins 白名单。");
+			const text = "权限不足：此操作仅限 telegram_admins 白名单。";
+			result = { text: callback ? "" : text, callbackNotice: text, outcome: "permission_denied" };
+		} else if (
+			callback &&
+			!this.db
+				.prepare(`
+			SELECT 1 FROM telegram_control_messages c JOIN messages m USING (chat_id, message_id)
+			WHERE c.chat_id = ? AND c.message_id = ? AND m.first_seen_by = ? AND m.is_bot = 1
+		`)
+				.get(command.chatId, command.messageId, command.replyBotId)
+		) {
+			result = { text: "", callbackNotice: `菜单已失效，请重新发送 /${command.action.kind}。`, outcome: "stale_menu" };
+		} else if (callback && this.mutations > 0) {
+			result = { text: "", callbackNotice: "有管理操作正在执行，请稍后重试。", outcome: "busy" };
+		} else {
+			const run = () => this.execute(command);
+			result = await (command.action.kind === "set" || command.action.kind === "model"
+				? this.enqueueMutation(run)
+				: run());
 		}
-
-		if (command.action.kind === "set" || command.action.kind === "model") {
-			return await this.enqueueMutation(async () => {
-				const executed = await this.execute(command);
-				this.audit(command, true, executed.outcome, startedAt);
-				return { ...this.result(command, executed.text), replyMarkup: executed.replyMarkup };
-			});
-		}
-		const executed = await this.execute(command);
-		this.audit(command, true, executed.outcome, startedAt);
-		return this.result(command, executed.text);
-	}
-
-	private async handleCallback(command: ParsedTelegramControlCommand): Promise<TelegramControlResult> {
-		const startedAt = Date.now();
-		const authorized = isHuman(command.sender) && this.isAdmin(command.sender);
-		const owned = this.db
-			.prepare(`SELECT 1 FROM telegram_control_messages c JOIN messages m USING (chat_id, message_id)
-			WHERE c.chat_id = ? AND c.message_id = ? AND m.first_seen_by = ? AND m.is_bot = 1`)
-			.get(command.chatId, command.messageId, command.replyBotId);
-		let executed: ControlExecutionResult;
-		if (!authorized)
-			executed = {
-				text: "",
-				callbackNotice: "权限不足：此操作仅限 telegram_admins 白名单。",
-				outcome: "permission_denied",
-			};
-		else if (!owned)
-			executed = {
-				text: "",
-				callbackNotice: `菜单已失效，请重新发送 /${command.action.kind}。`,
-				outcome: "stale_menu",
-			};
-		else if (this.mutations > 0)
-			executed = { text: "", callbackNotice: "有管理操作正在执行，请稍后重试。", outcome: "busy" };
-		else executed = await this.enqueueMutation(() => this.execute(command));
-		this.audit(command, authorized, executed.outcome, startedAt);
+		log.info("telegram_control", "command", {
+			bot_id: command.replyBotId,
+			command: command.action.kind,
+			sender_id: command.sender.id,
+			authorized,
+			outcome: result.outcome,
+			duration_ms: Date.now() - startedAt,
+		});
 		return {
-			...this.result(command, executed.text || null),
-			replyMarkup: executed.replyMarkup,
-			callbackNotice: executed.callbackNotice,
+			...base,
+			text: result.text ? boundedReply(result.text) : null,
+			replyMarkup: result.replyMarkup,
+			callbackNotice: result.callbackNotice,
 		};
 	}
 
@@ -162,7 +138,6 @@ export class TelegramControlCommandService {
 		this.db
 			.prepare("INSERT OR IGNORE INTO telegram_control_messages (chat_id, message_id) VALUES (?, ?)")
 			.run(chatId, messageId);
-		this.consumeEveryRuntime(messageId);
 	}
 
 	private claim(command: ParsedTelegramControlCommand): boolean {
@@ -174,29 +149,60 @@ export class TelegramControlCommandService {
 	}
 
 	private async execute(command: ParsedTelegramControlCommand): Promise<ControlExecutionResult> {
+		const botId = command.replyBotId;
+		const runtime = this.runtimes.get(botId)!;
 		switch (command.action.kind) {
 			case "help":
 				return { text: HELP_TEXT, outcome: "ok" };
-			case "status":
-				return this.formatStatus(command.replyBotId);
-			case "set":
-				return this.settings(command.replyBotId, command.action.data);
-			case "compact":
-				return await this.compact(command.replyBotId);
-			case "new":
-				return await this.newSession(command.replyBotId);
-			case "model":
-				return await this.model(command.replyBotId, command.action.data);
-			case "fire":
-				return this.fireControl(command.replyBotId, command.chatId, command.action.mode);
-			case "box_reset":
-				return await this.resetBox(command.replyBotId);
-			case "task_status":
-				return this.taskStatus(command.replyBotId);
-			case "task_cancel":
-				return this.cancelTask(command.replyBotId, command.action.taskId);
 			case "usage":
 				return { text: USAGE_TEXT, outcome: "usage" };
+			case "status":
+				return { text: renderBotStatus(this.bot(botId), await runtime.controlSnapshot()), outcome: "ok" };
+			case "set":
+				return this.settings(botId, command.action.data);
+			case "model":
+				return this.model(botId, command.action.data);
+			case "fire":
+				return this.fireControl(botId, command.chatId, command.action.mode);
+			case "task_status": {
+				const text = await runtime.taskStatusForControl();
+				return {
+					text: text == null ? `${botId}: 这个 bot 没有开启后台任务。` : `${botId} 的任务：\n${text}`,
+					outcome: text == null ? "unavailable" : "ok",
+				};
+			}
+			case "task_cancel": {
+				const result = await runtime.cancelTaskForControl(command.action.taskId);
+				return {
+					text: result.ok
+						? `${botId}: 已取消 ${command.action.taskId}。`
+						: `${botId}: 没有可取消的任务（${result.code}）。`,
+					outcome: result.ok ? "ok" : result.code,
+				};
+			}
+			case "box_reset": {
+				const result = await runtime.resetBoxForControl();
+				return {
+					text: result.ok ? `${botId}: 工作区已清空。` : `${botId}: 清空失败（${result.code}）。`,
+					outcome: result.ok ? "ok" : result.code,
+				};
+			}
+			case "compact": {
+				const result = await runtime.compactForControl();
+				return {
+					text: `${botId}: ${result.ok ? `compact 完成，epoch=${result.epoch}` : compactFailureText(result.code)}`,
+					outcome: result.ok ? "ok" : result.code,
+				};
+			}
+			case "new": {
+				const result = await runtime.newSessionForControl();
+				return {
+					text: result.ok
+						? `${botId}: 已开启新会话，epoch=${result.epoch}`
+						: `${botId}: 新会话失败（${result.code}）。`,
+					outcome: result.ok ? "ok" : result.code,
+				};
+			}
 		}
 	}
 
@@ -208,18 +214,20 @@ export class TelegramControlCommandService {
 		if (selection) {
 			const model = models.find((candidate) => modelMenuKey(candidate.provider, candidate.id) === selection[1]);
 			if (!model) return { text: "", callbackNotice: "模型已不可用，请重新发送 /model。", outcome: "unknown_model" };
-			const result = await this.runtime(botId).changeModelForControl(model.provider, model.id, (value) =>
-				updateBotModelConfig(this.rootDir, botId, value),
-			);
+			const result = await this.runtimes
+				.get(botId)!
+				.changeModelForControl(model.provider, model.id, (value) => updateBotModelConfig(this.rootDir, botId, value));
 			if (!result.ok) {
 				const message =
 					result.code === "image_input_unsupported"
 						? "hybrid 媒体模式需要支持图片输入的模型。"
-						: result.code === "busy"
-							? "Bot 正忙，请稍后重试。"
-							: result.code === "config_write_failed"
-								? "配置保存失败，原模型保持不变。"
-								: `切换失败（${result.code}），请稍后重试。`;
+						: result.code === "context_window_too_small"
+							? "该模型的上下文窗口过小，需要大于 16384 tokens。"
+							: result.code === "busy"
+								? "Bot 正忙，请稍后重试。"
+								: result.code === "config_write_failed"
+									? "配置保存失败，原模型保持不变。"
+									: `切换失败（${result.code}），请稍后重试。`;
 				return { text: "", callbackNotice: message, outcome: result.code };
 			}
 			return {
@@ -232,12 +240,6 @@ export class TelegramControlCommandService {
 		return view
 			? { ...view, outcome: "ok" }
 			: { text: "", callbackNotice: "菜单已失效，请重新发送 /model。", outcome: "stale_menu" };
-	}
-
-	private formatStatus(botId: string): ControlExecutionResult {
-		const bot = this.bot(botId);
-		const snapshot = this.runtime(botId).controlSnapshot();
-		return { text: renderBotStatus(bot, snapshot, loadBotStats(this.db, bot.id)), outcome: "ok" };
 	}
 
 	/** Button menu; a choice writes through to the config file, the only source of truth. */
@@ -287,114 +289,22 @@ export class TelegramControlCommandService {
 		return { text: `${bounded(botId)}: /fire 已关闭，其他 bot 的消息不再触发本 bot。`, outcome: "off" };
 	}
 
-	private taskStatus(botId: string): { text: string; outcome: string } {
-		const text = this.runtime(botId).taskStatusForControl();
-		if (text == null) return { text: `${bounded(botId)}: 这个 bot 没有开启后台任务。`, outcome: "unavailable" };
-		return { text: boundedReply(`${bounded(botId)} 的任务：\n${text}`), outcome: "ok" };
-	}
-
-	private cancelTask(botId: string, taskId: string): { text: string; outcome: string } {
-		const result = this.runtime(botId).cancelTaskForControl(taskId);
-		if (result.ok) return { text: `${bounded(botId)}: 已取消 ${taskId}。`, outcome: "ok" };
-		return {
-			text: `${bounded(botId)}: ${result.code === "unavailable" ? "这个 bot 没有开启后台任务。" : `没有正在运行的 ${taskId}。`}`,
-			outcome: result.code,
-		};
-	}
-
-	private async resetBox(botId: string): Promise<{ text: string; outcome: string }> {
-		const result = await this.runtime(botId).resetBoxForControl();
-		if (result.ok) return { text: `${bounded(botId)}: 工作区已清空。`, outcome: "ok" };
-		return {
-			text: `${bounded(botId)}: ${result.code === "unavailable" ? "这个 bot 没有工作区。" : "清空失败，请查看日志。"}`,
-			outcome: result.code,
-		};
-	}
-
-	private async compact(botId: string): Promise<{ text: string; outcome: string }> {
-		const result = await this.runtime(botId).compactForControl();
-		if (result.ok) return { text: `${bounded(botId)}: compact 完成，epoch=${result.epoch}`, outcome: "ok" };
-		return { text: `${bounded(botId)}: ${compactFailureText(result.code)}`, outcome: result.code };
-	}
-
-	private async newSession(botId: string): Promise<{ text: string; outcome: string }> {
-		const result = await this.runtime(botId).newSessionForControl();
-		if (result.ok) return { text: `${bounded(botId)}: 已开启新会话，epoch=${result.epoch}`, outcome: "ok" };
-		const reason =
-			result.code === "busy" ? "busy，请稍后重试" : result.code === "stopping" ? "正在停止" : `失败（${result.code}）`;
-		return { text: `${bounded(botId)}: 新会话${reason}`, outcome: result.code };
-	}
-
 	/** Commands only ever address configured bots, and every configured bot has a runtime. */
 	private bot(botId: string): BotConfig {
 		return this.bots.find((candidate) => candidate.id === botId)!;
 	}
 
-	private runtime(botId: string): TelegramControlRuntime {
-		return this.runtimes.get(botId)!;
-	}
-
-	private isAdmin(sender: ControlSender): boolean {
-		return sender.id != null && this.admins.includes(sender.id);
-	}
-
-	private consumeEveryRuntime(messageId: number): void {
-		for (const [botId, runtime] of this.runtimes) {
-			try {
-				runtime.consumeControlMessage(messageId);
-			} catch {
-				// The durable claim/reply marker remains the flush authority even if local
-				// obligation cleanup races shutdown.
-				log.error("telegram_control", "context_exclusion_failed", {
-					bot_id: botId,
-					message_id: messageId,
-					category: "local_failure",
-				});
-			}
-		}
-	}
-
-	private audit(command: ParsedTelegramControlCommand, authorized: boolean, outcome: string, startedAt: number): void {
-		const finishedAt = Date.now();
-		try {
-			this.db.prepare("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES (?, ?, ?, ?)").run(
-				command.replyBotId,
-				finishedAt,
-				CONTROL_COMMAND_AUDIT_EVENT,
-				JSON.stringify({
-					command: command.action.kind,
-					target: command.replyBotId,
-					sender_id: command.sender.id,
-					authorized,
-					outcome,
-					duration_ms: Math.max(0, finishedAt - startedAt),
-				}),
-			);
-		} catch {
-			log.warn("telegram_control", "audit_failed", { bot_id: command.replyBotId });
-		}
-	}
-
-	private result(command: ParsedTelegramControlCommand, text: string | null): TelegramControlResult {
-		return {
-			chatId: command.chatId,
-			replyToMessageId: command.messageId,
-			replyBotId: command.replyBotId,
-			text: text == null ? null : boundedReply(text),
-		};
-	}
-
 	private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
 		this.mutations++;
 		const result = this.mutationTail.then(operation, operation);
-		this.mutationTail = result.then(
-			() => {
+		this.mutationTail = result
+			.then(
+				() => {},
+				() => {},
+			)
+			.finally(() => {
 				this.mutations--;
-			},
-			() => {
-				this.mutations--;
-			},
-		);
+			});
 		return result;
 	}
 }

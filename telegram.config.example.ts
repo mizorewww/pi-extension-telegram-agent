@@ -19,9 +19,6 @@ export default defineConfig({
 	reasoning_effort: "off",
 	// Provider prompt cache retention: none / short / long.
 	cache_retention: "short",
-	// Cheap model that summarizes old context (provider/model:thinking). A failed summary keeps
-	// the old context; it never falls back to the bot's main model.
-	compaction_model: "openai-codex/gpt-5.6-luna:low",
 
 	// ===== Context (every field has a default; shown for visibility) =====
 
@@ -37,16 +34,12 @@ export default defineConfig({
 	// Per-attempt provider timeout and extra retries (backoff 10s/20s/40s ...).
 	provider_timeout_ms: 300_000,
 	provider_retries: 2,
-	// Images in context are resent as base64 on every request; past this many bytes an extra
-	// summary is made.
-	context_image_budget_bytes: 10_000_000,
-	max_suffix_tokens: 12_000, // new-message tokens per request
-	max_message_tokens: 4_096, // tokens per single message
 
 	// ===== Work box for tools.sandbox (host setup: docs/runbooks/sandbox.md) =====
-	// sandbox: { image: "tg-box:2", docker_host: "unix:///run/tgbox/docker.sock", memory: "1g", cpus: 2, pids: 256, network: true },
+	// sandbox: { image: "tg-box:4", docker_host: "unix:///run/tgbox/docker.sock", memory: "1g", cpus: 2, pids: 256, network: true },
 
-	// tasks: { workflows: { search: "~/pi-tasks/search" }, max_running: 2, timeout_minutes: 45, memory: "3g", cpus: 2 },
+	// Each workflow directory contains AGENTS.md instructions for a native Pi child conversation.
+	// tasks: { workflows: { search: "~/pi-tasks/search" }, max_running: 2, timeout_minutes: 45 },
 
 	// ===== Media: how images and videos reach a model =====
 	// "off" (default): media are text placeholders such as [photo].
@@ -62,7 +55,6 @@ export default defineConfig({
 	},
 
 	// ===== Retention in days =====
-	telemetry_retention_days: 90, // usage and cost records
 	raw_update_retention_days: 30, // raw Telegram updates
 	message_event_retention_days: 365, // message events
 
@@ -90,8 +82,8 @@ export default defineConfig({
 				send: true,
 				search: false, // needs tiny_fish_api_key in .env
 				codemode: false, // Pi-native JavaScript scripts that can call the other tools; off by default
-				sandbox: false, // own Linux work box for scripts (needs codemode and the sandbox section)
-				tasks: false, // background tasks running a Pi workflow in the box (needs sandbox and tasks)
+				sandbox: false, // native Pi file/shell tools in a Linux work box (needs sandbox section)
+				tasks: false, // native Pi background tasks using the work box (needs sandbox and tasks)
 			},
 		},
 	],

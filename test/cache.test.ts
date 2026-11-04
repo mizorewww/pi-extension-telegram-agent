@@ -1,23 +1,16 @@
+// Golden hashes guard the provider prefix across native Pi/Telegram protocol changes.
 import assert from "node:assert/strict";
-// Golden hashes lock the cache-visible protocol (docs/cache.md). A failure means the provider
-// prefix changed: confirm it is intended, bump CACHE_SCHEMA_VERSION, then update GOLDEN.
-
 import { test } from "node:test";
-
-// npm test forces UTC; the daemon serializes in local time. Pin the deployment TZ first.
-process.env.TZ = "Asia/Singapore";
-
 import { DatabaseSync as Database } from "node:sqlite";
 import { readFileSync } from "node:fs";
+import type { Message } from "@earendil-works/pi-ai";
+import type { EntryRecord } from "@earendil-works/pi-durable";
+import { projectStickerNotes } from "../src/media/sticker-catalog.ts";
+import { createRegistry } from "@earendil-works/pi-durable";
+import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { telegramCodemode } from "../src/agent/extensions/codemode.ts";
 import { serializeMessageEvents, type MessageRow } from "../src/agent/serialize.ts";
-import {
-	buildSystemPrompt,
-	sha256Short,
-	CACHE_SCHEMA_VERSION,
-	COMPACTION_SUMMARY_PROMPT,
-	REPLY_RECOVERY_PROMPT,
-	toolCapabilityDeclaration,
-} from "../src/agent/prompt.ts";
+import { buildSystemPrompt, sha256Short, CACHE_SCHEMA_VERSION, REPLY_RECOVERY_PROMPT } from "../src/agent/prompt.ts";
 import {
 	CODEMODE_TOOL_DEFS,
 	JOB_TOOL_DEF,
@@ -26,96 +19,54 @@ import {
 	TOOL_DEFS,
 	toolProtocolHash,
 } from "../src/agent/tools.ts";
-import {
-	NO_SEND_MARKER,
-	buildCompactionContent,
-	TELEGRAM_CONTEXT_TYPE,
-	TELEGRAM_CONTEXT_VERSION,
-} from "../src/agent/extensions/index.ts";
-
+process.env.TZ = "Asia/Singapore";
 const GOLDEN = {
-	schemaVersion: 47,
-	systemZhTemplate: "2f1c2b564648",
-	systemEnTemplate: "f99097a7d046",
-	systemSandboxTemplate: "f4cfe96904c3",
-	eventSerialize: "a05c0584eb08",
-	tools: "49d65d5de9c9",
-	codemodeTools: "3aafdea21201",
-	sendWithFiles: "8cea43279c23",
-	taskTool: "f5343a7cbdb5",
-	jobTool: "a913226f0cba",
-	compactionPrompt: "04da95f62da0",
-	multimodalCompaction: "9d306722b038",
+	schemaVersion: 48,
+	systemZhTemplate: "b4bf0da548c6",
+	systemEnTemplate: "be0f71c64253",
+	systemSandboxTemplate: "96dc5a0c4fed",
+	tools: "ef7452437b67",
+	codemodeTools: "ec14052fd2bc",
+	sendWithFiles: "93313ad52eea",
+	taskTool: "8fcbd3a5b98d",
+	jobTool: "78e6689e8118",
+	nativeTools: "19524518f475",
 	replyRecovery: "4fc7e277e338",
-	contextProtocol: "b7ee40682d09",
+	eventSerialize: "a05c0584eb08",
 };
-
 const CHAT_ID = -1004402809405;
-
-function schemaDb(): Database {
+function schemaDb() {
 	const db = new Database(":memory:");
 	db.exec(readFileSync("src/db/schema.sql", "utf8"));
 	return db;
 }
-
-test("prompt, tool and protocol hashes are stable", () => {
-	assert.equal(CACHE_SCHEMA_VERSION, GOLDEN.schemaVersion);
+test("prompt and native tool protocol hashes are stable", () => {
 	const allTools = { send: true, search: true, codemode: true, sandbox: false, tasks: false, viewImage: false };
-	assert.equal(
-		sha256Short(buildSystemPrompt(readFileSync("personas/template.zh.md", "utf8"), allTools)),
-		GOLDEN.systemZhTemplate,
-	);
-	assert.equal(
-		sha256Short(buildSystemPrompt(readFileSync("personas/template.en.md", "utf8"), allTools)),
-		GOLDEN.systemEnTemplate,
-	);
-	assert.equal(
-		sha256Short(buildSystemPrompt(readFileSync("personas/template.zh.md", "utf8"), { ...allTools, sandbox: true })),
-		GOLDEN.systemSandboxTemplate,
-	);
-	// A bot is only ever told about the tools it really has.
-	const sendOnly = toolCapabilityDeclaration({
-		send: true,
-		search: false,
-		codemode: false,
-		sandbox: false,
-		tasks: false,
-		viewImage: false,
-	});
-	assert.ok(sendOnly.includes("你有一个工具：send"));
-	assert.ok(!sendOnly.includes("search（"));
-	assert.ok(sendOnly.includes("你不能联网搜索"));
-	for (const missing of ["### codemode", "sh_exec", "view_image", "### task", "files", "tg_post", "await"])
-		assert.ok(!sendOnly.includes(missing));
-	assert.equal(toolProtocolHash(TOOL_DEFS), GOLDEN.tools);
-	assert.equal(toolProtocolHash(CODEMODE_TOOL_DEFS), GOLDEN.codemodeTools);
-	assert.equal(toolProtocolHash([sendToolWithFiles()]), GOLDEN.sendWithFiles);
-	assert.equal(toolProtocolHash([taskToolDefinition(["search"])]), GOLDEN.taskTool);
-	assert.equal(toolProtocolHash([JOB_TOOL_DEF]), GOLDEN.jobTool);
-	assert.equal(sha256Short(COMPACTION_SUMMARY_PROMPT), GOLDEN.compactionPrompt);
-	const summaryInput = buildCompactionContent(
-		[
-			{
-				role: "toolResult",
-				toolCallId: "view-1",
-				toolName: "view_image",
-				content: [{ type: "text", text: "#12 photo" }],
-				details: { messageId: 12, images: [{ name: "fixture.png", mime: "image/png" }] },
-				isError: false,
-				timestamp: 13,
-			},
-		] as never,
-		"previous summary",
-		() => ({ type: "image", data: "Zml4dHVyZQ==", mimeType: "image/png" }),
-	);
-	assert.equal(sha256Short(JSON.stringify(summaryInput)), GOLDEN.multimodalCompaction);
-	assert.equal(sha256Short(REPLY_RECOVERY_PROMPT), GOLDEN.replyRecovery);
-	assert.equal(
-		sha256Short(
-			JSON.stringify({ type: TELEGRAM_CONTEXT_TYPE, version: TELEGRAM_CONTEXT_VERSION, noSend: NO_SEND_MARKER }),
+	const registry = createRegistry();
+	registry.install(CodingTools);
+	registry.install(telegramCodemode());
+	const actual = {
+		schemaVersion: CACHE_SCHEMA_VERSION,
+		systemZhTemplate: sha256Short(buildSystemPrompt(readFileSync("personas/template.zh.md", "utf8"), allTools)),
+		systemEnTemplate: sha256Short(buildSystemPrompt(readFileSync("personas/template.en.md", "utf8"), allTools)),
+		systemSandboxTemplate: sha256Short(
+			buildSystemPrompt(readFileSync("personas/template.zh.md", "utf8"), { ...allTools, sandbox: true }),
 		),
-		GOLDEN.contextProtocol,
-	);
+		tools: toolProtocolHash(TOOL_DEFS),
+		codemodeTools: toolProtocolHash(CODEMODE_TOOL_DEFS),
+		sendWithFiles: toolProtocolHash([sendToolWithFiles()]),
+		taskTool: toolProtocolHash([taskToolDefinition(["search"])]),
+		jobTool: toolProtocolHash([JOB_TOOL_DEF]),
+		nativeTools: toolProtocolHash(
+			registry
+				.snapshot()
+				.tools()
+				.map(({ tool }) => tool),
+		),
+		replyRecovery: sha256Short(REPLY_RECOVERY_PROMPT),
+		eventSerialize: GOLDEN.eventSerialize,
+	};
+	assert.deepEqual(actual, GOLDEN);
 });
 
 test("immutable event serialization grammar is stable", () => {
@@ -163,4 +114,33 @@ test("immutable event serialization grammar is stable", () => {
 		event(4, "media_update", 2, 1754612402, { file_unique_id: "u", media_kind: "photo", text: "a cat" }),
 	]);
 	assert.equal(sha256Short(out), GOLDEN.eventSerialize);
+});
+
+// Positional notes must never rewrite provider history or poison native compaction input.
+test("sticker projection preserves prefixes and native stored messages", () => {
+	const first = Object.freeze({ role: "user", content: "same batch", timestamp: 1 }) as Message;
+	const second = Object.freeze({ role: "user", content: "same batch", timestamp: 1 }) as Message;
+	const next = Object.freeze({ role: "user", content: "new batch", timestamp: 2 }) as Message;
+	const entries = [
+		{ kind: "telegram.input", model: [first], data: { stickerNote: "" } },
+		{ kind: "telegram.input", model: [second], data: { stickerNote: "〔系统附注〕sticker s1" } },
+	] as unknown as EntryRecord[];
+	for (const entry of entries) {
+		Object.freeze(entry.data);
+		Object.freeze(entry.model);
+		Object.freeze(entry);
+	}
+	const before = JSON.stringify(entries);
+	const initial = projectStickerNotes([first, second], entries);
+	assert.deepEqual(initial, [first, second, { role: "user", content: "〔系统附注〕sticker s1", timestamp: 1 }]);
+	const later = projectStickerNotes(
+		[first, second, next],
+		[...entries, { kind: "telegram.input", model: [next] } as unknown as EntryRecord],
+	);
+	assert.deepEqual(later.slice(0, initial.length), initial);
+	assert.equal(JSON.stringify(entries), before);
+	assert.deepEqual(
+		entries.flatMap((entry) => entry.model ?? []),
+		[first, second],
+	);
 });

@@ -1,101 +1,89 @@
-/** One request deadline across stream creation and consumption. Pi owns all retries. */
-import {
-	createAssistantMessageEventStream,
-	type Api,
-	type AssistantMessage,
-	type AssistantMessageEventStream,
-	type Model,
-	type RetryPolicy,
-} from "@earendil-works/pi-ai";
+/** Pi owns retries; Chord bounds a provider that ignores cancellation or never closes its stream. */
+import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
+import { lazyStream, type Api, type AssistantMessageEventStream, type Model, type Models } from "@earendil-works/pi-ai";
 
-export function providerRetryPolicy(maxRetries: number): RetryPolicy {
-	return { enabled: maxRetries > 0, maxRetries, baseDelayMs: 10_000 };
-}
-
-type GuardedCall = (signal: AbortSignal) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
-
-/** Pi recognizes request_too_large, but not a proxy's HTML HTTP 413 response. */
-function normalizeRequestSizeError(message: AssistantMessage): AssistantMessage {
-	if (
-		message.stopReason !== "error" ||
-		!/\b(?:HTTP\s+413|413\s+(?:Request Entity Too Large|Payload Too Large)|request entity too large|payload too large)\b/i.test(
-			message.errorMessage ?? "",
-		)
+/** Pi's overflow classifier recognizes request_too_large, but not a proxy's HTML HTTP 413. */
+function normalizeSizeError(message: string): string {
+	return /\b(?:HTTP\s+413|413\s+(?:Request Entity Too Large|Payload Too Large)|request entity too large|payload too large)\b/i.test(
+		message,
 	)
-		return message;
-	return { ...message, errorMessage: "request_too_large: provider request exceeds transport size limit" };
+		? "request_too_large: provider request exceeds transport size limit"
+		: message;
 }
 
-function failure(model: Model<Api>, stopReason: "error" | "aborted", errorMessage: string): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason,
-		errorMessage,
-		timestamp: Date.now(),
-	};
-}
-
-/** Never repeats a request; even an uncooperative provider cannot hold the consumer open. */
 export function guardProviderCall(
-	call: GuardedCall,
+	call: (signal: AbortSignal) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>,
 	model: Model<Api>,
 	callerSignal: AbortSignal | undefined,
 	options: { timeoutMs: number },
 ): AssistantMessageEventStream {
-	const output = createAssistantMessageEventStream();
-	const controller = new AbortController();
-	let finished = false;
-	const cleanup = () => {
-		finished = true;
-		clearTimeout(timer);
-		callerSignal?.removeEventListener("abort", cancel);
-	};
-	const fail = (reason: "error" | "aborted", message: string) => {
-		if (finished) return;
-		cleanup();
-		const result = normalizeRequestSizeError(failure(model, reason, message));
-		output.push({ type: "error", reason, error: result });
-		output.end(result);
-		controller.abort();
-	};
-	const cancel = () => fail("aborted", "provider call aborted");
-	const timer = setTimeout(() => fail("error", "provider_timeout: request deadline exceeded"), options.timeoutMs);
-	callerSignal?.addEventListener("abort", cancel, { once: true });
-	if (callerSignal?.aborted) cancel();
-	void (async () => {
-		try {
-			if (finished) return;
-			const stream = await call(controller.signal);
-			for await (const event of stream) {
-				if (finished) return;
-				output.push(event.type === "error" ? { ...event, error: normalizeRequestSizeError(event.error) } : event);
-				if (event.type === "done" || event.type === "error") {
-					cleanup();
-					output.end();
-					return;
+	const deadline = new AbortController();
+	const timer = setTimeout(
+		() => deadline.abort(new Error("provider_timeout: request deadline exceeded")),
+		options.timeoutMs,
+	);
+	const signal = callerSignal ? AbortSignal.any([callerSignal, deadline.signal]) : deadline.signal;
+	const context = withAbortSignal(signal, BACKGROUND_CONTEXT);
+	return lazyStream(model, async () =>
+		(async function* () {
+			try {
+				signal.throwIfAborted();
+				const stream = await awaitWithContext(Promise.resolve(call(signal)), context);
+				const iterator = stream[Symbol.asyncIterator]();
+				while (true) {
+					const next = await awaitWithContext(iterator.next(), context);
+					if (next.done) break;
+					const event = next.value;
+					if (event.type === "error") event.error.errorMessage = normalizeSizeError(event.error.errorMessage ?? "");
+					yield event;
+					if (event.type === "done" || event.type === "error") return;
 				}
+				const result = await awaitWithContext(stream.result(), context);
+				if (result.stopReason === "pending") throw new Error("provider returned an unfinished response");
+				if (result.stopReason === "error" || result.stopReason === "aborted") {
+					result.errorMessage = normalizeSizeError(result.errorMessage ?? "");
+					yield { type: "error" as const, reason: result.stopReason, error: result };
+				} else yield { type: "done" as const, reason: result.stopReason, message: result };
+			} catch (error) {
+				const failed = lazyStream(model, async () => {
+					throw new Error(normalizeSizeError(error instanceof Error ? error.message : "provider request failed"));
+				});
+				for await (const event of failed) {
+					if (event.type === "error" && callerSignal?.aborted) {
+						event.reason = "aborted";
+						event.error.stopReason = "aborted";
+					}
+					yield event;
+				}
+			} finally {
+				clearTimeout(timer);
+				deadline.abort();
 			}
-			if (!finished) {
-				const result = await stream.result();
-				if (finished) return;
-				cleanup();
-				output.end(normalizeRequestSizeError(result));
-			}
-		} catch (error) {
-			fail("error", error instanceof Error ? error.message : "provider request failed");
-		}
-	})();
-	return output;
+		})(),
+	);
+}
+
+/** Guard both generation and native compaction while keeping Pi's catalog, auth and routing untouched. */
+export function guardModels(models: Models, getOptions: () => { timeoutMs: number; contextWindow?: number }): Models {
+	const stream: Models["streamSimple"] = (model, context, options) =>
+		guardProviderCall(
+			(signal) => models.streamSimple(model, context, { ...options, signal }),
+			model,
+			options?.signal,
+			getOptions(),
+		);
+	return new Proxy(models, {
+		get(target, property) {
+			if (property === "getModel")
+				return (...args: Parameters<Models["getModel"]>) => {
+					const model = models.getModel(...args);
+					const limit = getOptions().contextWindow;
+					return model && limit != null ? { ...model, contextWindow: Math.min(model.contextWindow, limit) } : model;
+				};
+			if (property === "streamSimple") return stream;
+			if (property === "completeSimple") return (...args: Parameters<typeof stream>) => stream(...args).result();
+			const value = Reflect.get(target, property, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
 }

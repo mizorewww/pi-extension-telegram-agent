@@ -1,4 +1,4 @@
-# Image for the bot's work box (sh_exec) and its task runs (docs/runbooks/sandbox.md). Both run
+# Image for Pi native coding tools and background tasks (docs/runbooks/sandbox.md). Both run
 # with a read-only root, so runtime tools are installed here; uv environments and user installs
 # live under /work (HOME=/work/.home) and vanish with the weekly reset.
 # Pi needs Node >= 22.19, hence the Node base rather than plain Debian.
@@ -17,18 +17,11 @@ RUN apt-get update \
       chromium \
  && rm -rf /var/lib/apt/lists/*
 
-# Task runs: Pi, the packages the search workflow uses, and the CLIs its rules call.
-RUN npm install -g --ignore-scripts \
-      @earendil-works/pi-coding-agent@1.5.0 \
-      @tiny-fish/cli@0.54.0 \
-      agent-browser@0.41.0 \
+# Pi executes models on the host. Only its credential-free filesystem/shell daemon runs here.
+RUN npm install -g --ignore-scripts @earendil-works/pi-env@1.5.0 agent-browser@0.41.0 \
+ && node --input-type=module -e 'import { localDaemon } from "/usr/local/lib/node_modules/@earendil-works/pi-env/dist/index.js"; import { copyFileSync, chmodSync } from "node:fs"; copyFileSync(localDaemon(), "/usr/local/bin/pi-env"); chmodSync("/usr/local/bin/pi-env", 0o755)' \
  && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-x64 \
- && mkdir -p /opt/pi-packages \
- && cd /opt/pi-packages \
- && npm init -y >/dev/null \
- && npm install --ignore-scripts pi-subagents@0.84.0 pi-ollama-cloud@0.13.1 \
  && npm cache clean --force
-COPY task-bridge /opt/tg-task-bridge
 
 RUN userdel --remove node \
  && useradd --uid 1000 --create-home --home-dir /home/box --shell /bin/bash box

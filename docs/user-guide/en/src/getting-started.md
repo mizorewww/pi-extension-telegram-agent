@@ -13,6 +13,8 @@ npm run build
 
 Optional: install `ffmpeg` (which also provides `ffprobe`) so bots that look at media can understand videos. Without it, videos show up as a text placeholder and everything else keeps working. Use `brew install ffmpeg` on macOS, `sudo apt install ffmpeg` on Debian/Ubuntu, or `sudo pacman -S ffmpeg` on Arch.
 
+The daemon and tests use Node only. Repository Pi dependencies are pinned exactly to 1.5.0; install them with `npm ci`.
+
 ## 2. Prepare Telegram
 
 For each bot:
@@ -31,7 +33,7 @@ In Pi:
 1. `/login` to your model provider;
 2. `/model` to choose the default model.
 
-Model credentials stay in Pi and are never written to this repository. The default configuration does not look at images, so any chat model works; if you later set `media.mode` to `"hybrid"`, the main model must accept image input.
+Model credentials stay in Pi and are never written to this repository. Choose an authenticated chat model with a sufficient context window. The default configuration does not look at images; if you later set `media.mode` to `"hybrid"`, the main model must accept image input.
 
 ## 4. Write the configuration
 
@@ -61,6 +63,6 @@ The daemon runs in the foreground; Ctrl-C stops it. For long-running use, hand i
 
 If it does not start, the terminal says why; typical causes are a wrong token, no network, the bot not being in the group, or a model missing from Pi's catalog. See [Troubleshooting](troubleshooting.md).
 
-To change the configuration later, edit `telegram.config.ts` and restart the daemon.
+Manual edits to `telegram.config.ts` require a daemon restart. Group commands `/set` and `/model` apply immediately and write back to the same file. After updating the repository, run `npm ci && npm run build` before restarting.
 
 Next: [Configuration and more bots](configuration.md).

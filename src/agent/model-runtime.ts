@@ -4,13 +4,7 @@ import {
 	type ModelRuntime,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import {
-	clampThinkingLevel,
-	getSupportedThinkingLevels,
-	type Api,
-	type Model,
-	type ModelThinkingLevel,
-} from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 
 /** The subset of Pi's ModelRuntime the daemon reads; Pi always provides all three. */
 export type ConfigurableModelRuntime = Pick<ModelRuntime, "getModel" | "hasConfiguredAuth" | "getProviderAuthStatus">;
@@ -29,68 +23,28 @@ export interface PiModelSelection {
 	purpose?: string;
 }
 
-export interface ModelReasoningCapabilities {
-	provider: string;
-	model: string;
-	requested: ModelThinkingLevel;
-	effective: ModelThinkingLevel;
-	supported: ModelThinkingLevel[];
-	valid: boolean;
-}
-
 export class PiModelConfigurationError extends Error {
-	constructor(
-		readonly category: PiModelConfigurationCategory,
-		readonly provider: string,
-		readonly model: string,
-		readonly reasoning?: ModelReasoningCapabilities,
-		readonly purpose?: string,
-		detail?: string,
-	) {
-		const target = `${provider}/${model}${purpose ? ` (${purpose})` : ""}`;
-		const base = reasoning
-			? `Pi model configuration invalid (${category}): ${target} requested ${reasoning.requested}; supported: ${reasoning.supported.join(", ")}. Use Pi /model, then restart.`
-			: `Pi model unavailable (${category}): ${target}. Use Pi /login and /model, then restart.`;
-		super(detail ? `${base} Cause: ${detail}` : base);
+	readonly category: PiModelConfigurationCategory;
+	constructor(category: PiModelConfigurationCategory, provider: string, model: string, purpose?: string) {
+		super(
+			`Pi model configuration invalid (${category}): ${provider}/${model}${purpose ? ` (${purpose})` : ""}. Check Pi /login and /model, then restart.`,
+		);
 		this.name = "PiModelConfigurationError";
+		this.category = category;
 	}
 }
 
-/** Read Pi's model-specific reasoning contract without sending a provider request. */
-export function inspectModelReasoning(model: Model<Api>, requested: ModelThinkingLevel): ModelReasoningCapabilities {
-	const supported = getSupportedThinkingLevels(model);
-	const effective = clampThinkingLevel(model, requested);
-	return {
-		provider: model.provider,
-		model: model.id,
-		requested,
-		effective,
-		supported,
-		valid: supported.includes(requested),
-	};
-}
-
-/** Validate a Pi-owned model/auth pair without reading or injecting credential material. */
+/** Pi owns catalog/auth; startup rejects unsupported configuration before polling Telegram. */
 export function assertBotModelConfigured(bot: PiModelSelection, runtime: ConfigurableModelRuntime): void {
 	const model = runtime.getModel(bot.provider, bot.model);
-	if (!model) {
-		throw new PiModelConfigurationError("unknown_model", bot.provider, bot.model, undefined, bot.purpose);
+	const fail = (category: PiModelConfigurationCategory): never => {
+		throw new PiModelConfigurationError(category, bot.provider, bot.model, bot.purpose);
+	};
+	if (!model) fail("unknown_model");
+	if (bot.thinkingLevel != null && !getSupportedThinkingLevels(model!).includes(bot.thinkingLevel)) {
+		fail("unsupported_reasoning_effort");
 	}
-	if (bot.thinkingLevel != null) {
-		const reasoning = inspectModelReasoning(model, bot.thinkingLevel);
-		if (!reasoning.valid) {
-			throw new PiModelConfigurationError(
-				"unsupported_reasoning_effort",
-				bot.provider,
-				bot.model,
-				reasoning,
-				bot.purpose,
-			);
-		}
-	}
-	if (!runtime.hasConfiguredAuth(bot.provider)) {
-		throw new PiModelConfigurationError("unauthenticated_provider", bot.provider, bot.model, undefined, bot.purpose);
-	}
+	if (!runtime.hasConfiguredAuth(bot.provider)) fail("unauthenticated_provider");
 }
 
 /**
@@ -133,17 +87,9 @@ export async function createSharedModelRuntime(
 		if (selectedExtensionProviders.length > 0) {
 			await runtime.refresh({ allowNetwork: true, providers: selectedExtensionProviders });
 		}
-	} catch (error) {
-		// Untrusted provider/extension failure text: attach only a bounded single-line message, never a stack.
-		const detail = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim().slice(0, 200);
-		throw new PiModelConfigurationError(
-			"runtime_unavailable",
-			"<startup>",
-			"<startup>",
-			undefined,
-			undefined,
-			detail || undefined,
-		);
+	} catch {
+		// Provider extensions can throw credential-bearing text; expose only the fixed category.
+		throw new PiModelConfigurationError("runtime_unavailable", "<startup>", "<startup>");
 	}
 	for (const bot of bots) assertBotModelConfigured(bot, runtime);
 	return runtime;
@@ -170,7 +116,7 @@ export type PiProviderFailureCategory =
 /** Collapse untrusted provider/OAuth error text into a bounded non-secret category. */
 export function classifyPiProviderFailure(error: unknown): PiProviderFailureCategory {
 	if (error instanceof PiModelConfigurationError) return error.category;
-	if (typeof DOMException !== "undefined" && error instanceof DOMException) {
+	if (error instanceof DOMException) {
 		if (error.name === "TimeoutError") return "provider_timeout";
 		if (error.name === "AbortError") return "provider_aborted";
 	}

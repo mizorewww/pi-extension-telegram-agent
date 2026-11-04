@@ -1,16 +1,16 @@
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { SessionStats } from "@earendil-works/pi-coding-agent";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { UsageState } from "@earendil-works/pi-durable";
 
 export interface RuntimeControlSnapshot {
 	state: "idle" | "busy" | "cooldown" | "stopping" | "compacting";
 	epoch: number;
 	provider: string;
 	model: string;
-	reasoningEffort: ThinkingLevel;
+	reasoningEffort: ModelThinkingLevel;
 	contextWindow: number;
 	currentContextTokens?: number | null;
 	routingP: number;
 	samplingCooldownMs: number;
 	lastCompact: { at: number; outcome: "ok" | "failed" } | null;
-	stats?: Pick<SessionStats, "tokens" | "cost">;
+	usage?: UsageState;
 }

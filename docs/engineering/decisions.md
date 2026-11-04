@@ -4,20 +4,19 @@
 
 ## Pi 集成
 
-- **`streamFunction` 包装是官方注入形态。** `Agent.streamFunction` 是公开可变字段；`createAgentSession()` 不接受 streamFn，只能事后包一层来注入 `cacheRetention`、timeout 和 provider watchdog。升级 Pi 必须验证这一包装仍生效（`src/agent/runtime.ts`）。
-- **扩展抛异常时 Pi 会退回默认摘要器。** 所以 `tg-compaction` 的任何失败都返回 `{ cancel: true }`，绝不 throw（`handleBeforeCompact`）。
-- **摘要输入可以超过摘要模型窗口，必须有分块降级。** 单发拒绝 = 压缩死锁（2026-11-02 线上：272 次失败后上下文涨到 314K 真实 token，provider 超时把 bot 打趴）。现在切块沿 `previousSummary` 滚动合并，同模型多次调用；图先丢、文本后截断。
-- **加密思维链签名是 provider 计费、本地不可见的成本。** Devin `sealed` signature 随每条 assistant 回放（实测 ~39K token/请求），Pi `estimateTokens` 只算 thinking 文本；`compactionTextBudget` 按 /4 折入 keepRecent 成本。
-- **`/new` 必须能打断让它不得不按的那次卡死。** 抢占式：abort run/retry/compaction + 停本 bot 任务 + 换 session（事务内清 obligations：新 session 看不见旧上下文）+ 重置工作区。
-- **图片预算必须在 Pi 准备压缩之前换算。** 文字小于预算时 Pi 在触发 `session_before_compact` 之前就返回，钩子来不及；所以在 `agent_end` / `compact()` 前临时调整 `keepRecentTokens`。
-- **升级 Pi 时复核的行为差异。** `context` handler 收不到 system message；每轮用 `sendCustomMessage(batch, { triggerTurn: true })` 启动：Pi 1.5.0 的 custom 触发与 `prompt()` 走同一个 `_prepareRun`（含压缩检查），但不校验认证、正在 streaming 时会改为 steer 并立即返回，所以 runtime 在调用前先检查 `isStreaming`。
-- **脚本执行用 Pi 原生 codemode，不自建沙箱。** 自建的 `run_js`（子进程 + bubblewrap）已删除；QuickJS VM 的边界由 Pi 维护，本仓库只加宿主侧约束（脚本图片不进 session；脚本里的 `send` 不结束本轮）。需要真实命令行时走每 bot 的 rootless Docker 工作区，而不是放宽 VM。
-- **2026-11-01 审计确认仍需自写、不能换成 Pi 的部分**：摘要器（Pi 模板固定英文、不收图、保留 thinking）、`provider-guard`（Pi `timeoutMs` 不是整流截止）、`session-trim`（无公开 API）、任务 RPC 帧（`RpcClient` 写死 `spawn("node")`）、`cache-observer` 的 miss 估算（Pi 的 `core/cache-stats` 未导出）。不采用：运行中换工具集 / `context_edit` / 会话内 `setModel`（改写前缀）、skills 与 prompt templates（加 system 字节）。
-- **bot session 不加载项目或用户 extension**（`noExtensions`），shared `ModelRuntime` 只加载用户级已安装的 provider extension 以获得模型目录与认证。
-- **Pi 1.5 的 `agent_before_settle` 接管补答续轮。** 只在健康完成、直接点名仍欠公开回复时追加一次持久化 custom message，并请求 `continue`。不另开第二次 `prompt()`，重试、自动压缩和工具执行状态由 Pi 维护；发送结果未知时不补发。
-- **原生 abort 之外仍要等待业务工作结束。** `/new` 等待实际 flush、手动压缩与宿主工具 Promise（codemode VM 取消不代表宿主工具已结束）；不能用超时竞速后换 session，否则旧任务会把 cursor、可见集或义务写进新 epoch。Docker 工作区和任务在换 session 前停止。
-- **配置结构校验由 Pi schema 负责，编辑器类型从同一 schema 推导。** 保留跨字段与部署约束。配置入口用 Jiti `evalModule` 每次执行最新源码，依赖仍走原生加载；直接 require 配置会被 Bun 模块缓存留住旧值，而全量禁用原生加载会破坏部分依赖；`/set`、`/model` 继续验证临时副本并原子写回。
-- **保留事实，删除自建诊断推断。** 实时 session/context 用 Pi API；SQLite 留原始用量、费用和严格 prefix cache 估算。删除占比图、payload 字节快照、自动 findings；遥测失败只在集中 sink 捕获，不能改变业务结果。
+- **Pi Durable 1.5.0 拥有会话和执行状态。** 本仓库只把 Telegram 事件送入 conversation，保存群聊 cursor、待公开回复等业务状态。会话持久化、排队、steer、重试、压缩、子任务、后台脚本和工具执行都用 Pi 原生实现，不保留旧 AgentSession 扩展链或第二套任务生命周期。
+- **模型目录与认证仍走 Pi。** shared `ModelRuntime` 用 Pi resource loader 加载用户级已安装的 provider extension；不加载项目扩展、skills、prompt templates 或 context files。Telegram 人设和固定工具集由本仓库显式配置，不能被工作目录偷偷改变。
+- **只保留 Pi 尚未覆盖的 provider 边界。** 1.5.0 的 `timeoutMs` 传给 provider，不保证整个响应流结束；`lazyStream` 也不会抢占不配合取消的迭代器。`guardModels` 用 Chord 截止等待，同时覆盖 generation 和原生 compaction；HTTP 413 归一为 Pi 识别的 `request_too_large`。重试完全交给 Pi，不在包装层重发。
+- **摘要采用 Pi 原生结构化模板和当前会话模型。** 不再维护独立摘要模型、中文模板或递归分块摘要器。原生摘要排除 system、图片和 thinking，保留可见文本及工具调用；每条工具结果最多保留 2,000 字符。因此媒体事实要经 hybrid 描述进入文本，不能指望压缩器重新观察原图。
+- **原生压缩采用固定预留和有效规划窗口。** reserve 固定为 16,384；向 Pi 提供的 context window 是模型目录、配置窗口、`compaction_threshold + 16,384` 三者的最小值，保留原有阈值语义。原生摘要最多生成 13,107 token，并受模型自身输出上限约束；主回复的输出上限不改。1.5.0 不会把过大的摘要输入自动分块，输入批次仍须有界。关闭提前后台压缩，避免主请求之外的推测性付费调用。2026-11-02 曾有 272 次摘要失败、上下文涨到 314K token 的事故；更换摘要实现不等于消除了输入过大的风险。
+- **加密思维签名仍是本地估算的盲区。** Devin `sealed` signature 曾实测约 39K token/请求；Pi 的保留区切点只计 thinking 文本，不计签名。阈值估算可利用最近一次真实 usage，但不能据此声称 `keepRecentTokens` 已覆盖签名成本。成本判断以 provider usage 和账单为准。
+- **图片直接使用 Pi 原生 ImageContent。** session 持有图片字节，删除文件引用投影和派生图片缓存。hybrid 按媒体缓存一次描述，需要细节时再看原图；缩图上限仍由接入层限制，防止一次图片工具调用生成过大的 provider payload。codemode 的 `image()` 给模型看，公开发图仍须 `send`。
+- **工作区是 rootless Docker，执行协议交给 pi-env。** `RemoteExecutionEnv` 经容器内 `pi-env` 提供原生 read/write/edit/bash。pi-env 本身不是安全沙箱：只读根目录、资源限制、无宿主凭据、只挂载 `/work` 仍是本仓库部署责任；文件公开发送仍检查真实路径、禁止符号链接逃逸并限制大小。
+- **公开发送和补答是 Telegram 策略。** 只有 `send` 对群可见。最终 send 单独执行时通过 Pi 原生 terminate 结束本轮；codemode 内嵌 send 可继续工作。健康结束而仍欠直接点名的公开回复时，仅补一次提示；发送结果未知时绝不补发。
+- **`/new` 必须等旧工作真正停止。** 先取消并等待 Pi run、压缩与后台任务，再重置 conversation 和工作区；不能只竞速一个超时后切 session，让旧宿主工具继续写入新状态。
+- **配置只有一条热写回链路。** Pi schema 校验结构，编辑器类型从同一 schema 推导；保留跨字段与部署约束。Jiti `evalModule` 每次执行最新配置源码，依赖仍走原生加载；`/set`、`/model` 验证临时副本并原子写回。
+- **sticker 附注是不可变的请求投影。** 每批候选只保存在 entry metadata，通过原生 `beforeRequest` 插到该批消息后面；之后的请求保留同一位置和字节。附注不写进持久化 user content，原生 compaction 因而不会把它当成群友原话。
+- **提示词只补群聊语义。** Pi 原生 tool schema 解释参数，本仓库保留人设、消息 grammar、公开发送规则和源码地址；示例文档不再整份装入每个 system prompt。工具顺序和这些字节仍属于 cache 协议，统一随 `CACHE_SCHEMA_VERSION` 更新。
 
 ## 正确性边界
 
@@ -31,11 +30,13 @@
 ## 成本
 
 - **相同轮次下最大的省钱点是“严格前缀”。** 2026-10-06 实测：同一轮内的后续调用（上一请求是严格前缀）平均只 miss 约 780 token；而新一轮开始时上一请求的最后一条（旧的 sticker 候选）消失，即使间隔不到 30 秒也平均 miss 约 13,600 token，而新增内容只有约 1,000 token。所以任何“每请求重建、只挂在末尾”的动态内容都会让每轮多付一大段未缓存输入（schema v26 修复）。
-- **零单价不等于免费。** 部分 provider（Devin/SWE-2、antigravity）在 catalog 里四项单价为 0，`llm_runs.cost` 无法反映真实账单，以 provider 账户为准。
-- **更大的 context window 不一定更省。** 推迟压缩会提高每轮输入；降低阈值会增加摘要与冷缓存次数。调整前后用 `llm_runs` 实测比较，不凭参数大小下结论。
-- **本地 cache 估算（`≈`）只证明结构可复用**，不证明 provider 命中，也不参与费用计算。
+- **零单价不等于免费。** 部分 provider（Devin/SWE-2、antigravity）在 catalog 里四项单价为 0，Pi 记录的 cost 无法反映真实账单，以 provider 账户为准。
+- **更大的 context window 不一定更省。** 推迟压缩会提高每轮输入；降低阈值会增加摘要与冷缓存次数。调整前后用 Pi usage 与 provider 账单实测比较，不凭参数大小下结论。
+- **严格前缀只证明请求结构可复用。** 实际命中看 provider 返回的 cacheRead/cacheWrite，不能用本地相似度替代命中率或费用。
 
 ## 生产事故
+
+下表记录事故发生时的修复；当前机制以以上决策和代码为准。
 
 | 时间 | 现象 | 根因 | 修复 |
 |---|---|---|---|

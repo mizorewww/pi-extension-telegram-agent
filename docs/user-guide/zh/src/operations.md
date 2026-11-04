@@ -34,7 +34,7 @@ systemd 下日志在 `data/daemon.log`，前台运行时直接打印在终端（
 |---|---|
 | `/model` | 用按钮从 Pi 已登录的全部模型中选择，保存到配置并立即换成新会话 |
 | `/new` | 丢弃当前上下文、开启新会话；bot 之后只看到新消息。适合 bot 被某个误解带偏时使用 |
-| `/compact` | 立即把上下文压缩成摘要（会调用摘要模型，产生少量费用） |
+| `/compact` | 立即把上下文压缩成摘要（使用当前聊天模型和 reasoning effort，会产生模型费用） |
 | `/set` | 弹出按钮菜单，点选插话概率（0–1）和主动插话后的冷却时间，立即生效 |
 | `/fire on` / `/fire off` | 允许 / 禁止其他 bot 的消息触发这个 bot；不带参数的 `/fire` 切换开关 |
 | `/box reset` | 立即清空这个 bot 的工作区（开了 `tools.sandbox` 才有）；平时每周一 05:00 自动清空 |
@@ -42,7 +42,8 @@ systemd 下日志在 `data/daemon.log`，前台运行时直接打印在终端（
 
 - `/model`、`/set` 会写回 `telegram.config.ts`，重启后仍然有效。
 - bot 正在回复时，`/model`、`/compact` 会提示稍后重试。`/new` 会取消在途回复、压缩和后台任务，等它们停止后重置会话及工作区。
-- 换模型或 `/new` 后旧会话文件仍保留在本机。
+- 换模型或 `/new` 后，旧记录仍保留在 `data/pi/<bot>.sqlite`；`/new` 取消后台任务并清空当前任务列表。
+- `/status` 的 Pi 累计用量包含本 bot 的主会话、child 和历史，`/new` 不清零；任务用量已包含在总计里，不要重复相加。上下文 token 是估算，cacheRead/cacheWrite 是 provider 返回值。
 
 ## 让其他 bot 触发 bot（`/fire`）
 
@@ -61,7 +62,7 @@ systemd 下日志在 `data/daemon.log`，前台运行时直接打印在终端（
 2. 复制 `telegram.config.ts`、`.env`、`personas/*.local.md` 和整个 `data/`（工作区里的文件不在备份范围内，它们本来就会每周清空）；
 3. `.env` 和私有 persona 放在安全的位置。
 
-SQLite（`data/agent.db`）是唯一的聊天历史来源，Telegram 不能用来恢复历史。
+`data/agent.db` 保存 Telegram 历史，`data/pi/<bot>.sqlite` 保存 Pi 会话、任务和累计用量。两者都要备份；Telegram 不能恢复这些本地状态。
 
 ## 接入另一个群
 

@@ -1,118 +1,52 @@
-import { transaction as atomic } from "../db/db.ts";
-// BotRuntime: one persona bot = one Pi AgentSession + immutable event consumption + visible refs.
-// See docs/architecture.md.
-
-import type { DatabaseSync as Database } from "node:sqlite";
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+// Telegram admission and delivery policy. Pi owns sessions, queues, runs, tools and recovery.
+import { readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { clampThinkingLevel, isContextOverflow, type Api, type Model } from "@earendil-works/pi-ai";
+import { BACKGROUND_CONTEXT as context, type Context } from "@earendil-works/chord/context";
+import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
-	createAgentSession,
-	DefaultResourceLoader,
-	SessionManager,
-	SettingsManager,
-	VERSION as PI_VERSION,
-	type AgentSession,
-	type AgentSessionEvent,
-	type InlineExtension,
-	type CompactionResult,
-	type ModelRuntime,
-	type SessionBeforeCompactEvent,
-} from "@earendil-works/pi-coding-agent";
-import { MIN_COMPACTION_RESERVE, type AppConfig, type BotConfig } from "../config.ts";
-import { getBotState, setBotState } from "../db/db.ts";
+	Harness,
+	configure,
+	createRegistry,
+	defineDoc,
+	defineExtension,
+	GenerationTask,
+	hook,
+	LiveDoc,
+	type Conversation,
+	type EntryRecord,
+} from "@earendil-works/pi-durable";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import type { AppConfig, BotConfig } from "../config.ts";
+import type { Database } from "../db/db.ts";
 import {
-	addVisibleMessageIds,
-	appendNoteEvent,
-	commitConsumedContext,
 	eventsForBot,
-	getConsumedSeq,
-	getSessionManifest,
+	groupMessage,
 	listRecentMessageEvents,
-	listVisibleMessageIds,
 	messageEventHighWater,
-	replaceVisibleMessageIds,
-	setConsumedSeq,
-	setSessionManifest,
-	type MessageEvent,
-	type NotePayload,
+	appendNoteEvent,
 } from "../db/message-events.ts";
-import {
-	createReplyObligation,
-	listReplyObligations,
-	removeReplyObligations,
-	replyObligationCount,
-} from "../db/reply-obligations.ts";
 import type { MediaDownloadApi } from "../media/local-cache.ts";
-import { createImageRefResolver } from "../media/prepare-images.ts";
 import {
-	batchStickerCandidates,
 	ensureStickerCatalog,
 	stickerCatalogPromptBlock,
-	stickerCatalogSnapshotHash,
+	batchStickerCandidates,
+	projectStickerNotes,
 } from "../media/sticker-catalog.ts";
 import { ensureVision, type VisionExecutor } from "../media/vision.ts";
 import type { VisionScheduler } from "../media/vision-scheduler.ts";
-import { errorCategory, log } from "../observability/log.ts";
+import { log } from "../observability/log.ts";
 import type { RuntimeControlSnapshot } from "../observability/usage.ts";
 import { WorkBox } from "../sandbox/box.ts";
-import type { JobRunner } from "../tasks/jobs.ts";
-import { TaskError, type TaskManager } from "../tasks/manager.ts";
+import type { TaskManager } from "../tasks/manager.ts";
 import { TelegramTypingLease } from "../telegram/activity.ts";
-import { BotApi, groupReactionAllowlist, TelegramApiError } from "../telegram/api.ts";
-import { consumedControlMessageIds } from "../telegram/control-command.ts";
-import {
-	buildContextFingerprint,
-	canResumeContextSession,
-	sha256,
-	type ContextFingerprintInput,
-} from "./context-fingerprint.ts";
-import {
-	batchMessage,
-	contextStateFromEntries,
-	reconcileContextStateFromSession,
-	steeredVisibleIds,
-	TELEGRAM_CONTEXT_COMMIT_TYPE,
-} from "./context-state.ts";
-import {
-	CODEMODE_DECLARATION_TOKENS,
-	compactionTextBudget,
-	contextImageBytes,
-	generateCompactionSummary,
-	makeAssistantPersistencePolicyExtension,
-	makeCachePayloadObserverExtension,
-	makeCodemodeExtension,
-	makeTelegramCompactionExtension,
-	makeTelegramContextExtension,
-	TELEGRAM_CONTEXT_VERSION,
-} from "./extensions/index.ts";
-import { parsePiModelReference, type PiRequestThinkingLevel } from "./model-ref.ts";
-import { classifyPiProviderFailure } from "./model-runtime.ts";
-import {
-	buildSystemPrompt,
-	CACHE_SCHEMA_VERSION,
-	COMPACTION_SUMMARY_PROMPT,
-	REPLY_RECOVERY_PROMPT,
-	SHARED_PROTOCOL,
-} from "./prompt.ts";
-import { guardProviderCall, providerRetryPolicy } from "./provider-guard.ts";
+import { type BotApi, groupReactionAllowlist } from "../telegram/api.ts";
+import { buildSystemPrompt, CACHE_SCHEMA_VERSION, REPLY_RECOVERY_PROMPT, sha256Short } from "./prompt.ts";
+import { guardModels } from "./provider-guard.ts";
+import { buildBotRuntimeTools } from "./runtime-tools.ts";
+import { renderMessageLine, serializeMessageEvents, type MessageRow } from "./serialize.ts";
 import type { RoutingTrigger, TriggerResult, TriggerSource } from "./router.ts";
-import { BotRuntimeTelemetry } from "./runtime-telemetry.ts";
-import { buildBotRuntimeTools, type BotTurn } from "./runtime-tools.ts";
-import { TELEGRAM_SERIALIZER_VERSION } from "./serialize.ts";
-import { trimSessionBeforeCompaction } from "./session-trim.ts";
-import {
-	availableSuffixBudget,
-	DEFAULT_REASONING_RESERVE,
-	DEFAULT_TOOL_FOLLOWUP_RESERVE,
-	estimateProviderTokensUpperBound,
-	MAX_EVENT_SCAN,
-	MAX_OBLIGATION_SCAN,
-	packMessageEvents,
-	pendingMediaIds,
-	scanTurnEventWindow,
-	unseenEvents,
-} from "./token-packer.ts";
 
 export type ModelControlSelection = Pick<BotConfig, "provider" | "model" | "reasoningEffort">;
 export type ModelControlResult =
@@ -126,1331 +60,594 @@ export type ModelControlResult =
 				| "unknown_model"
 				| "unauthenticated_provider"
 				| "image_input_unsupported"
+				| "context_window_too_small"
 				| "config_write_failed"
 				| "failed";
 	  };
-
 export type NewSessionResult =
 	| { ok: true; epoch: number }
 	| { ok: false; code: "busy" | "stopping" | "unavailable" | "failed" };
-
 export type ManualCompactResult =
 	| { ok: true; epoch: number; tokensBefore: number }
 	| { ok: false; code: "busy" | "stopping" | "unavailable" | "nothing_to_compact" | "failed" };
 
-const EPOCH_KEY = "context_epoch";
-/** Suffix budget for one batch steered into a running turn. */
-const STEER_TOKEN_BUDGET = 4_000;
-/** How long a turn waits for new media descriptions before replying without them. */
-const VISION_WAIT_MS = 2_500;
-
-const delay = (ms: number) =>
-	new Promise<void>((resolve) => {
-		setTimeout(resolve, ms).unref?.();
-	});
+// Only Telegram-specific state belongs here. Cursor means admitted to Pi, never "model saw it".
+export const TelegramState = defineDoc<{
+	admittedSeq: number;
+	epoch: number;
+	fingerprint: string;
+	pending: Record<string, string>;
+	taskSeen: number;
+}>({
+	kind: "telegram.state",
+	version: 1,
+	scope: "conversation",
+	history: "latest",
+	fork: "initial",
+	initial: () => ({ admittedSeq: 0, epoch: 1, fingerprint: "", pending: {}, taskSeen: 0 }),
+	checkpointWhen: () => false,
+});
+const MAX_INPUT_CHARS = 32_000;
+const MAX_MESSAGE_CHARS = 4_000;
+const MAX_PENDING = 64;
+const TRUNCATED = "\n[truncated]";
+const bounded = (text: string, limit: number) =>
+	text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - TRUNCATED.length))}${TRUNCATED}`.slice(0, limit);
+const messageText = (message: { content: string | readonly { type: string; text?: string }[] }) =>
+	typeof message.content === "string"
+		? message.content
+		: message.content.flatMap((part) => (part.type === "text" ? [part.text ?? ""] : [])).join("\n");
+function pendingInput(pending: Record<string, string>, budget: number, first?: number) {
+	let text = "";
+	const required: number[] = [];
+	const entries = Object.entries(pending);
+	const priority = entries.findIndex(([id]) => Number(id) === first);
+	if (priority > 0) entries.unshift(...entries.splice(priority, 1));
+	for (const [id, value] of entries.slice(0, MAX_PENDING)) {
+		const addition = `${text ? "\n" : ""}${value}`;
+		if (text.length + addition.length > budget) break;
+		text += addition;
+		required.push(Number(id));
+	}
+	return { text, required };
+}
+const metadata = (entry: EntryRecord) =>
+	entry.data as { messageId?: number; required?: number[]; phase?: string } | undefined;
 
 export class BotRuntime {
-	private visionExecutor: VisionExecutor | null;
-	private api: BotApi;
-	private readonly botApis: ReadonlyMap<string, MediaDownloadApi>;
-	private session: AgentSession | null = null;
-	private model!: NonNullable<ReturnType<ModelRuntime["getModel"]>>; // resolved in init()
-	private compactionModel!: NonNullable<ReturnType<ModelRuntime["getModel"]>>;
-	private compactionReasoning: PiRequestThinkingLevel = "low";
-	// Flush state machine (REQ-AGENT-0001): `flushing` is owned locally and set synchronously
-	// at trigger time — never gated on SDK events. While flushing, triggers only coalesce
-	// into `pendingTrigger`; the flush loop drains it (burst-merge semantics unchanged).
-	private flushing = false;
-	private pendingTrigger = false;
-	private pendingTriggerMessageId: number | null = null;
+	private harness!: Harness;
+	private conversation!: Conversation;
+	private tasks: TaskManager | null = null;
+	private prompt = "";
+	private toolFingerprint = "";
 	private stopping = false;
-	private flushPromise: Promise<void> | null = null;
-	private cooldownUntil = 0;
-	private cooldownAfterFlush = false;
-	private controlChangingModel = false;
-	private compactionPromise: Promise<CompactionResult> | null = null;
-	private contextFingerprintInput!: ContextFingerprintInput;
-	private createModelSession!: (
-		model: Model<Api>,
-		thinking: BotConfig["reasoningEffort"],
-		manager: SessionManager,
-	) => Promise<AgentSession>;
-	/** Last assistant message ended in error/abort; auto-compaction waits for a healthy turn. */
-	private lastTurnFailed = false;
-	/** Set by the irreversible send boundary, not by provider health or usage telemetry. */
-	private turn: BotTurn = { sends: 0, outcome: "none" };
-	private lastControlCompact: RuntimeControlSnapshot["lastCompact"] = null;
-	/** While set, triggers only coalesce: the wedged turn is being aborted for /new. */
-	private resettingSession = false;
-	private readonly monotonicNow = () => performance.now();
-	private visibleMessageIds = new Set<number>();
-	private epoch = 1;
-	private readonly telemetry: BotRuntimeTelemetry;
-	private contextFingerprint = "";
-	private staticPrefixTokenEstimate = 0;
-	/** The provider turn in flight: new direct addresses are steered into it (steerDirectAddress). */
-	private activeTurn: {
-		session: AgentSession;
-		replyIds: number[];
-		repaired: boolean;
-		steeredThrough: number;
-		steering: Promise<void>;
-	} | null = null;
-	private readonly box: WorkBox | null;
-	private readonly tasks: TaskManager | null;
-	private jobs: JobRunner | null = null;
-	private waitForTools: () => Promise<unknown> = async () => {};
-	private allowedReactions: ReadonlySet<string> | null = null;
-	private currentTriggerMessageId: number | null = null;
-	private readonly visionScheduler: VisionScheduler | null;
-	private readonly typingLease: TelegramTypingLease;
-	private readonly videoTranscoder: boolean;
-	/** Optional sink for messages this bot sent (for local /fire routing across sibling bots). */
-	sentMessageSink: ((rawMsg: unknown) => void) | null = null;
-	/** Bounded cache observer invoked only after successful compaction visibility commits. */
-	mediaPruneSink: (() => void) | null = null;
+	private changing = false;
+	private completedAt = 0;
+	private lastCompact: RuntimeControlSnapshot["lastCompact"] = null;
+	private reactions: ReadonlySet<string> | null = null;
+	private readonly typing: TelegramTypingLease;
+	readonly workBox: WorkBox | null;
+	sentMessageSink?: (raw: Record<string, unknown>) => void;
 
 	constructor(
 		private readonly db: Database,
-		private readonly bot: BotConfig,
+		readonly bot: BotConfig,
 		private readonly config: AppConfig,
-		private readonly modelRuntime: ModelRuntime,
-		options: {
-			/** Startup probe result; both media modes sample video frames through it. */
+		private readonly models: ModelRuntime,
+		private readonly deps: {
+			api: BotApi;
+			botApis: ReadonlyMap<string, MediaDownloadApi>;
 			videoTranscoder: boolean;
-			chatActionSender?: (signal: AbortSignal) => Promise<unknown>;
-			api?: BotApi;
-			botApis?: ReadonlyMap<string, MediaDownloadApi>;
 			visionExecutor?: VisionExecutor;
 			visionScheduler?: VisionScheduler;
-			box?: WorkBox;
-			tasks?: TaskManager;
 		},
 	) {
-		this.visionExecutor = options.visionExecutor ?? null;
-		this.visionScheduler = options.visionScheduler ?? null;
-		this.videoTranscoder = options.videoTranscoder;
-		this.api = options.api ?? new BotApi(bot.token);
-		this.botApis = options.botApis ?? new Map([[bot.id, this.api]]);
-		this.tasks = bot.tools.tasks ? (options.tasks ?? null) : null;
-		this.telemetry = new BotRuntimeTelemetry(db, bot);
-		this.box = options.box ?? (bot.tools.sandbox && config.sandbox ? new WorkBox(bot.id, config.sandbox) : null);
-		const chatId = config.groupChatId;
-		this.typingLease = new TelegramTypingLease(
-			options.chatActionSender ?? ((signal) => this.api.sendChatAction(chatId, signal)),
-			{
-				onFailure: (error) => {
-					const category =
-						error instanceof TelegramApiError
-							? `telegram_${error.code}`
-							: typeof DOMException !== "undefined" && error instanceof DOMException && error.name === "TimeoutError"
-								? "timeout"
-								: "request_failed";
-					log.warn("telegram_activity", "typing_failed", { bot_id: this.bot.id, category, retry: true });
-				},
-			},
-		);
-		this.epoch = Number(getBotState(db, bot.id, EPOCH_KEY) ?? "1");
-		this.visibleMessageIds = new Set(listVisibleMessageIds(db, bot.id, chatId, this.epoch));
+		this.workBox = bot.tools.sandbox && config.sandbox ? new WorkBox(bot.id, config.sandbox) : null;
+		this.typing = new TelegramTypingLease((signal) => deps.api.sendChatAction(config.groupChatId, signal));
 	}
 
 	async init(): Promise<void> {
-		const persona = readFileSync(this.bot.personaPath, "utf8");
-		const chatId = this.config.groupChatId;
-		try {
-			this.allowedReactions = groupReactionAllowlist(await this.api.getChat(chatId));
-		} catch {
-			// Unknown restrictions degrade to the standard set; Telegram still rejects the rest.
-			log.warn("agent_runtime", "reaction_allowlist_unavailable", { bot_id: this.bot.id, category: "request_failed" });
-		}
-		// Catalog identity + format is pinned into the stable system prefix below.
-		if (this.bot.stickerSets.length > 0) {
-			await ensureStickerCatalog(this.db, this.api, this.bot.id, this.bot.stickerSets);
-		}
-		const stickerCatalog =
-			this.bot.stickerSets.length > 0 ? stickerCatalogPromptBlock(this.db, this.bot.id, this.bot.stickerSets) : "";
-		const systemPrompt = buildSystemPrompt(persona, this.bot.tools, stickerCatalog);
-
-		const catalogModel = this.modelRuntime.getModel(this.bot.provider, this.bot.model);
-		if (!catalogModel) throw new Error(`model not found: ${this.bot.provider}/${this.bot.model}`);
-		const model = { ...catalogModel, contextWindow: Math.min(catalogModel.contextWindow, this.config.contextWindow) };
-		this.model = model;
-		const compactionSelection = parsePiModelReference(this.bot.compactionModel);
-		if (!compactionSelection) throw new Error("invalid compaction_model; expected provider/model:effort");
-		const compactionModel = this.modelRuntime.getModel(compactionSelection.provider, compactionSelection.model);
-		if (!compactionModel) {
-			throw new Error(`compaction model not found: ${compactionSelection.provider}/${compactionSelection.model}`);
-		}
-		this.compactionModel = compactionModel;
-		this.compactionReasoning = compactionSelection.thinkingLevel;
-		// threshold - keepRecent must fit the summary model's window under the bytes/2
-		// estimate (ASCII worst case is ~2x real tokens), or every threshold compaction
-		// degrades to the chunked fallback instead of one call.
-		if (
-			(this.bot.compactionThreshold - this.bot.compactionKeepRecent) * 2 >
-			this.compactionModel.contextWindow - Math.min(4096, this.compactionModel.maxTokens) - 2048
-		)
-			log.warn("agent_runtime", "compaction_threshold_unreliable", {
-				bot_id: this.bot.id,
-				compaction_threshold: this.bot.compactionThreshold,
-				compaction_keep_recent: this.bot.compactionKeepRecent,
-				compaction_window: this.compactionModel.contextWindow,
-			});
-
-		const { activeTools, scriptTools, declaredTools, jobs, waitForTools } = buildBotRuntimeTools({
+		if (this.contextWindow() <= 16_384) throw new Error("main model context window must exceed 16384 tokens");
+		await this.workBox?.ensure();
+		await ensureStickerCatalog(this.db, this.deps.api, this.bot.id, this.bot.stickerSets);
+		this.reactions = await this.deps.api
+			.getChat(this.config.groupChatId)
+			.then(groupReactionAllowlist)
+			.catch(() => null);
+		const registry = createRegistry();
+		const tools = await buildBotRuntimeTools({
 			db: this.db,
 			bot: this.bot,
 			config: this.config,
-			api: this.api,
-			botApis: this.botApis,
-			videoTranscoder: this.videoTranscoder,
-			box: this.box,
-			tasks: this.tasks,
-			allowedReactions: () => this.allowedReactions,
-			triggerMessageId: () => this.currentTriggerMessageId,
-			turn: () => this.turn,
-			telemetry: this.telemetry,
+			...this.deps,
+			box: this.workBox,
+			harness: () => this.harness,
+			conversation: () => this.conversation,
+			allowedReactions: () => this.reactions,
+			currentMessage: (_api, ctx) => this.currentMessage(ctx),
+			recordSend: (_api, ctx) => this.recordSend(ctx),
 			onSent: (raw) => this.sentMessageSink?.(raw),
-			stopTyping: () => this.typingLease.stop(),
+			recordEvent: (kind) => log.info("agent", kind, { bot_id: this.bot.id }),
 			resetBox: (reason) => this.resetBox(reason),
-			markVisible: (ids) => this.markVisible(ids),
-			wakeForTask: (originMessageId, owe) => this.wakeForTask(originMessageId, owe),
 		});
-		this.jobs = jobs;
-		this.waitForTools = waitForTools;
-		this.staticPrefixTokenEstimate =
-			estimateProviderTokensUpperBound(
-				`${systemPrompt}\n${JSON.stringify(activeTools.map(({ name, description, parameters }) => ({ name, description, parameters })))}`,
-			) + (this.bot.tools.codemode ? CODEMODE_DECLARATION_TOKENS : 0);
-		const payloadKey = sha256(
-			`telegram-payload-observer:${this.config.routerSecret ?? this.config.dataDir}:${this.bot.id}`,
-		);
-		const extensions: InlineExtension[] = [
-			// Only hybrid mode has images in context: view_image results, resolved at projection.
-			makeTelegramContextExtension(
-				this.config.media.mode === "hybrid" ? createImageRefResolver(join(this.config.dataDir, "media")) : undefined,
-			),
-			makeTelegramCompactionExtension((event) => this.handleBeforeCompact(event)),
-			makeCachePayloadObserverExtension(payloadKey, (observation) => {
-				this.telemetry.pendingObservation = observation;
+		this.tasks = tools.tasks;
+		for (const extension of tools.extensions) registry.install(extension);
+		registry.install(
+			defineExtension({
+				name: "telegram-policy",
+				hooks: [
+					hook(GenerationTask, {
+						beforeRequest: async (request, api, ctx) => {
+							if (api.conversationId !== this.conversation.id) return;
+							this.typing.start();
+							await this.admitTaskReplies(ctx);
+							return {
+								messages: projectStickerNotes(request.messages, (await this.conversation.context(ctx)).entries),
+							};
+						},
+						afterResponse: (message, api) => {
+							if (api.conversationId !== this.conversation.id) return;
+							if (message.stopReason === "error" || message.stopReason === "aborted") this.typing.stop();
+							log.info("agent", "response", {
+								bot_id: this.bot.id,
+								outcome: message.stopReason,
+								input_tokens: message.usage.input,
+								output_tokens: message.usage.output,
+								cache_read: message.usage.cacheRead,
+							});
+						},
+						onYield: (_answer, api, ctx) =>
+							api.conversationId === this.conversation.id ? this.repairReply(ctx) : undefined,
+						afterRun: (_run, api) => {
+							if (api.conversationId === this.conversation.id) {
+								this.typing.stop();
+								this.completedAt = Date.now();
+							}
+							return undefined;
+						},
+					}),
+				],
 			}),
-			...(this.bot.tools.codemode ? [makeCodemodeExtension()] : []),
-			makeAssistantPersistencePolicyExtension(),
-			{
-				name: "tg-reply-repair",
-				hidden: true,
-				factory: (pi) => {
-					pi.on("agent_before_settle", (event) => {
-						const turn = this.activeTurn;
-						if (
-							!turn ||
-							turn.repaired ||
-							event.outcome !== "completed" ||
-							this.turn.outcome !== "none" ||
-							!this.bot.tools.send ||
-							!turn.replyIds.length ||
-							this.stopping ||
-							this.resettingSession
-						)
-							return;
-						const visible = contextStateFromEntries(turn.session.sessionManager.buildContextEntries(), 0).visible;
-						const replyIds = turn.replyIds.filter((id) => visible.has(id));
-						if (!replyIds.length) return;
-						turn.repaired = true;
-						return {
-							entries: [
-								{
-									type: "custom_message",
-									customType: "telegram-reply-repair",
-									content: `${REPLY_RECOVERY_PROMPT}${replyIds.map((id) => `#${id}`).join(", ")}`,
-									display: false,
-								},
-							],
-							continue: true,
-						};
-					});
-				},
-			},
-		];
-		this.contextFingerprintInput = {
-			piVersion: PI_VERSION,
-			provider: this.bot.provider,
-			api: model.api,
-			model: this.bot.model,
-			contextWindow: model.contextWindow,
-			reasoningEffort: this.bot.reasoningEffort,
-			cacheRetention: this.bot.cacheRetention,
-			cacheSchemaVersion: CACHE_SCHEMA_VERSION,
-			commonPromptSha256: sha256(SHARED_PROTOCOL),
-			personaSha256: sha256(persona),
-			serializerVersion: TELEGRAM_SERIALIZER_VERSION,
-			compactionPromptSha256: sha256(COMPACTION_SUMMARY_PROMPT),
-			compactionModel: compactionSelection.canonical,
-			stickerCatalogSnapshotSha256: stickerCatalogSnapshotHash(this.db, this.bot.id, this.bot.stickerSets),
-			mediaMode: this.config.media.mode,
-			extensionOrder: extensions.map((extension) => extension.name),
-			tools: declaredTools.map((tool) => ({
-				name: tool.name,
-				description: tool.description,
-				parameters: tool.parameters,
-				outputSchema: "outputSchema" in tool ? tool.outputSchema : undefined,
-			})),
-		};
-		this.contextFingerprint = buildContextFingerprint(this.contextFingerprintInput);
-
-		const sessionsDir = join(this.config.dataDir, "sessions", this.bot.id);
-		mkdirSync(sessionsDir, { recursive: true });
-		const manifest = getSessionManifest(this.db, this.bot.id);
-		const hasAnySession = readdirSync(sessionsDir).some((file) => file.endsWith(".jsonl"));
-		const canResume = canResumeContextSession(
-			manifest,
-			this.contextFingerprint,
-			manifest != null && existsSync(manifest.sessionFile),
 		);
-		if (canResume) {
-			try {
-				if (trimSessionBeforeCompaction(manifest!.sessionFile, sessionsDir, this.config.dataDir))
-					log.info("agent_runtime", "session_trimmed", { bot_id: this.bot.id });
-			} catch (error) {
-				log.warn("agent_runtime", "session_trim_failed", { bot_id: this.bot.id, category: errorCategory(error) });
-			}
-		}
-		const sessionManager = canResume
-			? SessionManager.open(manifest!.sessionFile, sessionsDir, this.config.dataDir)
-			: SessionManager.create(this.config.dataDir, sessionsDir);
-		if (!canResume && (manifest != null || hasAnySession)) {
-			this.epoch += 1;
-			setBotState(this.db, this.bot.id, EPOCH_KEY, String(this.epoch));
-			replaceVisibleMessageIds(this.db, this.bot.id, chatId, this.epoch, []);
-			this.visibleMessageIds.clear();
-		}
-
-		this.createModelSession = async (selectedModel, thinking, manager) => {
-			const loader = new DefaultResourceLoader({
-				cwd: this.config.dataDir,
-				agentDir: join(this.config.dataDir, "pi-agent"),
-				systemPrompt,
-				noExtensions: true,
-				noSkills: true,
-				noPromptTemplates: true,
-				noContextFiles: true,
-				extensionFactories: extensions,
-			});
-			await loader.reload();
-
-			const { session } = await createAgentSession({
-				cwd: this.config.dataDir,
-				model: selectedModel,
-				thinkingLevel: thinking,
-				modelRuntime: this.modelRuntime,
-				sessionManager: manager,
-				settingsManager: SettingsManager.inMemory({
-					cacheWarming: "off",
+		const directory = join(this.config.dataDir, "pi");
+		mkdirSync(directory, { recursive: true });
+		this.harness = await Harness.open(
+			await openNodeSqliteStorage(join(directory, `${this.bot.id}.sqlite`)),
+			{
+				models: guardModels(this.models, () => ({
+					timeoutMs: this.bot.providerTimeoutMs,
+					contextWindow: this.contextWindow(),
+				})),
+				registry,
+				env: () => this.workBox?.env,
+				settings: () => ({
+					stream: { cacheRetention: this.bot.cacheRetention, timeoutMs: this.bot.providerTimeoutMs, maxRetries: 0 },
+					retry: { enabled: this.bot.providerRetries > 0, maxRetries: this.bot.providerRetries, baseDelayMs: 10_000 },
 					compaction: {
 						enabled: true,
-						reserveTokens: Math.max(MIN_COMPACTION_RESERVE, selectedModel.contextWindow - this.bot.compactionThreshold),
-						keepRecentTokens: this.bot.compactionKeepRecent,
+						reserveTokens: 16_384,
+						keepRecentTokens: Math.min(this.bot.compactionKeepRecent, Math.floor((this.contextWindow() - 16_384) / 2)),
+						backgroundTokens: 0,
 					},
-					retry: { ...providerRetryPolicy(this.bot.providerRetries), provider: { maxRetries: 0 } },
+					afterFailedRun: "keep",
+					steeringMode: "all",
+					followUpMode: "all",
 				}),
-				resourceLoader: loader,
-				noTools: "builtin",
-				...(this.bot.tools.codemode ? { tools: ["+codemode"] } : {}),
-				customTools: [...activeTools, ...scriptTools],
-			});
-			const streamFunction = session.agent.streamFunction;
-			session.agent.streamFunction = (requestModel, context, options) => {
-				this.telemetry.pendingObservation = null;
-				return guardProviderCall(
-					(signal) =>
-						streamFunction(requestModel, context, {
-							...options,
-							signal,
-							cacheRetention: this.bot.cacheRetention,
-							timeoutMs: this.bot.providerTimeoutMs,
-						}),
-					requestModel,
-					options?.signal,
-					{
-						timeoutMs: this.bot.providerTimeoutMs,
-					},
-				);
-			};
-			return session;
-		};
-		const session = await this.createModelSession(model, this.bot.reasoningEffort, sessionManager);
-		this.session = session;
-		const sessionFile = session.sessionFile;
-		if (!sessionFile) throw new Error(`persistent session file unavailable for bot ${this.bot.id}`);
-		setSessionManifest(this.db, {
-			botId: this.bot.id,
-			sessionId: session.sessionId,
-			sessionFile,
-			contextFingerprint: this.contextFingerprint,
-			createdAt: canResume ? manifest!.createdAt : Date.now(),
-		});
-		this.reconcileContextState();
-		this.subscribeEvents();
-		log.info("agent_runtime", "session_ready", {
-			bot_id: this.bot.id,
-			state: canResume ? "resumed" : "new",
-			epoch: this.epoch,
-			fingerprint: this.contextFingerprint.slice(0, 12),
-			tools: session.getActiveToolNames().join(","),
-			cache_schema: CACHE_SCHEMA_VERSION,
-		});
+				onReport: () => log.error("agent", "pi_runtime_failure", { bot_id: this.bot.id }),
+			},
+			context,
+		);
+		this.conversation = await this.harness.root(context);
+		await this.conversation.commit((tx) => tx.doc(TelegramState, this.conversation.id), context);
+		this.prompt = buildSystemPrompt(
+			readFileSync(this.bot.personaPath, "utf8"),
+			this.bot.tools,
+			stickerCatalogPromptBlock(this.db, this.bot.id, this.bot.stickerSets),
+		);
+		this.toolFingerprint = sha256Short(
+			JSON.stringify(
+				registry
+					.snapshot()
+					.tools()
+					.map(({ tool }) => [tool.name, tool.description, tool.parameters]),
+			),
+		);
+		const fingerprint = this.contextFingerprint(this.bot);
+		const state = (await this.state())!;
+		if (state.fingerprint && state.fingerprint !== fingerprint) await this.reset(false);
+		await this.configureModel(this.bot);
+		this.harness.resume();
 	}
 
-	private reconcileContextState(): void {
-		if (!this.session) return;
-		this.visibleMessageIds = reconcileContextStateFromSession(
-			this.db,
-			this.session.sessionManager,
-			this.bot.id,
-			this.config.groupChatId,
-			this.epoch,
+	private state() {
+		return this.harness.snapshot(TelegramState, this.conversation.id, context);
+	}
+	private contextWindow() {
+		return Math.min(
+			this.models.getModel(this.bot.provider, this.bot.model)?.contextWindow ?? this.config.contextWindow,
+			this.config.contextWindow,
+			this.bot.compactionThreshold + 16_384,
 		);
 	}
-
-	private subscribeEvents(): void {
-		if (!this.session) return;
-		const session = this.session;
-		session.subscribe((event) => {
-			if (this.session !== session) return;
-			switch (event.type) {
-				case "message_end": {
-					const msg = event.message;
-					if (msg.role === "assistant") {
-						this.lastTurnFailed = msg.stopReason === "error" || msg.stopReason === "aborted";
-						if (this.lastTurnFailed)
-							log.warn("agent_runtime", "provider_attempt_failed", {
-								bot_id: this.bot.id,
-								trigger_message_id: this.currentTriggerMessageId,
-								category: isContextOverflow(msg)
-									? "provider_request_too_large"
-									: classifyPiProviderFailure(msg.errorMessage ?? "provider failed"),
-							});
-						this.telemetry.recordUsage(msg.usage, this.model, this.epoch, session.sessionId);
-					}
-					break;
-				}
-				case "auto_retry_start":
-					log.warn("agent_runtime", "provider_retry_scheduled", {
-						bot_id: this.bot.id,
-						scope: "chat",
-						attempt: event.attempt,
-						delay_ms: event.delayMs,
-					});
-					break;
-				case "tool_execution_start":
-					this.telemetry.recordEvent("tool_call", { tool: event.toolName });
-					log.info("agent_tool", "execution_started", {
-						bot_id: this.bot.id,
-						tool: event.toolName,
-						trigger_message_id: this.currentTriggerMessageId,
-					});
-					break;
-				case "tool_execution_end":
-					this.telemetry.recordEvent("tool_result", { tool: event.toolName, isError: event.isError });
-					log.info("agent_tool", "execution_finished", {
-						bot_id: this.bot.id,
-						tool: event.toolName,
-						is_error: event.isError,
-						trigger_message_id: this.currentTriggerMessageId,
-					});
-					break;
-				case "agent_end":
-					// All messages are persisted now; Pi's native compaction preparation runs next.
-					this.refreshCompactionBudget();
-					break;
-				case "agent_settled":
-					this.session?.settingsManager.applyOverrides({
-						compaction: { keepRecentTokens: this.bot.compactionKeepRecent },
-					});
-					this.typingLease.stop();
-					break;
-				case "compaction_end":
-					this.onCompactionEnd(event);
-					break;
-			}
-		});
+	private contextFingerprint(selection: ModelControlSelection): string {
+		return sha256Short(
+			JSON.stringify([
+				CACHE_SCHEMA_VERSION,
+				"pi-1.5.0",
+				selection.provider,
+				selection.model,
+				selection.reasoningEffort,
+				this.bot.name,
+				this.bot.cacheRetention,
+				this.config.media.mode,
+				this.bot.tools,
+				this.config.tasks,
+				this.config.sandbox,
+				this.prompt,
+				this.toolFingerprint,
+			]),
+		);
+	}
+	private async configureModel(selection: ModelControlSelection): Promise<void> {
+		await this.conversation.commit(async (tx) => {
+			await configure(tx, this.conversation.id, {
+				model: { provider: selection.provider, modelId: selection.model },
+				thinkingLevel: selection.reasoningEffort,
+				instructions: this.prompt,
+				cwd: "/work",
+			});
+			(await tx.doc(TelegramState, this.conversation.id)).fingerprint = this.contextFingerprint(selection);
+		}, context);
+	}
+	async admittedThrough(): Promise<number> {
+		return (await this.state())!.admittedSeq;
 	}
 
-	/** Successful compaction rotates only provider visibility; the business cursor is monotonic. */
-	private onCompactionEnd(event: Extract<AgentSessionEvent, { type: "compaction_end" }>): void {
-		if (event.aborted && this.skipFailedThresholdCompaction(event.reason)) {
-			log.info("agent_runtime", "auto_compact_skipped", {
-				bot_id: this.bot.id,
-				reason: event.reason,
-				last_turn_failed: true,
-			});
-			return;
-		}
-		if (event.aborted || !event.result) {
-			const category = classifyPiProviderFailure(event.errorMessage ?? "compaction failed");
-			this.telemetry.recordEvent("error", {
-				stage: "compaction",
-				reason: event.reason,
-				aborted: event.aborted,
-				category,
-			});
-			this.lastControlCompact = { at: Date.now(), outcome: "failed" };
-			log.error("agent_runtime", "compaction_failed", {
-				bot_id: this.bot.id,
-				reason: event.reason,
-				aborted: event.aborted,
-				category,
-			});
-			return;
-		}
-		this.epoch += 1;
-		setBotState(this.db, this.bot.id, EPOCH_KEY, String(this.epoch));
-		const details = event.result.details as { visibleMessageIds?: unknown } | undefined;
-		const kept = Array.isArray(details?.visibleMessageIds)
-			? details.visibleMessageIds.filter(
-					(messageId): messageId is number => Number.isSafeInteger(messageId) && (messageId as number) > 0,
-				)
-			: [];
-		this.visibleMessageIds = new Set(kept);
-		const chatId = this.config.groupChatId;
-		replaceVisibleMessageIds(this.db, this.bot.id, chatId, this.epoch, kept);
-		this.telemetry.recordEvent("compaction", { epoch: this.epoch, kept: kept.length });
-		this.lastControlCompact = { at: Date.now(), outcome: "ok" };
-		log.info("agent_runtime", "compaction_committed", { bot_id: this.bot.id, epoch: this.epoch, kept: kept.length });
-		try {
-			this.mediaPruneSink?.();
-		} catch {
-			log.error("media_cache", "prune_observer_failed", {
-				bot_id: this.bot.id,
-				category: "observer_failed",
-			});
-		}
-	}
-
-	/** Pi also checks thresholds before a new prompt, so inspect the persisted last response. */
-	private skipFailedThresholdCompaction(reason: SessionBeforeCompactEvent["reason"]): boolean {
-		if (reason !== "threshold") return false;
-		const last = this.session?.messages.findLast((message) => message.role === "assistant");
-		return last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted");
-	}
-
-	/** session_before_compact handler: empty summary is refused via cancel, never persisted. */
-	private async handleBeforeCompact(
-		event: SessionBeforeCompactEvent,
-	): Promise<{ cancel: true } | { compaction: CompactionResult }> {
-		// Preserve Pi's overflow recovery and explicit compaction; other failed turns must
-		// not multiply an outage into repeated chat + summary provider attempts.
-		if (this.resettingSession || this.stopping || this.skipFailedThresholdCompaction(event.reason))
-			return { cancel: true };
-		const session = this.session!;
-		try {
-			const branchEntries = event.branchEntries;
-			const prep = event.preparation;
-			const gen = await generateCompactionSummary(prep, event.signal, {
-				botId: this.bot.id,
-				model: this.compactionModel,
-				reasoning: this.compactionReasoning,
-				modelRuntime: this.modelRuntime,
-				mediaDir: join(this.config.dataDir, "media"),
-				imageBudgetBytes: this.bot.contextImageBudgetBytes,
-				timeoutMs: this.bot.providerTimeoutMs,
-				retries: this.bot.providerRetries,
-				onUsage: (usage) => {
-					this.telemetry.recordUsage(usage, this.compactionModel, this.epoch, session.sessionId, true);
-					if (usage.totalTokens || usage.cost.total)
-						session.sessionManager.appendUsage(
-							"compaction",
-							this.compactionModel.provider,
-							this.compactionModel.id,
-							usage,
-						);
-				},
-			});
-			if (!("summary" in gen)) {
-				// NOTE: the SDK swallows extension handler exceptions and would silently fall back
-				// to the default summarizer, so refusal goes through cancel -> compaction_end { aborted: true }.
-				this.telemetry.recordEvent("error", { stage: "compaction", error: gen.failure });
-				return { cancel: true };
-			}
-			const keptIndex = branchEntries.findIndex((entry) => entry.id === prep.firstKeptEntryId);
-			const keptEntries = keptIndex >= 0 ? branchEntries.slice(keptIndex) : [];
-			const chatId = this.config.groupChatId;
-			const state = contextStateFromEntries(keptEntries, getConsumedSeq(this.db, this.bot.id, chatId));
-			return {
-				compaction: {
-					summary: gen.summary,
-					firstKeptEntryId: prep.firstKeptEntryId,
-					tokensBefore: prep.tokensBefore,
-					details: {
-						version: TELEGRAM_CONTEXT_VERSION,
-						consumedSeq: state.consumedSeq,
-						visibleMessageIds: [...state.visible],
-					},
-				},
-			};
-		} catch (error) {
-			// Pi falls back to its default summarizer if an extension throws. Refuse explicitly.
-			log.warn("agent_runtime", "compaction_handler_failed", {
-				bot_id: this.bot.id,
-				category: errorCategory(error),
-			});
-			return { cancel: true };
-		}
-	}
-
-	/** Lifecycle state used by deterministic scheduling and the Telegram control plane. */
-	samplingState(now = this.monotonicNow()): "idle" | "busy" | "cooldown" | "stopping" {
+	async samplingState(): Promise<RuntimeControlSnapshot["state"]> {
 		if (this.stopping) return "stopping";
-		if (
-			this.flushing ||
-			this.compactionPromise ||
-			this.session?.isCompacting ||
-			this.controlChangingModel ||
-			this.resettingSession
-		)
-			return "busy";
-		if (now < this.cooldownUntil) return "cooldown";
-		return "idle";
+		const live = await this.harness.snapshot(LiveDoc, this.conversation.id, context);
+		if (this.changing || live?.run) return "busy";
+		if (live?.compactions?.length) return "compacting";
+		return Date.now() - this.completedAt < this.bot.samplingCooldownMs ? "cooldown" : "idle";
 	}
 
-	/** Called by the scheduler when this bot gets a response opportunity. */
-	trigger(source: TriggerSource = "explicit", routingTrigger?: RoutingTrigger): TriggerResult {
-		// SHARED_PROTOCOL: explicit @mention, reply-to-bot, and configured-name keyword are all
-		// direct addresses that must reach the provider even when this trigger only coalesces.
-		// A `/fire` bot-triggered address is only an opportunity: no durable obligation to answer a bot.
-		const isDirectReply =
-			routingTrigger != null &&
-			!routingTrigger.fromBot &&
-			(routingTrigger.reason === "explicit" || routingTrigger.reason === "reply" || routingTrigger.reason === "name");
-		let directReplyPending = false;
-		let directReplyMessageId: number | null = null;
-		if (isDirectReply && this.bot.tools.send && !this.visibleMessageIds.has(routingTrigger.messageId)) {
-			const created = createReplyObligation(this.db, this.bot.id, routingTrigger.chatId, routingTrigger.messageId);
-			directReplyPending = true;
-			directReplyMessageId = routingTrigger.messageId;
-			if (created) this.telemetry.recordEvent("reply_obligation_created", { message_id: routingTrigger.messageId });
-		}
-		// A /new reset is aborting the current turn: don't steer work into the dying
-		// session — queue one wake-up for the fresh session instead.
-		if (this.resettingSession) {
-			this.pendingTrigger = true;
-			this.pendingTriggerMessageId = routingTrigger?.messageId ?? this.pendingTriggerMessageId;
-			return "coalesced";
-		}
-		const state = this.samplingState();
-		if (state === "stopping") return "skipped_stopping";
-		if (source === "probability" && state !== "idle") {
-			return state === "busy" ? "skipped_busy" : "skipped_cooldown";
-		}
-		if (this.session?.isCompacting || this.controlChangingModel) {
-			this.pendingTrigger = true;
-			this.pendingTriggerMessageId = routingTrigger?.messageId ?? this.pendingTriggerMessageId;
-			return "coalesced";
-		}
-		if (this.flushing) {
-			// A human addressing the bot mid-turn reaches the running turn now instead of waiting.
-			if (directReplyPending && this.activeTurn) this.steerDirectAddress();
-			// re-entrant trigger while a flush is in flight (e.g. slow media download):
-			// coalesce into pendingTrigger; the loop picks it up (burst merge, R1)
-			this.pendingTrigger = true;
-			this.pendingTriggerMessageId = routingTrigger?.messageId ?? this.pendingTriggerMessageId;
-			if (directReplyPending && directReplyMessageId != null) {
-				this.telemetry.recordEvent("reply_obligation_coalesced", { message_id: directReplyMessageId });
+	async trigger(source: TriggerSource, trigger: RoutingTrigger): Promise<TriggerResult> {
+		const status = await this.samplingState();
+		if (this.stopping || this.changing) return "skipped_stopping";
+		if (source === "probability" && status !== "idle")
+			return status === "cooldown" ? "skipped_cooldown" : "skipped_busy";
+		const epoch = (await this.state())!.epoch;
+		await this.prepareVision();
+		const requestId = `telegram:${trigger.chatId}:${trigger.messageId}`;
+		return this.conversation.commit(async (tx): Promise<TriggerResult> => {
+			const state = await tx.doc(TelegramState, this.conversation.id);
+			if (this.stopping || this.changing || state.epoch !== epoch) return "skipped_stopping";
+			const live = await tx.doc(LiveDoc, this.conversation.id);
+			if (source === "probability") {
+				if (live.run || live.compactions?.length) return "skipped_busy";
+				if (Date.now() - this.completedAt < this.bot.samplingCooldownMs) return "skipped_cooldown";
 			}
-			return "coalesced";
-		}
-		if (source === "probability") this.cooldownAfterFlush = true;
-		this.currentTriggerMessageId = routingTrigger?.messageId ?? this.pendingTriggerMessageId;
-		this.pendingTriggerMessageId = null;
-		this.flushing = true; // set synchronously, before any await — never gated on SDK events
-		log.info("agent_runtime", "flush_started", {
-			bot_id: this.bot.id,
-			source,
-			trigger_message_id: this.currentTriggerMessageId,
-			direct_reply: isDirectReply,
-		});
-		this.typingLease.start();
-		this.flushPromise = this.flushLoop()
-			.catch((err) => {
-				// Flush failures are local (SQLite/session) — provider errors never reject the turn.
-				const category = errorCategory(err);
-				// R3: a failed flush only produces an error event; nothing escapes as an
-				// unhandled rejection. Uncommitted events are retried by later triggers.
-				try {
-					this.telemetry.recordEvent("error", { stage: "flush", category });
-				} catch {
-					// shutdown may have closed the db under a wedged flush; nothing more to do
-				}
-				log.error("agent_runtime", "flush_failed", {
-					bot_id: this.bot.id,
-					category,
-					trigger_message_id: this.currentTriggerMessageId,
-				});
-			})
-			.finally(() => {
-				this.flushing = false;
-				this.flushPromise = null;
-				if (this.cooldownAfterFlush) {
-					this.cooldownUntil = this.monotonicNow() + this.bot.samplingCooldownMs;
-					this.cooldownAfterFlush = false;
-				}
-				// A trigger that arrived between the flushLoop do-while exit and this finally saw
-				// `flushing === true` and only set pendingTrigger, but the loop is already gone.
-				this.rearmPendingTrigger();
-			});
-		return "started";
-	}
-
-	private async flushLoop(): Promise<void> {
-		try {
-			let moreReplies = false;
-			do {
-				if (this.pendingTriggerMessageId != null) this.currentTriggerMessageId = this.pendingTriggerMessageId;
-				this.pendingTriggerMessageId = null;
-				this.pendingTrigger = false;
-				this.typingLease.start();
-				moreReplies = await this.flush();
-			} while ((this.pendingTrigger || moreReplies) && !this.stopping && !this.resettingSession);
-		} finally {
-			this.typingLease.stop();
-		}
-	}
-
-	/** Read a bounded immutable event window, commit its cursor, and wake the agent. */
-	private async flush(): Promise<boolean> {
-		const session = this.session;
-		if (!session || this.resettingSession || this.stopping) return false;
-		this.turn = { sends: 0, outcome: "none" };
-		this.lastTurnFailed = false;
-		const chatId = this.config.groupChatId;
-		const obligations = listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN);
-		const consumedSeq = getConsumedSeq(this.db, this.bot.id, chatId);
-		const consumedControl = consumedControlMessageIds(this.db, chatId);
-		const obligationIds = new Set(obligations.map((obligation) => obligation.messageId));
-		let highWater = messageEventHighWater(this.db, chatId);
-		let scanned = scanTurnEventWindow(
-			this.db,
-			this.bot.id,
-			chatId,
-			consumedSeq,
-			highWater,
-			obligationIds,
-			consumedControl,
-			this.visibleMessageIds,
-		);
-		let rowsScanned = scanned.rowsScanned;
-
-		// Descriptions get a short head start, then finish in the background and arrive later as
-		// media_update events; the reply never waits on a slow vision call (view_image covers it).
-		const vision = this.ensureBatchVision([...scanned.mandatory, ...scanned.normal], obligationIds).catch(() => {});
-		await Promise.race([vision, delay(VISION_WAIT_MS)]);
-		if (this.resettingSession || this.stopping) return false;
-		// Vision descriptions land as media_update events mid-scan: pick them up so the
-		// same flush already sees the fresh descriptions.
-		const postVisionHighWater = messageEventHighWater(this.db, chatId);
-		if (postVisionHighWater > highWater) {
-			highWater = postVisionHighWater;
-			scanned = scanTurnEventWindow(
-				this.db,
+			const accepted = live.run ? "coalesced" : "started";
+			if (await tx.submissionByRequest(this.conversation.id, requestId)) return accepted;
+			const high = messageEventHighWater(this.db, this.config.groupChatId);
+			const events = eventsForBot(
+				listRecentMessageEvents(this.db, this.config.groupChatId, state.admittedSeq, high, 256),
 				this.bot.id,
-				chatId,
-				consumedSeq,
-				highWater,
-				obligationIds,
-				consumedControl,
-				this.visibleMessageIds,
+			).filter((event) => !this.isControl(event.messageId));
+			const row = groupMessage(this.db, this.config.groupChatId, trigger.messageId);
+			if (!row) return "skipped_stopping";
+			const current = bounded(renderMessageLine(this.db, row), MAX_MESSAGE_CHARS);
+			if (this.bot.tools.send && source === "explicit" && !trigger.fromBot)
+				state.pending[String(trigger.messageId)] = current;
+			// The projected note and all text share one admission budget; pending replies take priority.
+			const stickerNote = bounded(
+				batchStickerCandidates(
+					this.db,
+					this.bot.id,
+					this.config.groupChatId,
+					events.map((event) => event.messageId),
+					this.bot.stickerSets,
+				),
+				MAX_MESSAGE_CHARS,
 			);
-			rowsScanned += scanned.rowsScanned;
-		}
-		const usage = session.getContextUsage();
-		const suffixBudget = availableSuffixBudget({
-			contextWindow: usage?.contextWindow ?? this.model.contextWindow,
-			currentContextTokens: usage?.tokens ?? 0,
-			staticPrefixTokens: this.staticPrefixTokenEstimate,
-			maxSuffixTokens: this.bot.maxSuffixTokens,
-			outputReserve: Math.min(4096, this.model.maxTokens),
-			reasoningReserve: this.bot.reasoningEffort === "off" ? 0 : DEFAULT_REASONING_RESERVE,
-			toolFollowupReserve: this.bot.tools.search || this.bot.tools.codemode ? DEFAULT_TOOL_FOLLOWUP_RESERVE : 2048,
-		});
-		const packed = packMessageEvents(
-			this.db,
-			scanned.mandatory,
-			scanned.normal,
-			suffixBudget,
-			this.bot.maxMessageTokens,
-		);
-		log.info("agent_runtime", "context_packed", {
-			bot_id: this.bot.id,
-			trigger_message_id: this.currentTriggerMessageId,
-			consumed_seq: consumedSeq,
-			high_water: highWater,
-			rows_scanned: rowsScanned,
-			input_events: packed.events.length,
-			visible_count: packed.visibleMessageIds.length,
-			obligation_count: obligations.length,
-			estimated_tokens: packed.estimatedTokens,
-			suffix_budget: suffixBudget,
-		});
-		if (packed.deferredMandatory > 0) {
-			log.warn("agent_runtime", "obligations_deferred", {
-				bot_id: this.bot.id,
-				trigger_message_id: this.currentTriggerMessageId,
-				deferred_mandatory: packed.deferredMandatory,
-				suffix_budget: suffixBudget,
-			});
-		}
-		if (!packed.text.trim()) {
-			if (highWater > consumedSeq) setConsumedSeq(this.db, this.bot.id, chatId, highWater);
-			// No provider call was made: nothing changed, so looping again cannot make progress.
-			// Deferred obligations stay pending until the next trigger or a compaction frees budget.
-			return false;
-		}
-		const stickerCandidates = batchStickerCandidates(
-			this.db,
-			this.bot.id,
-			chatId,
-			packed.visibleMessageIds,
-			this.bot.stickerSets,
-		);
-		const stickerCandidateTokens = stickerCandidates ? estimateProviderTokensUpperBound(`\n\n${stickerCandidates}`) : 0;
-		const boundedStickerCandidates =
-			stickerCandidates && packed.estimatedTokens + stickerCandidateTokens <= suffixBudget ? stickerCandidates : "";
-
-		const selectedIds = new Set(packed.visibleMessageIds);
-		const delivered = obligations.filter((obligation) => selectedIds.has(obligation.messageId));
-		this.currentTriggerMessageId ??= delivered[0]?.messageId ?? packed.events.at(-1)?.messageId ?? null;
-
-		// The batch itself starts the turn: Pi runs the same pre-run threshold compaction check as
-		// for a prompt, then persists it as the turn's first message. Packed references become
-		// addressable during the turn; durable visibility commits below.
-		await this.checkContextImageBudget();
-		if (this.resettingSession || this.stopping) return false;
-		for (const messageId of packed.visibleMessageIds) this.visibleMessageIds.add(messageId);
-		this.activeTurn = {
-			session,
-			replyIds: delivered.map((item) => item.messageId),
-			repaired: false,
-			steeredThrough: highWater,
-			steering: Promise.resolve(),
-		};
-		try {
-			// While streaming, Pi would only queue the batch as steering and return at once.
-			if (session.isStreaming) throw new Error("session is already streaming");
-			await session.sendCustomMessage(batchMessage(packed, highWater, boundedStickerCandidates), {
-				triggerTurn: true,
-			});
-		} catch (error) {
-			await this.endSteering();
-			this.reconcileContextState();
-			throw error;
-		}
-		await this.endSteering();
-		log.info("agent_runtime", "provider_turn_settled", {
-			bot_id: this.bot.id,
-			trigger_message_id: this.currentTriggerMessageId,
-			input_events: packed.events.length,
-			send_outcome: this.turn.outcome,
-		});
-		const turnEntries = session.sessionManager.buildContextEntries();
-		const activeState = contextStateFromEntries(turnEntries, highWater);
-		// Batches steered into this turn that actually landed in the session move the cursor and
-		// carry their own direct addresses; queued ones that never landed were dropped above.
-		const steeredIds = steeredVisibleIds(turnEntries, highWater);
-		highWater = activeState.consumedSeq;
-		if (steeredIds.size > 0)
-			for (const obligation of listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN))
-				if (steeredIds.has(obligation.messageId) && !delivered.includes(obligation)) delivered.push(obligation);
-		// Provider completion is not Telegram delivery. Unknown/partial commits are terminal;
-		// failure or silence without any remote outcome stays owed, without an unbounded loop.
-		const replyPending = this.turn.outcome === "none";
-		const deliveredObligationIds = replyPending ? [] : delivered.map((obligation) => obligation.messageId);
-		if (deliveredObligationIds.length > 0) {
-			session.sessionManager.appendCustomEntry(TELEGRAM_CONTEXT_COMMIT_TYPE, { deliveredObligationIds });
-		}
-		commitConsumedContext(this.db, {
-			botId: this.bot.id,
-			chatId,
-			consumedSeq: highWater,
-			epoch: this.epoch,
-			visibleMessageIds: [...activeState.visible],
-			deliveredObligationIds,
-		});
-		this.visibleMessageIds = activeState.visible;
-		if (replyPending) {
-			if (!this.lastTurnFailed)
-				log.info("agent_runtime", "model_silence", {
-					bot_id: this.bot.id,
-					trigger_message_id: this.currentTriggerMessageId,
-					obligation_count: delivered.length,
-				});
-			for (const obligation of delivered) {
-				this.telemetry.recordEvent("reply_obligation_retained", { message_id: obligation.messageId });
+			const currentIsPending = state.pending[String(trigger.messageId)] != null;
+			const pending = pendingInput(
+				state.pending,
+				MAX_INPUT_CHARS - stickerNote.length - (currentIsPending ? 0 : current.length) - 16,
+				trigger.messageId,
+			);
+			const owed = pending.text ? `〔待回应〕\n${pending.text}` : "";
+			const selected: string[] = currentIsPending ? [] : [current];
+			let remaining =
+				MAX_INPUT_CHARS - stickerNote.length - owed.length - (currentIsPending ? 0 : current.length + 1) - 2;
+			const included = new Set([trigger.messageId, ...pending.required]);
+			for (const event of [...events].reverse()) {
+				if (event.kind === "message" && included.has(event.messageId)) continue;
+				const text = bounded(serializeMessageEvents(this.db, [event]), MAX_MESSAGE_CHARS);
+				if (text.length + 1 > remaining) continue;
+				selected.unshift(text);
+				remaining -= text.length + 1;
+				if (event.kind === "message") included.add(event.messageId);
 			}
-			// Retry exhaustion or a second silent turn must not loop straight back into the provider.
-			return false;
-		}
-		for (const obligation of delivered) {
-			this.telemetry.recordEvent("reply_obligation_delivered", {
-				message_id: obligation.messageId,
-				outcome: this.turn.outcome,
+			const content = [selected.join("\n"), owed].filter(Boolean).join("\n\n");
+			await this.conversation.submit(tx, {
+				type: "input",
+				requestId,
+				content,
+				whenBusy: "steer",
+				entry: {
+					kind: "telegram.input",
+					data: { messageId: trigger.messageId, required: pending.required, through: high, stickerNote },
+				},
 			});
-		}
-		return replyObligationCount(this.db, this.bot.id, chatId) > 0;
+			state.admittedSeq = high;
+			return accepted;
+		}, context);
 	}
 
-	/** Schedule persisted direct replies after startup; committed rows reconcile idempotently. */
-	recoverReplyObligations(): TriggerResult | null {
-		const chatId = this.config.groupChatId;
-		const obligations = listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN);
-		if (obligations.length === 0) return null;
-		for (const obligation of obligations) {
-			this.telemetry.recordEvent("reply_obligation_recovered", { message_id: obligation.messageId });
-		}
-		return this.trigger("explicit");
+	private isControl(id: number): boolean {
+		return !!this.db
+			.prepare("SELECT 1 FROM telegram_control_messages WHERE chat_id = ? AND message_id = ?")
+			.get(this.config.groupChatId, id);
 	}
 
-	/** Public read model for deterministic Telegram status output. */
-	controlSnapshot(): RuntimeControlSnapshot {
-		const contextUsage = this.session?.getContextUsage();
+	private async prepareVision(): Promise<void> {
+		if (!this.deps.visionExecutor || this.config.media.maxPerTurn === 0) return;
+		const high = messageEventHighWater(this.db, this.config.groupChatId);
+		const events = listRecentMessageEvents(
+			this.db,
+			this.config.groupChatId,
+			(await this.state())!.admittedSeq,
+			high,
+			256,
+		);
+		const ids = [
+			...new Set(
+				events
+					.flatMap((event) => {
+						const media = (event.payload as MessageRow).media;
+						return media ? [String(JSON.parse(media).file_unique_id ?? "")] : [];
+					})
+					.filter(Boolean),
+			),
+		].slice(-this.config.media.maxPerTurn);
+		const work = Promise.allSettled(
+			ids.map((id) =>
+				ensureVision(this.db, this.deps.api, this.bot.id, id, this.deps.visionExecutor!, {
+					cacheDir: join(this.config.dataDir, "media"),
+					videoTranscoder: this.deps.videoTranscoder,
+					botApis: this.deps.botApis,
+					scheduler: this.deps.visionScheduler,
+				}),
+			),
+		);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		await Promise.race([
+			work,
+			new Promise((resolve) => {
+				timer = setTimeout(resolve, 2500);
+			}),
+		]);
+		clearTimeout(timer);
+	}
+
+	private async currentMessage(ctx: Context): Promise<number | null> {
+		const entries = (await this.conversation.context(ctx)).entries;
+		return (
+			[...entries]
+				.reverse()
+				.map((entry) => metadata(entry)?.messageId)
+				.find((id) => id != null) ?? null
+		);
+	}
+
+	private async admitTaskReplies(ctx: Context): Promise<void> {
+		const entries = (await this.conversation.context(ctx)).entries;
+		await this.conversation.commit(async (tx) => {
+			const state = await tx.doc(TelegramState, this.conversation.id);
+			for (const entry of entries) {
+				if (entry.kind !== "telegram.task" || entry.id <= state.taskSeen) continue;
+				state.taskSeen = entry.id;
+				const data = metadata(entry);
+				if (!data?.messageId || data.phase === "progress") continue;
+				const message = entry.model?.[0];
+				const text =
+					typeof message?.content === "string"
+						? message.content
+						: (message?.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n") ?? "");
+				state.pending[String(data.messageId)] = bounded(text, MAX_MESSAGE_CHARS);
+			}
+		}, ctx);
+	}
+
+	private async recordSend(ctx: Context): Promise<void> {
+		const visible = (await this.conversation.context(ctx)).messages
+			.filter((message) => message.role === "user")
+			.map(messageText);
+		await this.conversation.commit(async (tx) => {
+			const state = await tx.doc(TelegramState, this.conversation.id);
+			for (const [id, text] of Object.entries(state.pending)) {
+				const seenText = text.endsWith(TRUNCATED) ? text.slice(0, -TRUNCATED.length) : text;
+				if (visible.some((message) => message.includes(seenText))) delete state.pending[id];
+			}
+		}, ctx);
+	}
+
+	private async repairReply(ctx: Context) {
+		if (!this.bot.tools.send) return;
+		const entries = (await this.conversation.context(ctx)).entries;
+		const input = entries.findLastIndex((entry) => entry.kind.startsWith("telegram."));
+		if (
+			input < 0 ||
+			entries
+				.slice(input + 1)
+				.some(
+					(entry) =>
+						entry.kind === "pi.user" &&
+						entry.model?.some((message) => messageText(message).startsWith(REPLY_RECOVERY_PROMPT)),
+				)
+		)
+			return;
+		const pending = pendingInput((await this.state())!.pending, MAX_INPUT_CHARS - REPLY_RECOVERY_PROMPT.length - 1);
+		if (pending.text) return { continue: `${REPLY_RECOVERY_PROMPT}\n${pending.text}` };
+	}
+
+	async controlSnapshot(): Promise<RuntimeControlSnapshot> {
+		const state = (await this.state())!;
+		const view = await this.conversation.context(context);
 		return {
-			state: this.session?.isCompacting ? "compacting" : this.samplingState(),
-			epoch: this.epoch,
-			provider: this.model.provider,
-			model: this.model.id,
-			reasoningEffort: this.session?.thinkingLevel ?? this.bot.reasoningEffort,
-			contextWindow: this.model.contextWindow,
-			currentContextTokens: contextUsage?.tokens ?? null,
+			state: await this.samplingState(),
+			epoch: state.epoch,
+			provider: this.bot.provider,
+			model: this.bot.model,
+			reasoningEffort: this.bot.reasoningEffort,
+			contextWindow: this.contextWindow(),
+			currentContextTokens: estimateContextTokens(view.messages).tokens,
 			routingP: this.bot.routingP,
 			samplingCooldownMs: this.bot.samplingCooldownMs,
-			lastCompact: this.lastControlCompact,
-			stats: this.session?.getSessionStats(),
+			lastCompact: this.lastCompact,
+			usage: await this.harness.usage(context),
 		};
 	}
 
-	/** Keep a control command/reply out of the current epoch; durable exclusion is audit-backed. */
-	consumeControlMessage(messageId: number): void {
-		const chatId = this.config.groupChatId;
-		removeReplyObligations(this.db, this.bot.id, [{ chatId, messageId }]);
-	}
-
-	/**
-	 * Image bytes are the one compaction signal Pi cannot see. Checked before every batch, so it
-	 * also covers a failed or restored turn; the compaction then runs before the next request.
-	 */
-	private async checkContextImageBudget(): Promise<void> {
-		if (!this.session || this.config.media.mode !== "hybrid") return;
-		const imageBytes = () =>
-			contextImageBytes(this.session!.sessionManager.buildContextEntries(), join(this.config.dataDir, "media"));
-		const bytes = imageBytes();
-		if (bytes <= this.bot.contextImageBudgetBytes) return;
-		log.info("agent_runtime", "auto_compact_triggered", {
-			bot_id: this.bot.id,
-			stage: "preflight",
-			image_bytes: bytes,
-			image_budget: this.bot.contextImageBudgetBytes,
-		});
-		try {
-			await this.compactSession();
-		} catch (error) {
-			log.warn("agent_runtime", "context_input_rejected", { bot_id: this.bot.id, category: "compaction_failed" });
-			throw error;
-		}
-		if (imageBytes() > this.bot.contextImageBudgetBytes) {
-			log.warn("agent_runtime", "context_input_rejected", { bot_id: this.bot.id, category: "image_budget_exceeded" });
-			throw new Error("context image budget exceeded after compaction");
-		}
-	}
-
-	private refreshCompactionBudget(): void {
-		if (!this.session) return;
-		const keepRecentTokens = compactionTextBudget(
-			this.session.sessionManager.getBranch(),
-			this.bot.compactionKeepRecent,
-		);
-		this.session.settingsManager.applyOverrides({ compaction: { keepRecentTokens } });
-	}
-
-	/** Manual/image-pressure paths need the same pre-preparation accounting as native auto-compaction. */
-	private compactSession(): Promise<CompactionResult> {
-		if (this.compactionPromise) return this.compactionPromise;
-		const session = this.session!;
-		this.refreshCompactionBudget();
-		this.compactionPromise = session.compact().finally(() => {
-			this.compactionPromise = null;
-			session.settingsManager.applyOverrides({ compaction: { keepRecentTokens: this.bot.compactionKeepRecent } });
-		});
-		return this.compactionPromise;
-	}
-
-	/** Manual compact that never passes instructions and never aborts an active response. */
 	async compactForControl(): Promise<ManualCompactResult> {
-		const blocked = this.controlBlocked();
-		if (blocked) return { ok: false, code: blocked };
-		const session = this.session!;
-		// Pi's prepareCompaction returns nothing when the branch already ends in a compaction or
-		// has no discardable turn; check the structure instead of matching its error text.
-		const branch = session.sessionManager.getBranch();
-		if (branch.at(-1)?.type === "compaction" || !branch.some((entry) => entry.type === "message")) {
+		if (this.stopping || this.changing) return { ok: false, code: "stopping" };
+		const live = await this.harness.snapshot(LiveDoc, this.conversation.id, context);
+		if (live?.run || live?.compactions?.length) return { ok: false, code: "busy" };
+		const tokensBefore = estimateContextTokens((await this.conversation.context(context)).messages).tokens;
+		const result = await this.harness.waitForTask(await this.conversation.compact(undefined, context), context);
+		const outcome = result.state.outcome;
+		const summary = outcome.status === "completed" ? outcome.result : undefined;
+		if (summary && summary.entryId == null && summary.submissionId == null)
 			return { ok: false, code: "nothing_to_compact" };
-		}
+		const placement =
+			summary?.submissionId == null
+				? undefined
+				: await (await this.harness.submission(summary.submissionId, context))!.wait(context);
+		const ok = summary?.entryId != null || placement?.status === "done";
+		this.lastCompact = { at: Date.now(), outcome: ok ? "ok" : "failed" };
+		return ok ? { ok: true, epoch: (await this.state())!.epoch, tokensBefore } : { ok: false, code: "failed" };
+	}
+
+	private async reset(workspace: boolean): Promise<number> {
+		await this.conversation.abort(context, { background: true });
+		await this.tasks?.clear();
+		this.typing.stop();
+		await this.conversation.reset(undefined, context);
+		const epoch = await this.conversation.commit(async (tx) => {
+			const state = await tx.doc(TelegramState, this.conversation.id);
+			state.epoch++;
+			state.pending = {};
+			state.admittedSeq = messageEventHighWater(this.db, this.config.groupChatId);
+			return state.epoch;
+		}, context);
+		if (workspace) await this.workBox?.reset();
+		return epoch;
+	}
+
+	async newSessionForControl(): Promise<NewSessionResult> {
+		if (this.stopping) return { ok: false, code: "stopping" };
+		if (this.changing) return { ok: false, code: "busy" };
+		this.changing = true;
 		try {
-			const result = await this.compactSession();
-			this.lastControlCompact = { at: Date.now(), outcome: "ok" };
-			return { ok: true, epoch: this.epoch, tokensBefore: result.tokensBefore };
+			return { ok: true, epoch: await this.reset(true) };
 		} catch {
-			this.lastControlCompact = { at: Date.now(), outcome: "failed" };
 			return { ok: false, code: "failed" };
 		} finally {
-			this.rearmPendingTrigger();
+			this.changing = false;
 		}
 	}
 
-	/** Prepare a fresh Pi session before committing config; existing session bytes remain untouched. */
 	async changeModelForControl(
 		provider: string,
 		modelId: string,
 		persist: (selection: ModelControlSelection) => { finalize(): void; rollback(): void },
 	): Promise<ModelControlResult> {
-		const blocked = this.controlBlocked();
-		if (blocked) return { ok: false, code: blocked };
-		const catalog = this.modelRuntime.getModel(provider, modelId);
-		if (!catalog) return { ok: false, code: "unknown_model" };
-		if (!this.modelRuntime.hasConfiguredAuth(provider)) return { ok: false, code: "unauthenticated_provider" };
-		if (this.config.media.mode === "hybrid" && !catalog.input.includes("image"))
-			return { ok: false, code: "image_input_unsupported" };
-		const reasoningEffort = clampThinkingLevel(catalog, this.bot.reasoningEffort);
-		if (provider === this.bot.provider && modelId === this.bot.model && reasoningEffort === this.bot.reasoningEffort)
-			return { ok: true, epoch: this.epoch, reasoningEffort };
-		const nextModel = { ...catalog, contextWindow: Math.min(catalog.contextWindow, this.config.contextWindow) };
-		let write: ReturnType<typeof persist> | undefined;
-		let stage: "failed" | "config_write_failed" = "failed";
-		const result = await this.replaceSessionForControl(nextModel, reasoningEffort, {
-			beforeCommit: () => {
-				stage = "config_write_failed";
-				write = persist({ provider, model: modelId, reasoningEffort });
-				stage = "failed";
-			},
-			afterCommit: () => {
-				write!.finalize();
-				write = undefined;
-				Object.assign(this.bot, { provider, model: modelId, reasoningEffort });
-			},
-		});
-		if (result.ok) {
-			log.info("agent_runtime", "model_changed", {
-				bot_id: this.bot.id,
-				provider,
-				model: modelId,
-				reasoning: reasoningEffort,
-				epoch: result.epoch,
-			});
-			return { ok: true, epoch: result.epoch, reasoningEffort };
-		}
-		write?.rollback();
-		if (result.code !== "failed") return { ok: false, code: result.code };
-		log.warn("agent_runtime", "model_change_failed", { bot_id: this.bot.id, category: stage });
-		return { ok: false, code: stage };
-	}
-
-	/**
-	 * /new is the wedge escape hatch and must not queue behind the turn that wedged the
-	 * bot: stop background work, abort the in-flight run/retry/compaction, clear the old
-	 * session's reply obligations inside the swap commit, then reset the workspace. A
-	 * model swap already mid-commit is the only state we refuse to preempt.
-	 */
-	async newSessionForControl(): Promise<NewSessionResult> {
 		if (this.stopping) return { ok: false, code: "stopping" };
-		if (!this.session) return { ok: false, code: "unavailable" };
-		if (this.resettingSession || this.controlChangingModel) return { ok: false, code: "busy" };
-		this.resettingSession = true;
-		const resetThrough = messageEventHighWater(this.db, this.config.groupChatId);
+		if (this.changing) return { ok: false, code: "busy" };
+		const model = this.models.getModel(provider, modelId);
+		if (!model) return { ok: false, code: "unknown_model" };
+		if (model.contextWindow <= 16_384) return { ok: false, code: "context_window_too_small" };
+		if (!this.models.hasConfiguredAuth(provider)) return { ok: false, code: "unauthenticated_provider" };
+		if (this.bot.tools.viewImage && !model.input.includes("image"))
+			return { ok: false, code: "image_input_unsupported" };
+		const selection = {
+			provider,
+			model: modelId,
+			reasoningEffort: clampThinkingLevel(model, this.bot.reasoningEffort),
+		};
+		const previous = { provider: this.bot.provider, model: this.bot.model, reasoningEffort: this.bot.reasoningEffort };
+		this.changing = true;
+		let write: ReturnType<typeof persist> | undefined;
+		let configured = false;
 		try {
-			// Stop everything that could outlive the session or hold it busy.
-			this.jobs?.stopAll();
-			const taskStops = this.tasks?.cancelAllForBot(this.bot.id);
-			const session = this.session;
-			await Promise.all([session.abort(), this.box?.interrupt(), taskStops]);
-			await this.waitForTools();
-			await this.compactionPromise?.catch(() => {});
-			await this.flushPromise;
-			await this.endSteering();
-			this.turn = { sends: 0, outcome: "none" };
-			const result = await this.replaceSessionForControl(this.model, this.bot.reasoningEffort, { resetThrough });
-			if (result.ok) {
-				log.info("agent_runtime", "session_reset", { bot_id: this.bot.id, epoch: result.epoch });
-				try {
-					await this.resetBox("admin");
-				} catch {
-					log.warn("sandbox", "box_reset_failed", { bot_id: this.bot.id, category: "local_failure" });
-				}
-			} else if (result.code === "failed") {
-				log.warn("agent_runtime", "session_reset_failed", { bot_id: this.bot.id, category: "failed" });
-			}
-			return result;
-		} finally {
-			this.resettingSession = false;
-			this.rearmPendingTrigger();
-		}
-	}
-
-	private controlBlocked(): "stopping" | "unavailable" | "busy" | null {
-		if (this.stopping) return "stopping";
-		if (!this.session) return "unavailable";
-		if (
-			this.flushing ||
-			this.resettingSession ||
-			this.compactionPromise ||
-			this.session?.isCompacting ||
-			this.controlChangingModel ||
-			this.session.isStreaming
-		)
-			return "busy";
-		return null;
-	}
-
-	/** Swap in a fresh session and epoch atomically; a failure leaves the current session in place. */
-	private async replaceSessionForControl(
-		nextModel: Model<Api>,
-		reasoningEffort: BotConfig["reasoningEffort"],
-		hooks: { beforeCommit?: () => void; afterCommit?: () => void; resetThrough?: number } = {},
-	): Promise<{ ok: true; epoch: number } | { ok: false; code: "stopping" | "failed" }> {
-		this.controlChangingModel = true;
-		let nextSession: AgentSession | null = null;
-		try {
-			const identity = {
-				...this.contextFingerprintInput,
-				provider: nextModel.provider,
-				model: nextModel.id,
-				api: nextModel.api,
-				contextWindow: nextModel.contextWindow,
-				reasoningEffort,
-			};
-			const fingerprint = buildContextFingerprint(identity);
-			nextSession = await this.createModelSession(
-				nextModel,
-				reasoningEffort,
-				SessionManager.create(this.config.dataDir, join(this.config.dataDir, "sessions", this.bot.id)),
-			);
-			if (this.stopping) return { ok: false, code: "stopping" };
-			if (!nextSession.sessionFile) throw new Error("persistent session unavailable");
-			hooks.beforeCommit?.();
-			const epoch = this.epoch + 1;
-			const committed = nextSession;
-			const chatId = this.config.groupChatId;
-			atomic(this.db, () => {
-				setBotState(this.db, this.bot.id, EPOCH_KEY, String(epoch));
-				replaceVisibleMessageIds(this.db, this.bot.id, chatId, epoch, []);
-				// A fresh session cannot answer for bytes it never saw; drop the old
-				// session's obligations atomically with the swap.
-				const through = hooks.resetThrough ?? messageEventHighWater(this.db, chatId);
-				this.db
-					.prepare(`DELETE FROM reply_obligations WHERE bot_id = ? AND chat_id = ? AND message_id IN
-					(SELECT message_id FROM message_events WHERE chat_id = ? AND ingest_seq <= ? AND kind = 'message')`)
-					.run(this.bot.id, chatId, chatId, through);
-				setConsumedSeq(this.db, this.bot.id, chatId, Math.max(through, getConsumedSeq(this.db, this.bot.id, chatId)));
-				setSessionManifest(this.db, {
-					botId: this.bot.id,
-					sessionId: committed.sessionId,
-					sessionFile: committed.sessionFile!,
-					contextFingerprint: fingerprint,
-					createdAt: Date.now(),
-				});
-			});
-			hooks.afterCommit?.();
-			const previous = this.session!;
-			this.session = committed;
-			nextSession = null;
-			this.model = nextModel;
-			this.contextFingerprintInput = identity;
-			this.contextFingerprint = fingerprint;
-			this.epoch = epoch;
-			this.visibleMessageIds.clear();
-			this.lastTurnFailed = false;
-			this.telemetry.pendingObservation = null;
-			this.subscribeEvents();
-			// Disposal cannot undo an already committed session.
-			try {
-				previous.dispose();
-			} catch {
-				log.warn("agent_runtime", "previous_session_dispose_failed", {
-					bot_id: this.bot.id,
-					category: "local_failure",
-				});
-			}
-			return { ok: true, epoch };
+			const live = await this.harness.snapshot(LiveDoc, this.conversation.id, context);
+			if (live?.run || live?.compactions?.length) return { ok: false, code: "busy" };
+			write = persist(selection);
+			const epoch = await this.reset(false);
+			await this.configureModel(selection);
+			configured = true;
+			write.finalize();
+			Object.assign(this.bot, selection);
+			return { ok: true, epoch, reasoningEffort: selection.reasoningEffort };
 		} catch {
-			return { ok: false, code: "failed" };
-		} finally {
-			// An uncommitted, empty session owns no work.
 			try {
-				nextSession?.dispose();
-			} catch {}
-			this.controlChangingModel = false;
-			this.rearmPendingTrigger();
+				write?.rollback();
+			} finally {
+				if (configured) await this.configureModel(previous);
+			}
+			return { ok: false, code: write ? "failed" : "config_write_failed" };
+		} finally {
+			this.changing = false;
 		}
 	}
 
-	/** A trigger coalesced while busy must run once the blocking operation releases the bot. */
-	private rearmPendingTrigger(): void {
-		if (
-			this.pendingTrigger &&
-			!this.stopping &&
-			!this.resettingSession &&
-			!this.controlChangingModel &&
-			!this.session?.isCompacting
-		) {
-			this.pendingTrigger = false;
-			this.trigger("explicit");
-		}
+	async taskStatusForControl(): Promise<string | null> {
+		return this.tasks?.describe() ?? null;
 	}
-
-	/** Lazy vision: bounded per turn, with direct-reply events ordered before ordinary catch-up. */
-	private async ensureBatchVision(batch: readonly MessageEvent[], obligationIds: ReadonlySet<number>): Promise<void> {
-		if (this.config.media.mode !== "hybrid" || this.config.media.maxPerTurn <= 0) return;
-		const described = this.db.prepare("SELECT vision FROM media WHERE file_unique_id = ?");
-		const pending = pendingMediaIds(batch, obligationIds, this.config.media.maxPerTurn, (id) =>
-			Boolean((described.get(id) as { vision: string | null } | null)?.vision),
-		);
-		// The shared VisionScheduler bounds provider concurrency across bots.
-		await Promise.all(pending.map((fileUniqueId) => this.ensureOneVision(fileUniqueId)));
+	async cancelTaskForControl(id: string): Promise<{ ok: true } | { ok: false; code: "unavailable" | "unknown_task" }> {
+		return this.tasks && (await this.tasks.cancel(id))
+			? { ok: true }
+			: { ok: false, code: this.tasks ? "unknown_task" : "unavailable" };
 	}
-
-	private async ensureOneVision(fileUniqueId: string): Promise<void> {
-		// The daemon constructs and readiness-checks (assertPiVisionExecutorReady) the shared executor
-		// before Telegram starts; a missing executor here is a wiring bug, never a runtime fallback.
-		if (!this.visionExecutor) throw new Error("vision executor is required when vision is enabled");
-		try {
-			await ensureVision(this.db, this.api, this.bot.id, fileUniqueId, this.visionExecutor, {
-				cacheDir: join(this.config.dataDir, "media"),
-				onTelemetry: (telemetry) => this.telemetry.recordEvent("vision", telemetry),
-				scheduler: this.visionScheduler ?? undefined,
-				botApis: this.botApis,
-				videoTranscoder: this.videoTranscoder,
-			});
-		} catch {
-			this.telemetry.recordEvent("error", { stage: "vision", category: "request_failed" });
-		}
+	async tasksBusy(): Promise<boolean> {
+		return this.tasks?.busy() ?? false;
 	}
-
-	/**
-	 * Steer new direct addresses into the running turn as a regular Telegram batch. Nothing is
-	 * committed here: the turn's end reads which steered batches landed in the session (Pi delivers
-	 * steering after the current tool calls) and drops the ones still queued.
-	 */
-	private steerDirectAddress(): void {
-		const turn = this.activeTurn;
-		if (!turn || !this.session) return;
-		turn.steering = turn.steering.then(async () => {
-			if (this.activeTurn !== turn || this.resettingSession || !turn.session.isStreaming) return;
-			const chatId = this.config.groupChatId;
-			const through = messageEventHighWater(this.db, chatId);
-			if (through <= turn.steeredThrough) return;
-			const owed = new Set(
-				listReplyObligations(this.db, this.bot.id, chatId, MAX_OBLIGATION_SCAN).map((o) => o.messageId),
-			);
-			const events = unseenEvents(
-				eventsForBot(
-					listRecentMessageEvents(this.db, chatId, turn.steeredThrough, through, MAX_EVENT_SCAN),
-					this.bot.id,
-				),
-				consumedControlMessageIds(this.db, chatId),
-				this.visibleMessageIds,
-			);
-			if (!events.some((event) => owed.has(event.messageId))) return;
-			const packed = packMessageEvents(
-				this.db,
-				events.filter((event) => owed.has(event.messageId)),
-				events.filter((event) => !owed.has(event.messageId)),
-				STEER_TOKEN_BUDGET,
-				this.bot.maxMessageTokens,
-			);
-			if (!packed.text.trim()) return;
-			// reply_to may target the new messages as soon as the model can see them.
-			for (const id of packed.visibleMessageIds) this.visibleMessageIds.add(id);
-			await turn.session.sendCustomMessage(batchMessage(packed, through, ""), { deliverAs: "steer" });
-			turn.replyIds.push(...packed.visibleMessageIds.filter((id) => owed.has(id) && !turn.replyIds.includes(id)));
-			turn.steeredThrough = through;
-			log.info("agent_runtime", "turn_steered", { bot_id: this.bot.id, input_events: packed.events.length });
-		});
-	}
-
-	/** Close steering for the turn and drop batches Pi never delivered; the next flush reads them. */
-	private async endSteering(): Promise<void> {
-		const turn = this.activeTurn;
-		if (!turn) return;
-		await turn.steering.catch(() => {});
-		this.activeTurn = null;
-		turn.session.clearQueue();
-	}
-
-	taskStatusForControl(): string | null {
-		return this.tasks?.describe(this.bot.id) ?? null;
-	}
-
-	cancelTaskForControl(taskId: string): { ok: true } | { ok: false; code: "unavailable" | "unknown_task" } {
-		if (!this.tasks) return { ok: false, code: "unavailable" };
-		try {
-			this.tasks.cancel(this.bot.id, taskId);
-			return { ok: true };
-		} catch (error) {
-			if (error instanceof TaskError) return { ok: false, code: "unknown_task" };
-			throw error;
-		}
-	}
-
-	/** A task needs the bot: owe the requester a reply when asked, then wake up. */
-	wakeForTask(originMessageId: number, owe: boolean): void {
-		if (owe && this.bot.tools.send)
-			createReplyObligation(this.db, this.bot.id, this.config.groupChatId, originMessageId);
-		this.trigger("explicit");
-	}
-
-	/** The bot's work box, when this deployment gives it one. */
-	get workBox(): WorkBox | null {
-		return this.box;
-	}
-
 	async resetBoxForControl(): Promise<{ ok: true } | { ok: false; code: "unavailable" | "failed" }> {
-		if (!this.box) return { ok: false, code: "unavailable" };
+		if (!this.workBox) return { ok: false, code: "unavailable" };
 		try {
 			await this.resetBox("admin");
 			return { ok: true };
-		} catch (error) {
-			log.warn("sandbox", "box_reset_failed", { bot_id: this.bot.id, category: errorCategory(error) });
+		} catch {
 			return { ok: false, code: "failed" };
 		}
 	}
-
-	/** Destroy the work box; `reason` is telemetry only. */
 	async resetBox(reason: "tool" | "weekly" | "admin"): Promise<void> {
-		if (!this.box) return;
-		await this.box.reset();
-		this.telemetry.recordEvent("box_reset", { reason });
-		if (reason !== "tool") {
-			const note: NotePayload = {
+		if (!this.workBox) return;
+		if (reason !== "tool" && this.changing) throw new Error("session change in progress");
+		if (reason !== "tool") this.changing = true;
+		try {
+			if (reason !== "tool") {
+				await this.conversation.abort(context, { background: true });
+				await this.tasks?.clear();
+			}
+			await this.workBox.reset();
+			appendNoteEvent(this.db, this.config.groupChatId, 0, `box:${this.bot.id}:${Date.now()}`, {
 				bot_id: this.bot.id,
 				source: "system",
-				text: `你的工作区已被清空（${reason === "weekly" ? "每周例行" : "管理员操作"}），/work 里之前的文件都不在了。`,
-			};
-			appendNoteEvent(this.db, this.config.groupChatId, 0, `box_reset:${this.bot.id}:${Date.now()}`, note);
+				text: "工作区已清空。",
+			});
+		} finally {
+			if (reason !== "tool") this.changing = false;
 		}
-		log.info("sandbox", "box_reset", { bot_id: this.bot.id, reason });
 	}
-
-	private markVisible(ids: readonly number[]): void {
-		for (const id of ids) this.visibleMessageIds.add(id);
-		const chatId = this.config.groupChatId;
-		addVisibleMessageIds(this.db, this.bot.id, chatId, this.epoch, ids);
-	}
-
 	async stop(): Promise<void> {
 		this.stopping = true;
-		this.jobs?.stopAll();
-		this.typingLease.stop();
-		await Promise.all([this.session?.abort(), this.box?.interrupt()]);
-		await this.waitForTools();
-		await this.compactionPromise?.catch(() => {});
-		await this.flushPromise;
-		this.session?.dispose();
+		this.typing.stop();
+		try {
+			await this.harness?.close(context);
+		} finally {
+			await this.workBox?.interrupt();
+		}
 	}
 }

@@ -1,5 +1,4 @@
-export const DEFAULT_COMPACTION_MODEL = "openai-codex/gpt-5.6-luna:low";
-export const DEFAULT_AUXILIARY_VISUAL_MODEL = DEFAULT_COMPACTION_MODEL;
+export const DEFAULT_AUXILIARY_VISUAL_MODEL = "openai-codex/gpt-5.6-luna:low";
 
 const REQUEST_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
@@ -12,7 +11,7 @@ export interface PiModelReference {
 	canonical: string;
 }
 
-/** Parse a task model reference without consulting Pi's catalog or credential store. */
+/** Parse an auxiliary model reference without consulting Pi's catalog or credential store. */
 export function parsePiModelReference(value: string): PiModelReference | null {
 	if (value !== value.trim() || /[\u0000-\u001f\u007f]/.test(value)) return null;
 	const slash = value.indexOf("/");

@@ -1,4 +1,4 @@
-import type { DatabaseSync as Database } from "node:sqlite";
+import type { Database } from "../db/db.ts";
 import type { BotApi } from "../telegram/api.ts";
 import { isReactionEmoji } from "../telegram/api.ts";
 import { groupMessage } from "../db/message-events.ts";
@@ -34,10 +34,8 @@ interface AgentSendContext {
 	/** The bot's work box; `files` are only accepted when it has one. */
 	box: WorkBox | null;
 	triggerMessageId: number | null;
-	markVisible(ids: number[]): void;
 	onSent(raw: Record<string, unknown>): void;
 	recordEvent(kind: string, payload: unknown): void;
-	stopTyping(): void;
 }
 
 interface SendFailure {
@@ -64,7 +62,6 @@ async function prepareFiles(files: readonly SendFile[] | undefined, box: WorkBox
 	const prepared: PreparedFiles = { photos: [], documents: [] };
 	if (!files || files.length === 0) return prepared;
 	if (!box) throw new Error("files need a work box, and this bot has none");
-	if (files.length > 10) throw new Error("send accepts at most 10 files");
 	for (const file of files) {
 		let copy: Awaited<ReturnType<WorkBox["copyOut"]>>;
 		try {
@@ -197,13 +194,11 @@ export async function executeAgentSend(requested: SendParams, context: AgentSend
 				stage: "canonical_persist",
 				category: localFailureCategory(persistFailure),
 			});
-		await local(component, "visibility_failed", () => context.markVisible([messageId]));
 		await local(component, "broadcast_failed", () => context.onSent(raw));
 		if (eventKind) context.recordEvent(eventKind, { message_id: messageId });
 	};
 	const finish = async (outcome: SendDegradedOutcome | null) => {
 		if (outcome == null || sent.length > 0) context.recordEvent("send", { sent, reacted_to: reactedTo });
-		context.stopTyping();
 		if (outcome == null && failures.length === 0) {
 			log.info("agent_send", "committed", {
 				bot_id: context.botId,
@@ -232,11 +227,6 @@ export async function executeAgentSend(requested: SendParams, context: AgentSend
 	const createFailed = async (component: SendFailure["failed_component"], error: unknown) => {
 		const failure = classifyTelegramCreateFailure(error);
 		if (failure.outcome === "rejected" && sent.length === 0) {
-			try {
-				context.stopTyping();
-			} catch {
-				// Preserve the actionable pre-commit Telegram rejection.
-			}
 			throw error;
 		}
 		failures.push({
@@ -313,11 +303,6 @@ export async function executeAgentSend(requested: SendParams, context: AgentSend
 			reactedTo = params.reply_to;
 		} catch (error) {
 			if (sent.length === 0) {
-				try {
-					context.stopTyping();
-				} catch {
-					// Preserve the actionable reaction error.
-				}
 				throw error;
 			}
 			const category = classifyTelegramCreateFailure(error).category;

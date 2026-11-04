@@ -32,7 +32,7 @@ export interface RoutingTrigger {
 }
 
 export interface RoutingRuntime {
-	trigger(source: TriggerSource, trigger: RoutingTrigger): TriggerResult;
+	trigger(source: TriggerSource, trigger: RoutingTrigger): Promise<TriggerResult>;
 }
 
 export interface DispatchResult extends RoutingDecision {
@@ -226,7 +226,7 @@ export class MessageRouter {
 	) {}
 
 	/** An update ingested from Telegram. */
-	route(result: Pick<IngestResult, "kind" | "routeVersion">, row: MessageRow): void {
+	async route(result: Pick<IngestResult, "kind" | "routeVersion">, row: MessageRow): Promise<void> {
 		const decision = routeMessageDecision(this.db, row, this.bots, this.config(), this.fire);
 		// The only enrichment performed by ingestion is reply-sender identity. Re-route only when
 		// that new fact actually changes the deterministic outcome into a direct reply.
@@ -241,7 +241,7 @@ export class MessageRouter {
 			});
 			return;
 		}
-		const dispatched = dispatchRoutingDecision(decision, this.runtimes, this.fire);
+		const dispatched = await dispatchRoutingDecision(decision, this.runtimes, this.fire);
 		finishRoutingClaim(
 			this.db,
 			decision,
@@ -263,27 +263,31 @@ export class MessageRouter {
 	 * message to sibling bots, so this is the only way it can reach them; it is the same first
 	 * delivery a poller would have routed (route version 1).
 	 */
-	routeLocalSend(row: MessageRow): void {
-		this.route({ kind: "inserted", routeVersion: 1 }, row);
+	async routeLocalSend(row: MessageRow): Promise<void> {
+		await this.route({ kind: "inserted", routeVersion: 1 }, row);
 	}
 }
 
 /** Apply lifecycle policy without reparsing the message or redistributing probability. */
-export function dispatchRoutingDecision(
+export async function dispatchRoutingDecision(
 	decision: RoutingDecision,
 	runtimes: ReadonlyMap<string, RoutingRuntime>,
 	fire?: BotFire,
-): DispatchResult {
+): Promise<DispatchResult> {
 	if (decision.target === "nobody") return { ...decision, outcome: "nobody" };
 	const runtime = runtimes.get(decision.target);
 	if (!runtime) return { ...decision, outcome: "missing_runtime" };
 	const source: TriggerSource = decision.reason === "probability" ? "probability" : "explicit";
-	const outcome = runtime.trigger(source, {
+	const outcome = await runtime.trigger(source, {
 		reason: decision.reason,
 		chatId: decision.chatId,
 		messageId: decision.messageId,
 		fromBot: decision.fromBot,
 	});
+	// Keep the poller's durable handoff pending while a human request cannot enter Pi.
+	if (outcome === "skipped_stopping" && source === "explicit" && !decision.fromBot) {
+		throw new Error("Telegram request awaits runtime admission");
+	}
 	// Only an accepted bot-triggered turn spends budget; a skipped one costs nothing.
 	if (decision.fromBot && (outcome === "started" || outcome === "coalesced")) {
 		fire?.consume(decision.target, decision.chatId);

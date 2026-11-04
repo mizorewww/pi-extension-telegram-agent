@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Start with the read-only report; compare recent requests, pending replies and logs:
+Start with the read-only report for archive progress, routing and logs. Use `/status` in the group for live Pi state and usage:
 
 ```bash
 npm run debug -- --since 30m
@@ -23,7 +23,7 @@ Then read the log (`data/daemon.log` under systemd). Typical causes: a wrong tok
 ## The bot ignores a mention
 
 - Check that group privacy is off in BotFather and the bot is in the right group with permission to post.
-- Run `npm run debug`: `context.pending_reply_obligations > 0` means replies are still owed (retried on the next trigger or restart). Compare `claims` and `runs`, then look for `flush_failed` / `provider_attempt_failed` in the log.
+- Run `npm run debug` and inspect `pending_dispatch`, `claims`, and `pi_runtime_failure` / `response` log events. Use `/status` to check whether Pi is busy, compacting or idle. The report no longer reconstructs separate model-request or pending-reply statistics.
 - 401: the token was revoked; fix `.env` and restart.
 - 409: another process uses the same token. Make sure only one daemon runs (do not run another `npm run start` next to systemd, and do not start the same token on another machine).
 
@@ -42,16 +42,20 @@ Its context may be stuck on a misunderstanding, which summaries then carry forwa
 
 ## Work box commands fail
 
-- Startup fails: `tools.sandbox` also needs `tools.codemode` and a top-level `sandbox` section.
-- Fails while running: on the host, run `DOCKER_HOST=unix:///run/tgbox/docker.sock docker info` to confirm rootless Docker is up and the daemon user is in the `tgbox` group; the image name must match `sandbox.image`. See the [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md).
+- Startup fails: ensure a top-level `sandbox` section exists. Native read/write/edit/bash do not require codemode.
+- Fails while running: on the host, run `DOCKER_HOST=unix:///run/tgbox/docker.sock docker info` to confirm rootless Docker is up and the daemon user is in the `tgbox` group; the image name must match `sandbox.image`. The current image is `tg-box:4` and must include Pi 1.5.0 pi-env. See the [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md).
 - The box is in a mess: an admin sends `/box reset`; it is rebuilt on next use.
 
 ## Background tasks never report back
 
-- Startup fails: `tools.tasks` needs `tools.sandbox` and a top-level `tasks` section, and every directory in `tasks.workflows` must contain `.pi`.
-- Tasks fail right away: usually Pi inside the task container has no model credentials; prepare the credentials volume as described in the [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md#任务凭证卷).
-- No result for a long time: a task past `tasks.timeout_minutes` fails and the requester is told; on the host, `docker ps --filter label=tg-task` (with the `DOCKER_HOST` above) lists running tasks. A daemon restart interrupts running tasks.
+- Startup fails: `tools.tasks` requires `tools.sandbox`, a top-level `tasks` section and `AGENTS.md` in every workflow directory.
+- Tasks fail immediately: check the host Pi `/login`, `/model` and work box state. Children share host authentication; they need no separate credential volume or task container.
+- No result for a long time: inspect native task state, usage and deadlines with `/task`, then check structured logs. Restarts resume persisted tasks and deadlines; unsafe operations that started but have an unknown outcome are not automatically repeated. An admin can cancel with `/task cancel tN`.
+
+## Compaction fails
+
+Summaries use the current chat model and reasoning effort. Pi does not split oversized summary inputs automatically, and encrypted thinking signatures can make actual usage exceed local estimates. Check the provider and `/status`; if context remains impossible to compact, an admin can use `/new` to cancel old work and start a fresh conversation. Cumulative usage is not cleared.
 
 ## Asking for help
 
-Include the output of `systemctl --user status telegram-agent`, `pi --version`, the reviewed end of the log, the failing command and bot id, and your terminal. Never share `.env`, personas, chat content, tokens or API keys.
+Include the output of `systemctl --user status telegram-agent`, `node --version`, `pi --version`, the reviewed end of the log, the failing command and bot id, and your terminal. Never share `.env`, personas, chat content, tokens or API keys.

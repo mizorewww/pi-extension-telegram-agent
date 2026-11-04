@@ -1,7 +1,8 @@
-import type { DatabaseSync as Database } from "node:sqlite";
+import type { Database } from "../db/db.ts";
 import { log } from "../observability/log.ts";
 import type { ParsedTelegramControlCommand, TelegramControlResult } from "./control-command.ts";
 import type { InlineKeyboardMarkup } from "./api.ts";
+import { CONTROL_COMMANDS } from "./control-parse.ts";
 import { persistEditedControlMessage } from "./ingest.ts";
 import {
 	classifyTelegramCreateFailure,
@@ -60,24 +61,24 @@ export class TelegramControlCoordinator {
 	}
 
 	async handle(command: ParsedTelegramControlCommand): Promise<TelegramControlDeliveryResult> {
-		let result: TelegramControlResult;
+		let operation = "command";
 		try {
-			result = await this.commands.handle(command);
-		} catch {
-			this.warn("command", { bot_id: command.replyBotId, message_id: command.messageId, category: "local_failure" });
-			if (command.callbackQueryId) await this.answerCallback(command, "操作失败，请稍后重试。");
-			return { outcome: "failed", category: "local_failure" };
-		}
-		if (command.callbackQueryId) {
-			await this.answerCallback(command, result.callbackNotice);
+			const result = await this.commands.handle(command);
+			const api = this.apis.get(result.replyBotId)!;
+			if (command.callbackQueryId) await this.answerCallback(command, result.callbackNotice);
 			if (result.text == null) return { outcome: "no_reply" };
-			return this.editMenu(command, result);
-		}
-		if (result.text == null) return { outcome: "no_reply" };
-		// Every configured bot has an API client; commands only address configured bots.
-		const api = this.apis.get(result.replyBotId)!;
-
-		try {
+			if (command.callbackQueryId) {
+				operation = "menu_edit";
+				const raw = await api.editMessageText(
+					result.chatId,
+					command.messageId,
+					result.text,
+					result.replyMarkup ?? { inline_keyboard: [] },
+				);
+				await retrySqliteBusy(() => persistEditedControlMessage(this.db, raw));
+				return { outcome: "sent", botId: result.replyBotId, chatId: result.chatId, messageId: command.messageId };
+			}
+			operation = "reply";
 			const { canonical } = await sendTextAndPersist(
 				this.db,
 				api,
@@ -87,6 +88,7 @@ export class TelegramControlCoordinator {
 				result.replyToMessageId,
 				result.replyMarkup,
 			);
+			// A local marker failure must not repeat the irreversible Telegram create.
 			try {
 				await retrySqliteBusy(() =>
 					this.commands.consumeReply(result.replyBotId, canonical.chat_id, canonical.message_id),
@@ -103,8 +105,12 @@ export class TelegramControlCoordinator {
 			const category =
 				error instanceof SentMessagePersistenceError
 					? localFailureCategory(error.cause)
-					: classifyTelegramCreateFailure(error).category;
-			this.warn("reply", { bot_id: result.replyBotId, message_id: result.replyToMessageId, category });
+					: operation === "reply"
+						? classifyTelegramCreateFailure(error).category
+						: "local_failure";
+			this.warn(operation, { bot_id: command.replyBotId, message_id: command.messageId, category });
+			if (operation === "command" && command.callbackQueryId)
+				await this.answerCallback(command, "操作失败，请稍后重试。");
 			return { outcome: "failed", category };
 		}
 	}
@@ -120,39 +126,13 @@ export class TelegramControlCoordinator {
 			});
 		}
 	}
-
-	private async editMenu(
-		command: ParsedTelegramControlCommand,
-		result: TelegramControlResult,
-	): Promise<TelegramControlDeliveryResult> {
-		try {
-			const raw = await this.apis
-				.get(result.replyBotId)!
-				.editMessageText(result.chatId, command.messageId, result.text!, result.replyMarkup ?? { inline_keyboard: [] });
-			await retrySqliteBusy(() => persistEditedControlMessage(this.db, raw));
-			return { outcome: "sent", botId: result.replyBotId, chatId: result.chatId, messageId: command.messageId };
-		} catch {
-			this.warn("menu_edit", { bot_id: command.replyBotId, message_id: command.messageId, category: "request_failed" });
-			return { outcome: "failed", category: "request_failed" };
-		}
-	}
 }
 
 export interface TelegramMenuApi {
 	setMyCommands(commands: readonly { command: string; description: string }[]): Promise<true>;
 }
 
-export const TELEGRAM_CONTROL_MENU = [
-	{ command: "help", description: "命令与用法" },
-	{ command: "status", description: "各 bot 状态与用量" },
-	{ command: "model", description: "选择 Pi 可用模型（管理员）" },
-	{ command: "compact", description: "手动压缩上下文（管理员）" },
-	{ command: "new", description: "丢弃上下文开启新会话（管理员）" },
-	{ command: "set", description: "用按钮调整插话概率与冷却（管理员）" },
-	{ command: "fire", description: "允许其他 bot 的消息触发本 bot：on/off/status" },
-	{ command: "task", description: "后台任务与用量；cancel tN 停止（管理员）" },
-	{ command: "box", description: "reset 清空 bot 的工作区（管理员）" },
-] as const;
+export const TELEGRAM_CONTROL_MENU = CONTROL_COMMANDS.map(([command, description]) => ({ command, description }));
 
 /** Startup capability only: every bot attempts the same menu, failures never block polling. */
 export async function publishTelegramControlMenus(apis: ReadonlyMap<string, TelegramMenuApi>): Promise<void> {

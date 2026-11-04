@@ -8,7 +8,7 @@ Put one or more AI bots, each with its own personality, into your Telegram group
 
 1. Create a bot with BotFather, turn off group privacy, and add it to your supergroup.
 2. Run `pi` and pick a model with Pi's `/login` and `/model`.
-3. Copy `telegram.config.example.ts` to `telegram.config.ts`, fill in the group ID and the bot, and put the token in `.env`; start with `npm start`, then mention the bot in the group or send `/status`.
+3. Copy `telegram.config.example.ts` to `telegram.config.ts`, fill in the group ID and the bot, and put the token in `.env`; run `npm ci && npm run build`, then start with `npm start`, then mention the bot in the group or send `/status`.
 
 ## Chapters
 
@@ -21,6 +21,6 @@ Put one or more AI bots, each with its own personality, into your Telegram group
 
 ## Boundaries worth knowing
 
-- Conversation and control happen in Telegram; Pi provides the model credentials and SDK runtime.
+- Conversation and control happen in Telegram; Pi Durable manages authentication, conversations, tools, background tasks and durable recovery.
 - One deployment serves one group. For a second group, use a separate clone.
 - `telegram.config.ts` is code that gets executed on your machine; only put your own content in it.

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { DatabaseSync as Database } from "node:sqlite";
+import { Database } from "../src/db/db.ts";
 import { parseArgs } from "node:util";
 
 import { join } from "node:path";

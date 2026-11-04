@@ -3,7 +3,10 @@ export class VisionScheduler {
 	private active = 0;
 	private readonly queue: Array<() => void> = [];
 
-	constructor(private readonly concurrency: number) {}
+	private readonly concurrency: number;
+	constructor(concurrency: number) {
+		this.concurrency = concurrency;
+	}
 
 	schedule<T>(run: () => Promise<T>): Promise<T> {
 		return new Promise<T>((resolve, reject) => {

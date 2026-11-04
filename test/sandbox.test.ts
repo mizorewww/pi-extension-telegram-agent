@@ -1,9 +1,9 @@
+// Security invariant: tool execution stays in a credential-free rootless box; outbound files cannot escape /work or exceed the send limit.
 import assert from "node:assert/strict";
-// Work box boundary: the container always runs isolated with no host mount, and file paths can
-// never leave /work, even through a symlink. The docker CLI is faked; no daemon is touched.
-
 import { test } from "node:test";
-import { BoxError, type DockerRunner, normalizeBoxPath, WorkBox } from "../src/sandbox/box.ts";
+import { ok, type BinaryReader } from "@earendil-works/pi-durable/env";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { BoxError, normalizeBoxPath, WorkBox } from "../src/sandbox/box.ts";
 
 const CONFIG = {
 	image: "tg-box:1",
@@ -14,7 +14,7 @@ const CONFIG = {
 	network: true,
 };
 
-test("work box runs isolated, mounts nothing from the host, and paths cannot leave /work", async () => {
+test("rootless isolation, mounts and paths stay bounded", async () => {
 	const args = new WorkBox("A", CONFIG).runArgs();
 	const joined = args.join(" ");
 	for (const flag of [
@@ -28,19 +28,47 @@ test("work box runs isolated, mounts nothing from the host, and paths cannot lea
 	])
 		assert.ok(joined.includes(flag));
 	assert.ok(!joined.includes("--privileged"));
-	const volumes = args.flatMap((arg, i) => (arg === "--volume" ? [args[i + 1]!] : []));
-	assert.deepEqual(volumes, ["tg-work-A:/work"]);
-	const env = args.flatMap((arg, i) => (arg === "--env" ? [args[i + 1]!] : []));
-	assert.deepEqual(env, ["HOME=/work/.home"]);
+	assert.deepEqual(
+		args.flatMap((arg, i) => (arg === "--volume" ? [args[i + 1]] : [])),
+		["tg-work-A:/work"],
+	);
+	assert.deepEqual(
+		args.flatMap((arg, i) => (arg === "--env" ? [args[i + 1]] : [])),
+		["HOME=/work/.home"],
+	);
 	assert.ok(new WorkBox("A", { ...CONFIG, network: false }).runArgs().join(" ").includes("--network none"));
 	assert.equal(normalizeBoxPath("out/a.png"), "/work/out/a.png");
-	for (const bad of ["/etc/passwd", "../etc/passwd", "/work/../etc", "/workx/a", "a\nb"])
-		assert.throws(() => normalizeBoxPath(bad), BoxError);
-	const docker: DockerRunner = async (args) => {
-		const text = (value: string) => ({ code: 0, stdout: new TextEncoder().encode(value), stderr: "", timedOut: false });
-		if (args[0] === "inspect") return text("true");
-		if (args.includes("realpath")) return text("/etc/passwd\n");
-		throw new Error(`unexpected docker ${args.join(" ")}`);
+	for (const path of ["/etc/passwd", "../etc/passwd", "/work/../etc", "/workx/a", "a\nb"])
+		assert.throws(() => normalizeBoxPath(path), BoxError);
+	const env = new NodeExecutionEnv({ cwd: "/" });
+	env.canonicalPath = async () => ok("/etc/passwd");
+	env.openBinaryReader = async () => {
+		throw new Error("must reject escape before reading");
 	};
-	await assert.rejects(new WorkBox("A", CONFIG, docker).copyOut("link", 1_000_000), BoxError);
+	await assert.rejects(new WorkBox("A", CONFIG, undefined, env).copyOut("link", 1000), BoxError);
+});
+
+test("outbound file uses a no-follow handle and rejects growth beyond the limit", async () => {
+	const env = new NodeExecutionEnv({ cwd: "/" });
+	let closed = false;
+	const reader: BinaryReader = {
+		info: async () => ok({ name: "file", path: "/work/file", kind: "file", size: 5, mtimeMs: 0 }),
+		read: async (_offset, length) => {
+			assert.equal(length, 11);
+			return ok(new Uint8Array(11));
+		},
+		scanLines: async () => {
+			throw new Error("unused");
+		},
+		close: async () => {
+			closed = true;
+		},
+	};
+	env.canonicalPath = async () => ok("/work/file");
+	env.openBinaryReader = async (_path, options) => {
+		assert.equal(options?.noFollow, true);
+		return ok(reader);
+	};
+	await assert.rejects(new WorkBox("A", CONFIG, undefined, env).copyOut("file", 10), BoxError);
+	assert.equal(closed, true);
 });

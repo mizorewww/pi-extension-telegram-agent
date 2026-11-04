@@ -1,81 +1,28 @@
-// Opt-in provider smoke. One synthetic prompt, no Telegram sends or persistent session.
-// Usage: node dist/scripts/smoke-pi.js --bot <id>
-import {
-	createAgentSession,
-	DefaultResourceLoader,
-	SessionManager,
-	SettingsManager,
-	type AgentSession,
-} from "@earendil-works/pi-coding-agent";
+// Opt-in real provider smoke using the production Models and Durable harness. Never sends Telegram.
+import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
+import { AssistantEntry, Harness, MemoryStorage, createRegistry } from "@earendil-works/pi-durable";
 import { contentText } from "@earendil-works/pi-ai";
 import { loadConfig } from "../src/config.ts";
 import { createSharedModelRuntime } from "../src/agent/model-runtime.ts";
-import { guardProviderCall, providerRetryPolicy } from "../src/agent/provider-guard.ts";
+import { guardModels } from "../src/agent/provider-guard.ts";
 import { selectConfiguredBot } from "./bot-selection.ts";
-
-/** Pi resolves prompt() even on provider failure; require a fresh, complete, correct answer. */
-export async function runSmokePrompt(session: Pick<AgentSession, "prompt" | "messages">) {
-	const before = session.messages.length;
-	await session.prompt("What is 2+2? Answer with just the number.");
-	const result = session.messages.slice(before).at(-1);
-	if (result?.role !== "assistant" || result.stopReason !== "stop" || contentText(result.content).trim() !== "4") {
-		throw new Error("SMOKE FAILED: expected a completed assistant response containing only 4.");
-	}
-	return result;
-}
-
-async function main(): Promise<void> {
-	const config = loadConfig(process.cwd());
-	const bot = selectConfiguredBot(config.bots, process.argv.slice(2));
-	const modelRuntime = await createSharedModelRuntime([
-		{ provider: bot.provider, model: bot.model, thinkingLevel: bot.reasoningEffort },
-	]);
-	const model = modelRuntime.getModel(bot.provider, bot.model)!;
-	const loader = new DefaultResourceLoader({
-		cwd: process.cwd(),
-		agentDir: `${config.dataDir}/pi-smoke`,
-		systemPrompt: "You are a concise assistant. Answer in one short sentence.",
-		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
-		noContextFiles: true,
+const config = loadConfig(process.cwd());
+const bot = selectConfiguredBot(config.bots, process.argv.slice(2));
+const models = guardModels(await createSharedModelRuntime([bot]), () => ({ timeoutMs: bot.providerTimeoutMs }));
+const harness = await Harness.open(new MemoryStorage(), { models, registry: createRegistry() }, context);
+try {
+	const conversation = await harness.root(context, {
+		agent: { model: { provider: bot.provider, modelId: bot.model }, thinkingLevel: bot.reasoningEffort },
 	});
-	await loader.reload();
-	const { session } = await createAgentSession({
-		cwd: process.cwd(),
-		model,
-		thinkingLevel: bot.reasoningEffort,
-		modelRuntime,
-		sessionManager: SessionManager.inMemory(process.cwd()),
-		settingsManager: SettingsManager.inMemory({
-			cacheWarming: "off",
-			compaction: { enabled: false },
-			retry: { ...providerRetryPolicy(0), provider: { maxRetries: 0 } },
-		}),
-		resourceLoader: loader,
-		noTools: "all",
-	});
-	const stream = session.agent.streamFunction;
-	session.agent.streamFunction = (requestModel, context, options) =>
-		guardProviderCall(
-			(signal) => stream(requestModel, context, { ...options, signal, cacheRetention: bot.cacheRetention }),
-			requestModel,
-			options?.signal,
-			{ timeoutMs: bot.providerTimeoutMs },
-		);
-	try {
-		const result = await runSmokePrompt(session);
-		console.log("SMOKE OK", JSON.stringify({ provider: bot.provider, model: bot.model, usage: result.usage }));
-	} finally {
-		await session.dispose();
-	}
-}
-
-if (import.meta.main) {
-	try {
-		await main();
-	} catch {
-		console.error("SMOKE FAILED: check model configuration, provider availability, and response validity.");
-		process.exitCode = 1;
-	}
+	const settled = await (
+		await conversation.submit({ type: "input", content: "What is 2+2? Answer with just the number." }, context)
+	).wait(context);
+	if (settled.status !== "done" || settled.type !== "input")
+		throw new Error("provider did not complete the smoke request");
+	const entry = await conversation.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
+	if (contentText(entry?.model?.[0]?.content ?? []).trim() !== "4")
+		throw new Error("provider returned an unexpected answer");
+	console.log("PASS: native Pi provider request completed");
+} finally {
+	await harness.close(context);
 }

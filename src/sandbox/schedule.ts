@@ -2,7 +2,7 @@
 // Asia/Singapore in production). The last reset time is durable, so a daemon that was down at
 // the boundary resets on its next check and a restart never resets twice.
 
-import type { DatabaseSync as Database } from "node:sqlite";
+import type { Database } from "../db/db.ts";
 import { getDaemonState, setDaemonState } from "../db/db.ts";
 import { log } from "../observability/log.ts";
 
@@ -23,7 +23,7 @@ export function lastWeeklyBoundary(now: Date): Date {
 export interface ResettableBox {
 	readonly botId: string;
 	/** A box with running tasks waits for the next check. */
-	busy?(): boolean;
+	busy?(): boolean | Promise<boolean>;
 	resetBox(reason: "weekly"): Promise<void>;
 }
 
@@ -42,7 +42,7 @@ export async function runWeeklyBoxReset(
 			setDaemonState(db, key, String(now.getTime()));
 			continue;
 		}
-		if (last >= boundary || box.busy?.()) continue;
+		if (last >= boundary || (await box.busy?.())) continue;
 		try {
 			await box.resetBox("weekly");
 			setDaemonState(db, key, String(now.getTime()));

@@ -32,28 +32,20 @@ export type TelegramControlAction =
 	| { kind: "task_cancel"; taskId: string }
 	| { kind: "usage" };
 
-export type TelegramControlCommandToken =
-	| "help"
-	| "status"
-	| "compact"
-	| "new"
-	| "set"
-	| "model"
-	| "fire"
-	| "box"
-	| "task";
-
-const COMMAND_TOKENS: ReadonlySet<string> = new Set([
-	"help",
-	"status",
-	"compact",
-	"new",
-	"set",
-	"model",
-	"fire",
-	"box",
-	"task",
-]);
+/** The command parser, help and Telegram menu share one list. */
+export const CONTROL_COMMANDS = [
+	["help", "命令与用法", "/help"],
+	["status", "状态与用量", "/status"],
+	["model", "选择 Pi 可用模型（管理员）", "/model（管理员）"],
+	["compact", "压缩上下文（管理员）", "/compact（管理员）"],
+	["new", "开启新会话（管理员）", "/new（管理员）"],
+	["set", "调整插话概率与冷却（管理员）", "/set（管理员）"],
+	["fire", "其他 bot 触发开关", "/fire status · /fire [on|off]（管理员）"],
+	["task", "后台任务与用量", "/task [status] · /task cancel <tN>（管理员）"],
+	["box", "清空工作区（管理员）", "/box reset（管理员）"],
+] as const;
+export type TelegramControlCommandToken = (typeof CONTROL_COMMANDS)[number][0];
+const COMMAND_TOKENS: ReadonlySet<string> = new Set(CONTROL_COMMANDS.map(([command]) => command));
 
 export interface ParsedTelegramControlCommand {
 	chatId: number;
@@ -225,20 +217,7 @@ export function boundedReply(value: string): string {
 	return value.length <= MAX_REPLY_CHARS ? value : `${value.slice(0, MAX_REPLY_CHARS - 1)}…`;
 }
 
-export const USAGE_TEXT = [
-	"用法：",
-	"/help",
-	"/status",
-	"/model（管理员）",
-	"/compact（管理员）",
-	"/new（管理员）",
-	"/set（管理员）",
-	"/fire status",
-	"/fire [on|off]（管理员）",
-	"/box reset（管理员）",
-	"/task [status]",
-	"/task cancel <tN>（管理员）",
-].join("\n");
+export const USAGE_TEXT = ["用法：", ...CONTROL_COMMANDS.map(([, , usage]) => usage)].join("\n");
 
 export const HELP_TEXT = [
 	"Telegram Agent 控制",
@@ -246,8 +225,8 @@ export const HELP_TEXT = [
 	"管理员：/model、/compact、/new、/set、/fire [on|off]、/box reset、/task cancel",
 	"/model 用按钮选择 Pi 可用模型，保存后立即开启新会话。",
 	"命令默认作用于接收消息的 bot；带 @bot_username 后缀时定向到对应 bot。",
-	"手动 compact 会使用既有摘要模型并产生相应费用。",
-	"/new 丢弃当前上下文开启新会话（旧会话文件保留在本机），之前的群消息不再可见。",
+	"手动 compact 使用 Pi 当前会话模型压缩上下文并产生相应费用。",
+	"/new 丢弃当前上下文开启新会话（历史保留在 Pi 数据库），之前的群消息不再可见。",
 	"/set 用按钮调整插话概率与冷却，写回 telegram.config.ts，重启后仍然生效。",
 	"/box reset 清空 bot 的工作区（每周一 05:00 也会自动清空）。",
 	"/task 列出 bot 最近的后台任务和用量，/task cancel tN 停止一个任务。",

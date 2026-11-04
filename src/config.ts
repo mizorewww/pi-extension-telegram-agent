@@ -8,15 +8,11 @@ import { homedir } from "node:os";
 import { createJiti } from "jiti";
 import { Type, type Static } from "typebox";
 import { compile } from "@earendil-works/pi-schema";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { ModelThinkingLevel as ThinkingLevel } from "@earendil-works/pi-ai";
 import type { BoxConfig } from "./sandbox/box.ts";
 import type { TasksConfig } from "./tasks/manager.ts";
 import { loadPiModelDefaults, type PiModelDefaults } from "./agent/model-settings.ts";
-import {
-	canonicalPiModelReference,
-	DEFAULT_AUXILIARY_VISUAL_MODEL,
-	DEFAULT_COMPACTION_MODEL,
-} from "./agent/model-ref.ts";
+import { canonicalPiModelReference, DEFAULT_AUXILIARY_VISUAL_MODEL } from "./agent/model-ref.ts";
 
 /** Pi keeps this much room for the next response; compaction_threshold must leave it free. */
 export const MIN_COMPACTION_RESERVE = 16_384;
@@ -36,16 +32,12 @@ const shared = Type.Partial(
 		provider: text,
 		model: text,
 		reasoning_effort: reasoning,
-		compaction_model: text,
 		cache_retention: Type.Union([Type.Literal("none"), Type.Literal("short"), Type.Literal("long")]),
 		compaction_threshold: positive,
 		compaction_keep_recent: positive,
 		cooldown_ms: Type.Number({ minimum: 0 }),
 		provider_timeout_ms: Type.Number({ minimum: 1000, maximum: 3_600_000 }),
 		provider_retries: Type.Integer({ minimum: 0, maximum: 5 }),
-		context_image_budget_bytes: Type.Number({ minimum: 100_000, maximum: 100_000_000 }),
-		max_suffix_tokens: Type.Number({ minimum: 512 }),
-		max_message_tokens: Type.Number({ minimum: 128 }),
 	}),
 );
 const botSchema = Type.Object(
@@ -116,13 +108,10 @@ const configSchema = Type.Object(
 					}),
 					max_running: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
 					timeout_minutes: Type.Optional(Type.Number({ minimum: 1, maximum: 1440 })),
-					memory: Type.Optional(text),
-					cpus: Type.Optional(Type.Number({ minimum: 0.1, maximum: 64 })),
 				},
 				{ additionalProperties: false },
 			),
 		),
-		telemetry_retention_days: Type.Optional(Type.Number({ minimum: 1, maximum: 3650 })),
 		raw_update_retention_days: Type.Optional(Type.Number({ minimum: 1, maximum: 3650 })),
 		message_event_retention_days: Type.Optional(Type.Number({ minimum: 1, maximum: 3650 })),
 		telegram_admins: Type.Optional(
@@ -155,20 +144,15 @@ export interface BotConfig {
 	reasoningEffort: ThinkingLevel;
 	compactionThreshold: number;
 	compactionKeepRecent: number;
-	compactionModel: string;
 	cacheRetention: CacheRetention;
-	contextImageBudgetBytes: number;
 	providerTimeoutMs: number;
 	providerRetries: number;
-	maxSuffixTokens: number;
-	maxMessageTokens: number;
 	/** viewImage is not a toggle: it follows media.mode "hybrid". */
 	tools: { send: boolean; search: boolean; codemode: boolean; sandbox: boolean; tasks: boolean; viewImage: boolean };
 	stickerSets: string[];
 }
 
 export interface RetentionConfig {
-	telemetryDays: number;
 	rawUpdateDays: number;
 	messageEventDays: number;
 }
@@ -186,7 +170,7 @@ export interface AppConfig {
 	/** Work box settings; null when the deployment has no sandbox section. */
 	sandbox: BoxConfig | null;
 	/** Background task workflows; null when the deployment has no tasks section. */
-	tasks: (TasksConfig & { memory: string; cpus: number }) | null;
+	tasks: TasksConfig | null;
 	retention: RetentionConfig;
 	/** Generated and persisted by the daemon when absent. */
 	routerSecret: string | null;
@@ -263,9 +247,8 @@ function validate(
 	identityOnly: boolean,
 ): string[] {
 	const errors: string[] = [];
-	const refs = [raw.compaction_model, raw.media?.vision_model, ...raw.bots.map((bot) => bot.compaction_model)];
-	for (const ref of refs)
-		if (ref != null && !canonicalPiModelReference(ref)) errors.push(`[config] invalid model reference: ${ref}`);
+	if (raw.media?.vision_model && !canonicalPiModelReference(raw.media.vision_model))
+		errors.push(`[config] invalid model reference: ${raw.media.vision_model}`);
 	const ids = new Set<string>();
 	for (const bot of raw.bots) {
 		if (ids.has(bot.id)) errors.push(`[config] duplicate bot id: ${bot.id}`);
@@ -274,8 +257,7 @@ function validate(
 		const path = resolvePath(rootDir, bot.persona_path);
 		if (!existsSync(path) || !statSync(path).isFile())
 			errors.push(`[config] bot ${bot.id}: persona must be a readable file`);
-		if (bot.tools?.sandbox && (!bot.tools.codemode || !raw.sandbox))
-			errors.push(`[config] bot ${bot.id}: sandbox needs codemode and sandbox configuration`);
+		if (bot.tools?.sandbox && !raw.sandbox) errors.push(`[config] bot ${bot.id}: sandbox needs sandbox configuration`);
 		if (bot.tools?.tasks && (!bot.tools.sandbox || !raw.tasks))
 			errors.push(`[config] bot ${bot.id}: tasks need sandbox and tasks configuration`);
 	}
@@ -284,8 +266,8 @@ function validate(
 	if (raw.tasks) {
 		if (!raw.sandbox) errors.push("[config] tasks require sandbox configuration");
 		for (const [name, dir] of Object.entries(raw.tasks.workflows))
-			if (!existsSync(join(resolvePath(rootDir, dir), ".pi")))
-				errors.push(`[config] workflow ${name}: directory must contain .pi`);
+			if (!existsSync(join(resolvePath(rootDir, dir), "AGENTS.md")))
+				errors.push(`[config] workflow ${name}: directory must contain AGENTS.md`);
 	}
 	return errors;
 }
@@ -362,13 +344,9 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 			reasoningEffort: setting<ThinkingLevel>("reasoning_effort", "off"),
 			compactionThreshold,
 			compactionKeepRecent: setting("compaction_keep_recent", 20_000),
-			compactionModel: canonicalPiModelReference(setting("compaction_model", DEFAULT_COMPACTION_MODEL))!,
 			cacheRetention: setting<CacheRetention>("cache_retention", "short"),
-			contextImageBudgetBytes: setting("context_image_budget_bytes", 10_000_000),
 			providerTimeoutMs: setting("provider_timeout_ms", 300_000),
 			providerRetries: setting("provider_retries", 2),
-			maxSuffixTokens: setting("max_suffix_tokens", 12_000),
-			maxMessageTokens: setting("max_message_tokens", 4_096),
 			tools: {
 				send: tools.send !== false,
 				search: tools.search === true,
@@ -403,7 +381,6 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 		sandbox: raw.sandbox === undefined ? null : sandboxConfig(raw.sandbox),
 		tasks: raw.tasks === undefined ? null : tasksConfig(rootDir, raw.tasks),
 		retention: {
-			telemetryDays: raw.telemetry_retention_days ?? 90,
 			rawUpdateDays: raw.raw_update_retention_days ?? 30,
 			messageEventDays: raw.message_event_retention_days ?? 365,
 		},
@@ -414,7 +391,7 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 
 function sandboxConfig(raw: NonNullable<TelegramConfigInput["sandbox"]>): BoxConfig {
 	return {
-		image: raw.image ?? "tg-box:2",
+		image: raw.image ?? "tg-box:4",
 		dockerHost: raw.docker_host ?? "unix:///run/tgbox/docker.sock",
 		memory: raw.memory ?? "1g",
 		cpus: raw.cpus ?? 2,
@@ -423,17 +400,12 @@ function sandboxConfig(raw: NonNullable<TelegramConfigInput["sandbox"]>): BoxCon
 	};
 }
 
-function tasksConfig(
-	rootDir: string,
-	raw: NonNullable<TelegramConfigInput["tasks"]>,
-): TasksConfig & { memory: string; cpus: number } {
+function tasksConfig(rootDir: string, raw: NonNullable<TelegramConfigInput["tasks"]>): TasksConfig {
 	return {
 		workflows: Object.fromEntries(
 			Object.entries(raw.workflows).map(([name, dir]) => [name, resolvePath(rootDir, dir)]),
 		),
 		maxRunning: raw.max_running ?? 2,
 		timeoutMs: (raw.timeout_minutes ?? 45) * 60_000,
-		memory: raw.memory ?? "3g",
-		cpus: raw.cpus ?? 2,
 	};
 }

@@ -1,7 +1,7 @@
-import assert from "node:assert/strict";
 // Only human admins can run mutating control commands, and no command reaches the provider context.
 
 import { afterEach, test } from "node:test";
+import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import { openDb } from "../src/db/db.ts";
 import {
 	consumedControlMessageIds,
 	parseTelegramControlCommand,
+	parseTelegramControlCallback,
 	TelegramControlCommandService,
 } from "../src/telegram/control-command.ts";
 
@@ -31,7 +32,6 @@ function fixture() {
 	provider: "fixture",
 	model: "old",
 	reasoning_effort: "off",
-	compaction_model: "fixture/old:low",
 	context_window: 65536,
 	media: { mode: "off" },
 	telegram_admins: [42],
@@ -64,7 +64,7 @@ test("mutating control commands require a human admin and never reach the provid
 	let resets = 0;
 	const cancelled: string[] = [];
 	const runtime = {
-		controlSnapshot: () => {
+		controlSnapshot: async () => {
 			throw new Error("unused");
 		},
 		compactForControl: async () => {
@@ -74,15 +74,14 @@ test("mutating control commands require a human admin and never reach the provid
 			resets++;
 			return { ok: true as const, epoch: 7 };
 		},
-		consumeControlMessage: () => {},
 		changeModelForControl: async () => {
 			throw new Error("unused");
 		},
 		resetBoxForControl: async () => {
 			throw new Error("unused");
 		},
-		taskStatusForControl: () => "t1 [running] search: 调研",
-		cancelTaskForControl: (taskId: string) => {
+		taskStatusForControl: async () => "t1 [running] search: 调研",
+		cancelTaskForControl: async (taskId: string) => {
 			cancelled.push(taskId);
 			return { ok: true as const };
 		},
@@ -103,19 +102,43 @@ test("mutating control commands require a human admin and never reach the provid
 			[{ id: "A", username: "alpha_bot" }],
 		)!;
 	try {
-		assert.ok(((await service.handle(command(1, { id: 99 }))).text ?? "").includes("权限不足"));
+		assert.match((await service.handle(command(1, { id: 99 }))).text!, /权限不足/);
 		assert.equal((await service.handle(command(2, { id: 42, is_bot: true }))).text, null);
 		assert.equal(resets, 0);
-		assert.ok(((await service.handle(command(3, { id: 42 }))).text ?? "").includes("epoch=7"));
+		assert.match((await service.handle(command(3, { id: 42 }))).text!, /epoch=7/);
 		assert.equal(resets, 1);
 		// /task is public; cancelling one is an admin mutation like the others.
-		assert.ok(((await service.handle(command(4, { id: 99 }, "/task"))).text ?? "").includes("t1 [running]"));
-		assert.ok(((await service.handle(command(5, { id: 99 }, "/task cancel t1"))).text ?? "").includes("权限不足"));
+		assert.match((await service.handle(command(4, { id: 99 }, "/task"))).text!, /t1 \[running\]/);
+		assert.match((await service.handle(command(5, { id: 99 }, "/task cancel t1"))).text!, /权限不足/);
 		assert.deepEqual(cancelled, []);
-		assert.ok(((await service.handle(command(6, { id: 42 }, "/task cancel t1"))).text ?? "").includes("已取消 t1"));
+		assert.match((await service.handle(command(6, { id: 42 }, "/task cancel t1"))).text!, /已取消 t1/);
 		assert.deepEqual(cancelled, ["t1"]);
 		// Every command message is excluded from provider context, whatever its outcome.
 		assert.deepEqual(consumedControlMessageIds(db, CHAT), new Set([1, 2, 3, 4, 5, 6]));
+		// Callback mutations also require ownership of a real menu sent by this bot.
+		db.prepare(
+			"INSERT INTO messages (chat_id, message_id, date, first_seen_by, is_bot) VALUES (?, 100, 1, 'B', 1)",
+		).run(CHAT);
+		service.consumeReply("B", CHAT, 100);
+		const callback = (senderId: number) =>
+			parseTelegramControlCallback(
+				{
+					callback_query: {
+						id: "fixture-query",
+						data: "set:r:0.1",
+						from: { id: senderId },
+						message: { chat: { id: CHAT }, message_id: 100, from: { is_bot: true } },
+					},
+				},
+				"A",
+				CHAT,
+			)!;
+		assert.match((await service.handle(callback(42))).callbackNotice!, /菜单已失效/);
+		db.prepare("UPDATE messages SET first_seen_by = 'A' WHERE message_id = 100").run();
+		assert.match((await service.handle(callback(99))).callbackNotice!, /权限不足/);
+		assert.equal(loadConfig(root).bots[0]!.routingP, 0);
+		await service.handle(callback(42));
+		assert.equal(loadConfig(root).bots[0]!.routingP, 0.1);
 	} finally {
 		db.close();
 	}

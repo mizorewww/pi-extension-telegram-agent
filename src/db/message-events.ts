@@ -1,7 +1,6 @@
-import { transaction as atomic } from "./db.ts";
-import type { DatabaseSync as Database } from "node:sqlite";
 import { createHash } from "node:crypto";
 import type { MessageRow } from "../agent/serialize.ts";
+import type { Database } from "./db.ts";
 
 export type MessageEventKind = "message" | "edit" | "metadata" | "media_update" | "note";
 
@@ -34,26 +33,12 @@ export interface MessageEvent {
 	payload: MessageRow | MediaUpdatePayload | NotePayload;
 }
 
-interface MessageEventDbRow {
-	ingestSeq: number;
-	chatId: number;
-	messageId: number;
-	revision: number;
-	kind: MessageEventKind;
-	eventDate: number;
+interface MessageEventDbRow extends Omit<MessageEvent, "payload"> {
 	payloadJson: string;
 }
 
-function decodeEvent(row: MessageEventDbRow): MessageEvent {
-	return {
-		ingestSeq: row.ingestSeq,
-		chatId: row.chatId,
-		messageId: row.messageId,
-		revision: row.revision,
-		kind: row.kind,
-		eventDate: row.eventDate,
-		payload: JSON.parse(row.payloadJson) as unknown as MessageRow | MediaUpdatePayload | NotePayload,
-	};
+function decodeEvent({ payloadJson, ...event }: MessageEventDbRow): MessageEvent {
+	return { ...event, payload: JSON.parse(payloadJson) as MessageEvent["payload"] };
 }
 
 const EVENT_SELECT = `
@@ -94,166 +79,43 @@ export function listRecentMessageEvents(
 	return rows.reverse().map(decodeEvent);
 }
 
-/** Obligations remain addressable even after the ordinary cursor advanced past their event. */
-export function listReplyObligationEvents(db: Database, botId: string, chatId: number, limit = 64): MessageEvent[] {
-	const rows = db
-		.prepare(`${EVENT_SELECT}
-			JOIN reply_obligations o
-			  ON o.chat_id = e.chat_id AND o.message_id = e.message_id
-			WHERE o.bot_id = ? AND o.chat_id = ? AND e.kind = 'message'
-			ORDER BY e.ingest_seq
-			LIMIT ?`)
-		.all(botId, chatId, Math.max(1, Math.floor(limit))) as unknown as MessageEventDbRow[];
-	return rows.map(decodeEvent);
-}
-
-export function getConsumedSeq(db: Database, botId: string, chatId: number): number {
-	const row = db
-		.prepare("SELECT consumed_seq AS consumedSeq FROM bot_cursors WHERE bot_id = ? AND chat_id = ?")
-		.get(botId, chatId) as { consumedSeq: number } | null;
-	return row?.consumedSeq ?? 0;
-}
-
-export function setConsumedSeq(db: Database, botId: string, chatId: number, consumedSeq: number): void {
-	const current = getConsumedSeq(db, botId, chatId);
-	if (consumedSeq < current) throw new Error(`consumed cursor cannot move backwards (${consumedSeq} < ${current})`);
-	db.prepare(`
-		INSERT INTO bot_cursors (bot_id, chat_id, consumed_seq, updated_at)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(bot_id, chat_id) DO UPDATE SET
-			consumed_seq = MAX(bot_cursors.consumed_seq, excluded.consumed_seq),
-			updated_at = excluded.updated_at
-	`).run(botId, chatId, consumedSeq, Date.now());
-}
-
-export function listVisibleMessageIds(db: Database, botId: string, chatId: number, epoch: number): number[] {
-	return (
-		db
-			.prepare(`
-			SELECT message_id AS messageId
-			  FROM bot_visible_messages
-			 WHERE bot_id = ? AND chat_id = ? AND context_epoch = ?
-			 ORDER BY message_id
-		`)
-			.all(botId, chatId, epoch) as { messageId: number }[]
-	).map((row) => row.messageId);
-}
-
-export function replaceVisibleMessageIds(
-	db: Database,
-	botId: string,
-	chatId: number,
-	epoch: number,
-	messageIds: readonly number[],
-): void {
-	const replace = () =>
-		atomic(db, () => {
-			db.prepare("DELETE FROM bot_visible_messages WHERE bot_id = ? AND chat_id = ?").run(botId, chatId);
-			const insert = db.prepare(`
-			INSERT OR IGNORE INTO bot_visible_messages
-				(bot_id, chat_id, message_id, context_epoch)
-			VALUES (?, ?, ?, ?)
-		`);
-			for (const messageId of new Set(messageIds)) insert.run(botId, chatId, messageId, epoch);
-		});
-	replace();
-}
-
-export function addVisibleMessageIds(
-	db: Database,
-	botId: string,
-	chatId: number,
-	epoch: number,
-	messageIds: readonly number[],
-): void {
-	if (messageIds.length === 0) return;
-	const insert = db.prepare(`
-		INSERT OR IGNORE INTO bot_visible_messages
-			(bot_id, chat_id, message_id, context_epoch)
-		VALUES (?, ?, ?, ?)
-	`);
-	const transaction = () =>
-		atomic(db, () => {
-			for (const messageId of new Set(messageIds)) insert.run(botId, chatId, messageId, epoch);
-		});
-	transaction();
-}
-
-/** SQLite half of the Pi-session/custom-message commit; startup reconciliation closes the crash gap. */
-export function commitConsumedContext(
-	db: Database,
-	input: {
-		botId: string;
-		chatId: number;
-		consumedSeq: number;
-		epoch: number;
-		visibleMessageIds: readonly number[];
-		deliveredObligationIds: readonly number[];
-	},
-): void {
-	const transaction = () =>
-		atomic(db, () => {
-			setConsumedSeq(db, input.botId, input.chatId, input.consumedSeq);
-			replaceVisibleMessageIds(db, input.botId, input.chatId, input.epoch, input.visibleMessageIds);
-			const removeObligation = db.prepare(`
-			DELETE FROM reply_obligations
-			 WHERE bot_id = ? AND chat_id = ? AND message_id = ?
-		`);
-			for (const messageId of new Set(input.deliveredObligationIds)) {
-				removeObligation.run(input.botId, input.chatId, messageId);
-			}
-		});
-	transaction();
-}
-
 /** Append immutable provider deltas for every canonical message that references this media. */
 export function appendMediaUpdateEvents(db: Database, fileUniqueId: string, text: string): number {
 	const normalized = text.trim();
 	if (!normalized) return 0;
-	const rows = db
-		.prepare(`
-			SELECT chat_id AS chatId, message_id AS messageId, date,
-			       COALESCE(json_extract(media, '$.kind'), 'media') AS mediaKind
-			  FROM messages
-			 WHERE json_extract(media, '$.file_unique_id') = ?
-		`)
-		.all(fileUniqueId) as { chatId: number; messageId: number; date: number; mediaKind: string }[];
 	const revisionHex = createHash("sha256").update(normalized).digest("hex").slice(0, 12);
-	const revision = Number.parseInt(revisionHex, 16);
-	const insert = db.prepare(`
+	const result = db
+		.prepare(`
 		INSERT OR IGNORE INTO message_events
 			(event_key, chat_id, message_id, revision, kind, event_date, payload_json)
-		VALUES (?, ?, ?, ?, 'media_update', ?, ?)
-	`);
-	let changes = 0;
-	const transaction = () =>
-		atomic(db, () => {
-			for (const row of rows) {
-				const result = insert.run(
-					`media:${row.chatId}:${row.messageId}:${revisionHex}`,
-					row.chatId,
-					row.messageId,
-					revision,
-					Math.max(row.date, Math.floor(Date.now() / 1000)),
-					JSON.stringify({ file_unique_id: fileUniqueId, media_kind: row.mediaKind, text: normalized }),
-				);
-				changes += Number(result.changes);
-			}
-		});
-	transaction();
-	return changes;
+		SELECT 'media:' || chat_id || ':' || message_id || ':' || ?,
+			chat_id, message_id, ?, 'media_update', MAX(date, ?),
+			json_object('file_unique_id', ?, 'media_kind', COALESCE(json_extract(media, '$.kind'), 'media'), 'text', ?)
+		FROM messages
+		WHERE media IS NOT NULL AND CAST(json_extract(media, '$.file_unique_id') AS TEXT) = ?
+	`)
+		.run(
+			revisionHex,
+			Number.parseInt(revisionHex, 16),
+			Math.floor(Date.now() / 1000),
+			fileUniqueId,
+			normalized,
+			fileUniqueId,
+		);
+	return Number(result.changes);
 }
 
 /** One real message of the group; control commands and their replies do not count. */
 export function groupMessage(db: Database, chatId: number, messageId: number): MessageRow | null {
-	return db
+	const row = db
 		.prepare(
 			`SELECT m.* FROM messages m
 			  WHERE m.chat_id = ? AND m.message_id = ?
 			    AND NOT EXISTS (SELECT 1 FROM telegram_control_messages c
 			                     WHERE c.chat_id = m.chat_id AND c.message_id = m.message_id)`,
 		)
-		.get(chatId, messageId) as unknown as MessageRow | null;
+		.get(chatId, messageId) as unknown as MessageRow | undefined;
+	return row ?? null;
 }
 
 /** Notes belong to one bot; every other bot's cursor just passes over them. */
@@ -277,39 +139,4 @@ export function appendNoteEvent(
 		`)
 		.run(`note:${key}`, chatId, messageId, Math.floor(Date.now() / 1000), JSON.stringify(payload));
 	return result.changes > 0 ? Number(result.lastInsertRowid) : null;
-}
-
-export interface SessionManifest {
-	botId: string;
-	sessionId: string;
-	sessionFile: string;
-	contextFingerprint: string;
-	createdAt: number;
-}
-
-export function getSessionManifest(db: Database, botId: string): SessionManifest | null {
-	return db
-		.prepare(`
-		SELECT bot_id AS botId,
-		       session_id AS sessionId,
-		       session_file AS sessionFile,
-		       context_fingerprint AS contextFingerprint,
-		       created_at AS createdAt
-		  FROM bot_session_manifest
-		 WHERE bot_id = ?
-	`)
-		.get(botId) as unknown as SessionManifest | null;
-}
-
-export function setSessionManifest(db: Database, manifest: SessionManifest): void {
-	db.prepare(`
-		INSERT INTO bot_session_manifest
-			(bot_id, session_id, session_file, context_fingerprint, created_at)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(bot_id) DO UPDATE SET
-			session_id = excluded.session_id,
-			session_file = excluded.session_file,
-			context_fingerprint = excluded.context_fingerprint,
-			created_at = excluded.created_at
-	`).run(manifest.botId, manifest.sessionId, manifest.sessionFile, manifest.contextFingerprint, manifest.createdAt);
 }

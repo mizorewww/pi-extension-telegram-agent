@@ -2,7 +2,7 @@
 
 ## 1. 准备本机
 
-需要 [Node.js 24+](https://nodejs.org/) 和本机安装的 Pi（`pi --version` 能运行）。
+需要 [Node.js 24+](https://nodejs.org/) 和本机安装的 Pi（`pi --version` 能运行）。daemon 和测试只使用 Node；仓库依赖中的 Pi 各包精确锁定 1.5.0，用 `npm ci` 安装。
 
 ```bash
 git clone https://github.com/mizorewww/pi-extension-telegram-agent.git
@@ -31,7 +31,7 @@ token 等于 bot 的密码：不要发进群、issue 或 Git。
 1. `/login` 登录模型提供商；
 2. `/model` 选择默认模型。
 
-模型认证只保存在 Pi 里，不会写进本仓库。默认配置不看图，任何聊天模型都可以；之后如果把 `media.mode` 改成 `"hybrid"`，主模型必须支持图片输入。
+模型认证只保存在 Pi 里，不会写进本仓库。默认配置不看图，选择 Pi 已认证且窗口足够的聊天模型；之后如果把 `media.mode` 改成 `"hybrid"`，主模型必须支持图片输入。
 
 ## 4. 写配置
 
@@ -61,6 +61,6 @@ daemon 在前台运行，Ctrl-C 停止；长期运行请交给 systemd，见[日
 
 起不来时终端会给出原因，常见的是 token 错误、网络不通、bot 不在群里或所选模型不在 Pi 目录里，见[故障排查](troubleshooting.md)。
 
-之后改配置：直接编辑 `telegram.config.ts`，然后重启 daemon。
+之后手工改配置需重启 daemon；群内 `/set` 与 `/model` 会立即应用并写回同一个文件，不需要手工编辑。更新仓库后先运行 `npm ci && npm run build` 再重启。
 
 下一步：[配置与添加 bot](configuration.md)。

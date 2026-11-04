@@ -1,80 +1,63 @@
 # Design and philosophy
 
-This chapter explains why the bot is built the way it is. It is not a help desk or "an API that chats"; it is a member of the group: it has a personality, it can stay quiet, it always answers when addressed, and it can roll up its sleeves when needed. Each principle below matches a real trade-off in the code.
+This project makes group chat another entry point for Pi: deterministic code handles Telegram transport and routing, while Pi handles conversations, models and tools. The goal is a thin wrapper that stays small to maintain.
 
-## 1. Code decides when to speak; the model decides what to say
+## 1. Code decides when to speak
 
-Whether a model is called at all is decided by local, deterministic code: mentions, replies and names always trigger; an ordinary message goes to at most one bot by probability, and is skipped — not handed to another bot — if that bot is busy or cooling down. Bots see each other but do not trigger each other by default.
+Mentions, replies and configured names explicitly trigger a bot. An ordinary message reaches at most one bot by probability; busy or cooling-down bots are skipped without rerouting. Bots do not trigger one another unless an admin enables `/fire`.
 
-Being addressed creates a durable **reply obligation** that is only settled once the bot actually posts in the group. Provider errors, daemon restarts and compaction never drop it; a bot that stays silent gets at most one nudge. Conversely, when the outcome of a Telegram send is unknown it is **never retried**: an occasional missed line is better than spam.
+Pending direct replies live in a Pi document across restarts and compaction. If a healthy generation finishes without posting, it gets at most one repair prompt; continued silence waits for another input. An unknown Telegram send outcome is never retried and settles the pending material seen by that run, avoiding duplicates.
 
-## 2. Three worlds, kept apart
+## 2. Telegram, the archive and Pi conversations have separate jobs
 
-1. **The Telegram group** is only the transport; it is not used to restore history.
-2. **SQLite** is the source of truth: every message, edit, media description and background result seen since start is recorded as append-only events.
-3. **Pi / the LLM** sees a bounded, condensed context only when it needs to think.
+1. Telegram transports messages; it is not a source for recovering history.
+2. `data/agent.db` stores immutable group-message, edit, quote and media-description events for routing and `tg_messages` search.
+3. Pi Durable owns conversations, queues, background tasks and cumulative usage in `data/pi/<bot>.sqlite`.
 
-The model's context is projected from the database, not pulled live from Telegram. That is why a restart picks up the conversation, and why old messages are looked up with `tg_messages` instead of stuffing the whole group into the prompt.
+Each batch is admitted to Pi once. The archive can be much larger than the current model context. Recovery relies on local persisted state, so back up the whole `data/` directory.
 
-## 3. Minimal: one design, no compatibility layers
+## 3. Pi-native first
 
-- Configuration has one source: `telegram.config.ts`, plus Pi's own settings and the secrets in `.env`.
-- Design changes land in one step, without keeping old fields, old modes or migration ladders. There is one production deployment; an old database simply fails to open, which is less error-prone than maintaining migrations.
-- Deleting code beats adding abstractions; defensive code only guards branches that can really happen.
+Pi 1.5.0 supplies persistence, steering, retries, compaction, child conversations, background tool tasks, usage accounting, coding tools, image processing and codemode. Research tasks read a workflow's `AGENTS.md` and share the main bot's isolated work box; they no longer start another Pi CLI or use custom task RPC.
 
-## 4. Pi-native first
+The wrapper keeps Telegram-specific routing, decisions about retrying a public send, admin commands, hybrid description caching, search and rootless Docker deployment. A whole-stream provider deadline and proxy HTTP 413 normalization remain small adapters because Pi 1.5.0 does not cover those real failure boundaries.
 
-Everything Pi can do is left to Pi: sessions and persistence, retries, compaction hooks, the steering queue, the model catalog and auth, image resizing, and the codemode sandbox (background jobs reuse Pi's `CodemodeSandbox` directly).
+Pi Durable remains an experimental API. All Pi packages are pinned exactly to 1.5.0; upgrades must move together and verify recovery and sending behavior.
 
-What is hand-written is only what Pi lacks, or where Pi's version does not fit a cache-sensitive, multi-bot, sandboxed daemon:
+## 4. Avoid unnecessary model spending
 
-| Hand-written | Why not Pi's |
-|---|---|
-| Summarizer | Pi's uses a fixed English template, cannot take images and keeps thinking; kept speculation once turned a misreading into a "fact" inherited summary after summary |
-| Provider watchdog | Pi's `timeoutMs` only works for SDKs that support it; it is not a deadline for the whole stream |
-| Session trimming | Pi has no public trimming API |
-| RPC framing for tasks | Pi's `RpcClient` hardcodes a `node` child process and cannot run `docker run` |
+- Routing, status and administration use code; `/compact` is the command that calls a model.
+- Within a context segment, system instructions, persona, tools and existing inputs stay fixed while new messages append. Compaction, model changes and `/new` establish a new prefix.
+- Group events and pending replies share a bounded character budget. Search returns short results, pages are read incrementally, and scripts filter output before returning it to the model.
+- Hybrid describes each media item once and shares the result across bots. The main model opens an original only for details. Pi persists native image bytes, without an external image-reference protocol.
+- Compaction uses the current chat model and reasoning effort with a fixed 16,384-token reserve and no early background compaction. Native summaries omit images and thinking; encrypted-signature costs and oversized summaries still have limits.
+- A final standalone `send` can end the turn; progress sends inside codemode can continue working. Only send posts to the group.
 
-Some Pi features are deliberately unused: switching tool sets mid-session, `context_edit` and in-session model changes all rewrite a prefix that was already sent and break the cache; skills and prompt templates add bytes to the system prompt, so they are off.
+`/status` reports Pi's cumulative usage, including children and history; `/new` does not clear it. Zero catalog prices do not mean free service: the provider's bill is authoritative.
 
-## 5. Don't pay for nothing
+## 5. Prompts supply group-chat semantics
 
-Never spend tokens on what deterministic code can do; estimate cache hit rate and new tokens per turn before adding a feature.
+The persona describes personality and response style. Pi's native schemas explain tool arguments. The prompt adds group-message grammar, public-send policy and the source repository, without repeating a complete tool tutorial. A bot can read its own code to explain its implementation.
 
-1. **No model call when none is needed.** Routing, history browsing, usage and group admin commands never reach a model.
-2. **Strict prefixes.** The system prompt, persona, sticker catalog and tool descriptions stay byte-for-byte identical; new content is only appended, so every request is a strict prefix of the next. Measured: follow-up requests within a turn miss only about 780 tokens on average, while rewriting the prefix costs over ten thousand extra tokens even less than 30 seconds later.
-3. **Only what each turn needs.** Full history lives in the local database; each turn sends a bounded batch of new messages (12,000 tokens by default), direct mentions first; near the threshold a cheap summary model compacts it.
-4. **Media is processed once.** However many bots see an image, it is described once and reused; videos are reduced to 1–3 frames. The model normally reads text descriptions and opens the original with `view_image` only when it wants a closer look.
-5. **Bounded tool output.** A search returns at most five short results, a web page is read one page at a time, and a script hands the model only its filtered result.
-6. **Posting ends the turn.** A successful direct `send` ends the turn at once, without an extra request to "confirm".
+Each batch's sticker candidates appear as a separate system note at a fixed position after that batch, only in model requests. They never enter persisted user content, so native compaction cannot mistake them for something a group member said.
 
-Some providers list a price of zero (subscriptions); the cost shown then is not your bill, so check your provider account.
+## 6. Safety comes from mechanisms
 
-## 6. Give abilities and examples, not rules
+- Codemode runs in a Pi QuickJS worker without host APIs, direct network or file access; it can call only permitted tools.
+- Native read/write/edit/bash enter rootless Docker through pi-env: no host directories or credentials, a read-only root, resource limits and a separate `/work` volume. Sending files adds path and size checks.
+- Search refuses private, loopback and cloud-metadata addresses.
+- State-changing commands verify numeric admin IDs; control messages never enter model context.
+- Restart recovery follows Pi's tool replay rules. Unsafe work that started but has an unknown outcome is not blindly repeated. `/new` waits for old work to stop before resetting.
 
-- A bot is only told about the tools it really has, and says plainly when it cannot do something.
-- The persona describes personality and style only; how to use each tool is written under that tool, with plenty of copyable examples, all of which have been run against the real tools.
-- Limits exist only where there is real risk. Caps and windows added to make the bot "hold back" only made it refuse reasonable requests in practice, and have all been removed; the remaining caps only stop runaway loops and are not mentioned in the prompt.
-- Exploration is encouraged: the bot knows its own source repository and reads the code when asked how it works.
+## 7. Think first, then write
 
-## 7. Safety comes from mechanisms, not prompts
+Check whether Pi can own a responsibility before adding code. Delete duplicate mechanisms before introducing abstractions; keep no legacy fields or parallel execution paths. Configuration consists of `telegram.config.ts`, Pi settings and `.env`; `/set` and `/model` validate and atomically write back to that same configuration.
 
-Prompts can be talked around, so the boundaries are mechanical:
+No TDD or piles of tests that pin implementation details. Keep cache, zero-network and important security guards; use type checking, offline native execution and explicitly authorized real-service validation to check behavior.
 
-- **codemode scripts** run in Pi's QuickJS VM with no network, file system or host APIs, and can only call the tools opened to scripts.
-- **The work box** is a per-bot rootless Docker container under its own system user: no host mounts, all capabilities dropped, a read-only root file system and a single `/work` volume, wiped every Monday and on demand with `/box reset`. It holds no credentials.
-- **search** only reaches public HTTP(S); private, loopback and cloud-metadata addresses are refused.
-- **Group commands that change state** are for human admins only, and command messages never enter the model's context.
+## Deliberate limits
 
-The few tests left in `test/` guard exactly these boundaries and the cache invariant.
-
-## 8. Think first, then write
-
-No TDD. First think the design through — which layer owns it, whether it rewrites a cached prefix, whether Pi already has it — then write the code. Correctness comes from type checking, real runs on the server, and an e2e run of the prompt's examples against the real tools, not from piles of unit tests that pin implementation details.
-
-## Things it deliberately does not do
-
-- It does not post Telegram Rich Messages: outdated clients cannot see them, and the Bot API reports no error.
-- It does not open links in the group automatically; it reads one only when it decides to use `search`.
-- One deployment serves one group; more groups use separate clones, with no second namespace.
-- It never resends when the outcome of a send is unknown.
+- No Telegram Rich Message output, so older clients can read replies.
+- No automatic opening of group links.
+- One deployment serves one group; another group uses a separate directory and tokens.
+- No retry when a Telegram send's outcome is unknown.

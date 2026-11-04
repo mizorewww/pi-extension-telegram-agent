@@ -8,7 +8,7 @@
 
 1. 在 BotFather 创建 bot，关闭 group privacy，把它加进你的 supergroup。
 2. 运行 `pi`，用 Pi 的 `/login` 和 `/model` 选好模型。
-3. 复制 `telegram.config.example.ts` 为 `telegram.config.ts`，填群 ID 和 bot，token 写进 `.env`；`npm start` 启动后去群里 @ 它试试，或发 `/status` 查看状态。
+3. 复制 `telegram.config.example.ts` 为 `telegram.config.ts`，填群 ID 和 bot，token 写进 `.env`；先 `npm ci && npm run build`，再 `npm start` 启动后去群里 @ 它试试，或发 `/status` 查看状态。
 
 ## 章节
 
@@ -21,6 +21,6 @@
 
 ## 你需要知道的边界
 
-- 真正的聊天与控制都发生在 Telegram 群里；Pi 只用于管理模型凭据与底层 SDK 运行时。
+- 真正的聊天与控制都发生在 Telegram 群里；Pi Durable 管理模型认证、会话、工具、后台任务和持久化恢复。
 - 一份部署对应一个群。要接入第二个群，用另一个独立的 clone。
 - `telegram.config.ts` 是会被执行的本机代码，只放你自己写的内容。
