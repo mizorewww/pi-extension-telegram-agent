@@ -1,7 +1,7 @@
 // Cache-visible protocol: changes start a new context epoch.
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 49; // New-session admission and body-first, batch-aware history rendering.
+export const CACHE_SCHEMA_VERSION = 50; // Fixed model tool schemas; code mode lists only names and return types.
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
 
 interface EnabledTools {

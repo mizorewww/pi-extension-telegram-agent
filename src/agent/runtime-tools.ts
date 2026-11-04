@@ -186,7 +186,7 @@ export async function buildBotRuntimeTools(
 		tools.push(
 			defineTool({
 				...CODEMODE_TOOL_DEFS[0],
-				callers: ["tools"],
+				callers: ["model", "tools"],
 				replay: "safe",
 				execute: async (args) =>
 					structured(queryMessages(host.db, host.config.groupChatId, args) as unknown as JsonValue),
@@ -196,13 +196,13 @@ export async function buildBotRuntimeTools(
 		tools.push(
 			defineTool({
 				...CODEMODE_TOOL_DEFS[1],
-				callers: host.bot.tools.codemode ? ["tools"] : ["model", "tools"],
+				callers: ["model", "tools"],
 				replay: "safe",
 				execute: async (args, _api, context) => structured(await download(host, args.message_id, context.abortSignal)),
 			}),
 			defineTool({
 				...CODEMODE_TOOL_DEFS[2],
-				callers: host.bot.tools.codemode ? ["tools"] : ["model", "tools"],
+				callers: ["model", "tools"],
 				execute: async () => {
 					await host.resetBox("tool");
 					return structured({ reset: true });

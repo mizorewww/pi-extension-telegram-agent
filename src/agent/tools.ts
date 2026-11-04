@@ -65,19 +65,47 @@ const nullable = <T extends Parameters<typeof Type.Union>[0][number]>(value: T) 
 export const CODEMODE_TOOL_DEFS = [
 	{
 		name: "tg_messages",
-		description:
-			"Read this group's archived messages, excluding control messages. Filter and page here, then summarize only needed fields in code. ids are usable by send, view_image and tg_download. Default newest first; next_before_id/next_after_id continue paging.",
+		description: `查询本群已归档消息，包括当前上下文之外的历史，排除控制命令及其回复。所有筛选条件取交集；不提供筛选时读取最近消息。返回 rows 和翻页游标；rows[].id 可用于 send.reply_to、view_image、tg_download。昵称匹配本群历史 display_name，找到发送者后查询其更名前后的历史；同名多人都会返回，先看 rows[].sender.id，再按数字 ID 缩小范围。
+
+直接调用 tg_messages 的参数示例（替换为真实昵称、ID、日期）：
+- 昵称：{"sender":"小明","limit":20}。
+- 用户名：{"sender":"@Alice"}；用户 ID：{"sender":123456789}；群内别名：{"sender":"u12"}。字符串 "123" 是昵称，不是 ID。
+- 时间与关键词：{"sender":"小明","since":"2026-11-04T00:00:00+08:00","until":"2026-11-05T00:00:00+08:00","text_contains":"部署","order":"asc"}。since 含边界，until 不含；关键词是正文/说明文字的字面子串，不是语义搜索。
+- 查询一条消息及其回复：先 {"ids":[18452]}，再 {"reply_to":18452,"order":"asc"}；reply_to 只查直接回复。
+- 查图片：{"sender":"@alice","has_media":"photo","limit":20}。
+- 向过去翻页：先 {"sender":"小明","limit":20}；假设返回 next_before_id=18452，下一页用 {"sender":"小明","limit":20,"before_id":18452}。实际必须使用返回游标并保留筛选。升序同理：假设 next_after_id=18500，则 {"sender":"小明","order":"asc","limit":20,"after_id":18500}。游标为 null 就停止。relevance 无翻页游标，应缩小筛选或提高 limit。
+
+也可在 codemode 中调用：const page = await tools.tg_messages({sender:"小明",text_contains:"部署",limit:20}); text(page.rows.map(({id,date,sender,text}) => ({id,date,sender,text}))); text({next_before_id:page.next_before_id}); 只输出所需字段；不要因为一页没有更早记录就断言整个历史没有。`,
 		parameters: Type.Object(
 			{
-				ids: Type.Optional(Type.Array(Type.Integer(), { minItems: 1, maxItems: 1000 })),
-				since: Type.Optional(Type.String({ description: "Inclusive ISO date/time" })),
-				until: Type.Optional(Type.String({ description: "Exclusive ISO date/time" })),
-				before_id: Type.Optional(Type.Integer()),
-				after_id: Type.Optional(Type.Integer()),
-				sender: Type.Optional(
-					Type.Union([Type.Integer(), Type.String()], { description: "User id, @username or u<N> alias" }),
+				ids: Type.Optional(
+					Type.Array(Type.Integer(), {
+						minItems: 1,
+						maxItems: 1000,
+						description: "本群消息 #id 列表；仍与其他条件取交集。",
+					}),
 				),
-				reply_to: Type.Optional(Type.Integer()),
+				since: Type.Optional(
+					Type.String({
+						description: "起始时间，包含边界；ISO日期/时间，建议显式时区，如 2026-11-04T00:00:00+08:00。",
+					}),
+				),
+				until: Type.Optional(Type.String({ description: "截止时间，不含边界；查完整一天时填次日零点并显式时区。" })),
+				before_id: Type.Optional(
+					Type.Integer({ description: "只查小于此消息ID的记录；降序翻页传上一页 next_before_id。" }),
+				),
+				after_id: Type.Optional(
+					Type.Integer({ description: "只查大于此消息ID的记录；升序翻页传上一页 next_after_id。" }),
+				),
+				sender: Type.Optional(
+					Type.Union([Type.Integer(), Type.String({ minLength: 1 })], {
+						description:
+							"数字=用户ID；@username=用户名；u<N>=群内别名；其他字符串=历史昵称。用户名和昵称的ASCII字母忽略大小写，其余Unicode、空格原样匹配，不做归一化。数字字符串仍是昵称。用户名须带@；昵称与保留写法冲突时用数字ID。",
+					}),
+				),
+				reply_to: Type.Optional(
+					Type.Integer({ description: "只查直接回复此消息 #id 的消息，不含被回复的原消息或多级回复。" }),
+				),
 				has_media: Type.Optional(
 					Type.Union([
 						Type.Literal("photo"),
@@ -87,8 +115,17 @@ export const CODEMODE_TOOL_DEFS = [
 						Type.Literal("any"),
 					]),
 				),
-				text_contains: Type.Optional(Type.String({ minLength: 1 })),
-				order: Type.Optional(Type.Union([Type.Literal("desc"), Type.Literal("asc"), Type.Literal("relevance")])),
+				text_contains: Type.Optional(
+					Type.String({
+						minLength: 1,
+						description: "正文或caption含此字面子串；%和_不作通配符。不搜索昵称或媒体视觉描述。",
+					}),
+				),
+				order: Type.Optional(
+					Type.Union([Type.Literal("desc"), Type.Literal("asc"), Type.Literal("relevance")], {
+						description: "默认desc（消息ID倒序）；asc正序；relevance要求text_contains至少3个字符且不支持游标翻页。",
+					}),
+				),
 				limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 2000, default: 100 })),
 			},
 			{ additionalProperties: false },

@@ -6,9 +6,13 @@ import { readFileSync } from "node:fs";
 import type { Message } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { projectStickerNotes } from "../src/media/sticker-catalog.ts";
-import { createRegistry } from "@earendil-works/pi-durable";
+import { createRegistry, Harness, MemoryStorage } from "@earendil-works/pi-durable";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { createModels } from "@earendil-works/pi-ai/models";
+import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { telegramCodemode } from "../src/agent/extensions/codemode.ts";
+import { buildBotRuntimeTools, type BotRuntimeToolHost } from "../src/agent/runtime-tools.ts";
 import { serializeMessageEvents, type MessageRow } from "../src/agent/serialize.ts";
 import { buildSystemPrompt, sha256Short, CACHE_SCHEMA_VERSION, REPLY_RECOVERY_PROMPT } from "../src/agent/prompt.ts";
 import {
@@ -21,16 +25,18 @@ import {
 } from "../src/agent/tools.ts";
 process.env.TZ = "Asia/Singapore";
 const GOLDEN = {
-	schemaVersion: 49,
+	schemaVersion: 50,
 	systemZhTemplate: "b4bf0da548c6",
 	systemEnTemplate: "be0f71c64253",
 	systemSandboxTemplate: "96dc5a0c4fed",
 	tools: "ef7452437b67",
-	codemodeTools: "ec14052fd2bc",
+	codemodeTools: "da2dc067d740",
 	sendWithFiles: "93313ad52eea",
 	taskTool: "8fcbd3a5b98d",
 	jobTool: "78e6689e8118",
 	nativeTools: "19524518f475",
+	fixedOfferedTools: "14ad9c46d9f8",
+	fixedCodemodeSection: "3745e9a802d5",
 	replyRecovery: "4fc7e277e338",
 	eventSerialize: "a05c0584eb08",
 	boundedBatchSerialize: "0311b765bbce",
@@ -41,11 +47,40 @@ function schemaDb() {
 	db.exec(readFileSync("src/db/schema.sql", "utf8"));
 	return db;
 }
-test("prompt and native tool protocol hashes are stable", () => {
+test("prompt and native tool protocol hashes are stable", async () => {
 	const allTools = { send: true, search: true, codemode: true, sandbox: false, tasks: false, viewImage: false };
 	const registry = createRegistry();
 	registry.install(CodingTools);
 	registry.install(telegramCodemode());
+	const full = createRegistry();
+	const { extensions } = await buildBotRuntimeTools({
+		bot: { id: "fixture", tools: { ...allTools, sandbox: true, tasks: true, viewImage: true } },
+		box: {},
+		config: { tasks: { workflows: { search: "/fixture" } } },
+	} as unknown as BotRuntimeToolHost);
+	for (const extension of extensions) full.install(extension);
+	const models = createModels();
+	const faux = fauxProvider({ tokensPerSecond: 100_000 });
+	models.setProvider(faux.provider);
+	faux.setResponses([fauxAssistantMessage("done")]);
+	const harness = await Harness.open(new MemoryStorage(), { models, registry: full }, BACKGROUND_CONTEXT);
+	let fixedOfferedTools: string;
+	let fixedCodemodeSection: string;
+	try {
+		const conversation = await harness.root(BACKGROUND_CONTEXT, {
+			agent: { model: { provider: faux.provider.id, modelId: faux.models[0].id } },
+		});
+		fixedOfferedTools = toolProtocolHash((await conversation.agent(BACKGROUND_CONTEXT)).tools);
+		await (await conversation.submit({ type: "input", content: "fixture" }, BACKGROUND_CONTEXT)).wait(
+			BACKGROUND_CONTEXT,
+		);
+		const messages = (await conversation.context(BACKGROUND_CONTEXT)).messages;
+		const section = messages.find((message) => message.role === "system" && message.sections?.codemode);
+		assert.ok(section?.role === "system" && section.sections?.codemode);
+		fixedCodemodeSection = sha256Short(section.sections.codemode);
+	} finally {
+		await harness.close(BACKGROUND_CONTEXT);
+	}
 	const actual = {
 		schemaVersion: CACHE_SCHEMA_VERSION,
 		systemZhTemplate: sha256Short(buildSystemPrompt(readFileSync("personas/template.zh.md", "utf8"), allTools)),
@@ -64,6 +99,8 @@ test("prompt and native tool protocol hashes are stable", () => {
 				.tools()
 				.map(({ tool }) => tool),
 		),
+		fixedOfferedTools,
+		fixedCodemodeSection,
 		replyRecovery: sha256Short(REPLY_RECOVERY_PROMPT),
 		eventSerialize: GOLDEN.eventSerialize,
 		boundedBatchSerialize: GOLDEN.boundedBatchSerialize,
