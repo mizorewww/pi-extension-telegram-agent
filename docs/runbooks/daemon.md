@@ -11,7 +11,7 @@ systemctl --user start telegram-agent
 systemctl --user restart telegram-agent     # 改 telegram.config.ts、.env 或 persona 后
 systemctl --user stop telegram-agent
 systemctl --user status telegram-agent
-bun run start                               # 前台运行（没有 systemd 的机器、调试），Ctrl-C 停止
+npm run build && npm start                 # 前台运行（没有 systemd 的机器、调试），Ctrl-C 停止
 ```
 
 - 配置不热重载，改配置后重启。群内 `/set`、`/model`、`/new` 立即生效，无需重启。
@@ -34,8 +34,8 @@ StartLimitBurst=5
 Type=simple
 WorkingDirectory=/home/<user>/pi-extension-telegram-agent
 # 每次（重）启动前轮转日志（8 MiB × 3 代）
-ExecStartPre=/usr/bin/bun -e "import('./src/observability/log.ts').then((m) => m.rotateLogFile('data/daemon.log'))"
-ExecStart=/bin/sh -c 'exec /usr/bin/bun run src/daemon/index.ts >> data/daemon.log 2>&1'
+ExecStartPre=/usr/bin/node -e "import('./dist/src/observability/log.js').then((m) => m.rotateLogFile('data/daemon.log'))"
+ExecStart=/bin/sh -c 'exec /usr/bin/node dist/src/daemon/index.js >> data/daemon.log 2>&1'
 # 日志与 shell 新建的文件只对本用户可读
 UMask=0077
 Restart=on-failure
@@ -52,7 +52,7 @@ sudo loginctl enable-linger <user>          # 未登录时也随开机启动
 systemctl --user restart telegram-agent     # 部署新代码后
 ```
 
-- 用 systemd 托管时**不要**再 `bun run start` 另起一个：两个 daemon 会争抢同一 token（Telegram 409）。
+- 用 systemd 托管时**不要**再 `npm run start` 另起一个：两个 daemon 会争抢同一 token（Telegram 409）。
 - `systemctl --user stop` 是干净退出。5 分钟内失败 5 次后 systemd 停止重启（例如 token 失效），修好后 `systemctl --user reset-failed telegram-agent` 再启动。
 - 整机 OOM 连 user manager 一起杀掉时，`Restart` 与 linger 都救不回来；先找资源耗尽的来源。
 
@@ -62,8 +62,9 @@ Pi 升级到 1.5.0 时，宿主依赖与任务镜像必须一起更新（镜像�
 
 ```bash
 git pull --ff-only
-bun install --frozen-lockfile
-bun test && bun run check
+npm ci
+npm run build
+npm test && npm run check
 systemctl --user restart telegram-agent
 systemctl --user status telegram-agent
 ```
@@ -73,7 +74,7 @@ cache-visible 变化或 Pi 版本变化会让每个 bot 新建 session（日志 
 ## 观察
 
 ```bash
-bun run debug -- --since 30m          # 只读诊断报告，见 debugging-guide
+npm run debug -- --since 30m          # 只读诊断报告，见 debugging-guide
 tail -f data/daemon.log               # JSONL 结构化日志，不含正文
 ```
 
@@ -107,9 +108,9 @@ bot 的上下文被带偏（例如反复纠结某个误解）时，管理员在�
 以下脚本会调用真实 provider 与 Telegram，可能产生费用和群消息，必须用 `--bot` 指定 bot：
 
 ```bash
-bun run scripts/smoke-pi.ts --bot <id>
-bun run scripts/e2e-agent.ts --bot <id>
-bun run scripts/e2e-compaction.ts --bot <id>
+node dist/scripts/smoke-pi.js --bot <id>
+node dist/scripts/e2e-agent.js --bot <id>
+node dist/scripts/e2e-compaction.js --bot <id>
 ```
 
 运行前记录目标 bot、预期副作用和回滚步骤。

@@ -1,7 +1,8 @@
+import { transaction as atomic } from "../db/db.ts";
 // Long-polling loop for one bot token. Offset persisted in bot_state.
 // Reconnects with backoff on network/API errors; honors retry_after.
 
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import { errorCategory, log } from "../observability/log.ts";
 import { type BotApi, TelegramApiError } from "./api.ts";
 import { ingestUpdate, type IngestResult } from "./ingest.ts";
@@ -97,16 +98,16 @@ export class Poller {
 					// selection; callbacks never become chat messages or route to an LLM.
 					if ((update as { callback_query?: unknown }).callback_query && updateId >= this.offset())
 						await this.onCallback?.(update, this.botId);
-					this.db.transaction(() => {
+					atomic(this.db, () => {
 						const result = ingestUpdate(this.db, this.botId, update, this.groupChatId);
 						if (result.kind === "inserted" || result.kind === "edited" || result.kind === "enriched") {
 							this.db
-								.query(`INSERT INTO pending_telegram_dispatch
+								.prepare(`INSERT INTO pending_telegram_dispatch
                                 (bot_id, update_id, kind, chat_id, message_id, route_version) VALUES (?, ?, ?, ?, ?, ?)`)
 								.run(this.botId, updateId, result.kind, result.chatId!, result.messageId!, result.routeVersion!);
 						}
 						setBotState(this.db, this.botId, OFFSET_KEY, String(updateId + 1));
-					})();
+					});
 					ingestFailures = 0;
 					if (!(await this.deliverPending())) {
 						batchFailed = true;
@@ -143,17 +144,17 @@ export class Poller {
 	/** Acknowledge only after routing/control accepts the durable handoff. No Telegram refetch required. */
 	private async deliverPending(): Promise<boolean> {
 		const pending = this.db
-			.query(`SELECT p.update_id updateId, p.kind, p.chat_id chatId,
+			.prepare(`SELECT p.update_id updateId, p.kind, p.chat_id chatId,
             p.message_id messageId, p.route_version routeVersion, r.json
             FROM pending_telegram_dispatch p JOIN raw_updates r USING (bot_id, update_id)
             WHERE p.bot_id = ?`)
-			.get(this.botId) as (IngestResult & { updateId: number; json: string }) | null;
+			.get(this.botId) as unknown as (IngestResult & { updateId: number; json: string }) | null;
 		if (!pending) return true;
 		try {
 			const { updateId, json, ...result } = pending;
 			await this.onMessage(result, JSON.parse(json), this.botId);
 			this.db
-				.query("DELETE FROM pending_telegram_dispatch WHERE bot_id = ? AND update_id = ?")
+				.prepare("DELETE FROM pending_telegram_dispatch WHERE bot_id = ? AND update_id = ?")
 				.run(this.botId, updateId);
 			return true;
 		} catch (error) {

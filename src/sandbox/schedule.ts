@@ -2,7 +2,7 @@
 // Asia/Singapore in production). The last reset time is durable, so a daemon that was down at
 // the boundary resets on its next check and a restart never resets twice.
 
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import { getDaemonState, setDaemonState } from "../db/db.ts";
 import { log } from "../observability/log.ts";
 

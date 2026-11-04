@@ -1,8 +1,9 @@
+import assert from "node:assert/strict";
 // Codemode boundary: scripts get no host capabilities and reach only callable tools.
 
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { expect, test } from "bun:test";
+import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -132,10 +133,10 @@ async function runScript(
 	}
 }
 
-test("codemode scripts have no host capabilities but reach codemode tools", async () => {
+test("codemode scripts have no host capabilities but reach codemode tools", { timeout: 30_000 }, async () => {
 	const result = await runScript(
 		"return [typeof fetch, typeof process, typeof require, typeof Bun, await tools.probe({})].join(',')",
 	);
-	expect(result.text).toContain("undefined,undefined,undefined,undefined,pong");
-	expect(result.declared.sort()).toEqual(["codemode", "send"]);
-}, 30_000);
+	assert.ok(result.text.includes("undefined,undefined,undefined,undefined,pong"));
+	assert.deepEqual(result.declared.sort(), ["codemode", "send"]);
+});

@@ -22,7 +22,7 @@ globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
 		return nativeFetch(input, init);
 	}
 	if ((target.protocol === "http:" || target.protocol === "https:") && !isLoopback(target.hostname)) {
-		return Promise.reject(new Error("external network is disabled in bun test"));
+		return Promise.reject(new Error("external network is disabled in npm test"));
 	}
 	return nativeFetch(input, init);
 }) as typeof fetch;

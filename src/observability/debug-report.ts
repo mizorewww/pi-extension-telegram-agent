@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import type { LogRecord } from "./log.ts";
 import { getConsumedSeq, messageEventHighWater } from "../db/message-events.ts";
 import { replyObligationCount } from "../db/reply-obligations.ts";
@@ -31,20 +31,20 @@ export function buildDebugReport(
 				pending_reply_obligations: replyObligationCount(db, botId, input.chatId),
 			},
 			pending_dispatch: db
-				.query("SELECT update_id, message_id, kind FROM pending_telegram_dispatch WHERE bot_id = ?")
+				.prepare("SELECT update_id, message_id, kind FROM pending_telegram_dispatch WHERE bot_id = ?")
 				.get(botId),
 			usage: loadBotStats(db, botId),
 			claims: db
-				.query(`SELECT message_id, reason, status, updated_at FROM routing_claims
+				.prepare(`SELECT message_id, reason, status, updated_at FROM routing_claims
 				WHERE bot_id = ? AND chat_id = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT 20`)
 				.all(botId, input.chatId, since),
 			runs: db
-				.query(`SELECT ts, model, epoch, compaction, context_tokens, output_tokens,
+				.prepare(`SELECT ts, model, epoch, compaction, context_tokens, output_tokens,
 				cache_read, cache_write, cache_read_estimated, cost FROM llm_runs
 				WHERE bot_id = ? AND ts >= ? ORDER BY id DESC LIMIT 20`)
 				.all(botId, since),
 			events: db
-				.query(`SELECT ts, kind FROM agent_events WHERE bot_id = ? AND ts >= ? ORDER BY id DESC LIMIT 50`)
+				.prepare(`SELECT ts, kind FROM agent_events WHERE bot_id = ? AND ts >= ? ORDER BY id DESC LIMIT 50`)
 				.all(botId, since),
 			logs: (input.logs ?? [])
 				.filter(

@@ -4,7 +4,7 @@
 // excluded, like everywhere else the model sees the group. Pi validates the arguments against the
 // tool schema (src/agent/tools.ts) before this runs; only semantic checks live here.
 
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 
 /** The trigram index only matches needles of at least three characters. */
 const INDEX_MIN_CHARS = 3;
@@ -129,7 +129,7 @@ export function queryMessages(db: Database, chatId: number, query: MessageQuery)
 	const limit = query.limit ?? 100;
 
 	const rows = db
-		.query(
+		.prepare(
 			`SELECT m.message_id, m.date, m.edit_date, m.sender_id, m.display_name, m.username, a.alias, m.is_bot,
 			        m.text, m.caption, m.reply_to_message_id, m.quote, m.forward_origin,
 			        json_extract(m.media, '$.kind') AS media_kind, json_extract(m.media, '$.file_name') AS media_file_name,
@@ -144,7 +144,7 @@ export function queryMessages(db: Database, chatId: number, query: MessageQuery)
 			 ORDER BY ${order === "relevance" ? "f.rank" : `m.message_id ${order === "desc" ? "DESC" : "ASC"}`}
 			 LIMIT ?`,
 		)
-		.all(...(indexed ? [indexed] : []), ...args, limit + 1) as Row[];
+		.all(...(indexed ? [indexed] : []), ...args, limit + 1) as unknown as Row[];
 	const more = rows.length > limit;
 	const page = rows.slice(0, limit);
 	const last = page.at(-1)?.message_id ?? null;

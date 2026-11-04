@@ -39,7 +39,7 @@
 ## 快速开始
 
 ### 1. 环境准备
-- [Bun](https://bun.sh/)（运行 daemon 与测试）
+- [Node.js 24+](https://nodejs.org/)（运行 daemon 与测试）
 - 本机安装 [Pi CLI](https://github.com/earendil-works/pi)（用于登录模型 Provider，凭据保存在 `~/.pi/agent/auth.json`）
 - 一个 Telegram Supergroup，以及在 [@BotFather](https://t.me/BotFather) 创建并**关闭了 Group Privacy** 的 bot（已拉入群并有发言权限）
 - （可选）主机安装 `ffmpeg`（用于视频抽帧理解）与 rootless Docker（用于 `sandbox` 工作区与 `tasks`，详见 [工作区运维手册](docs/runbooks/sandbox.md)）
@@ -49,7 +49,8 @@
 ```bash
 git clone https://github.com/mizorewww/pi-extension-telegram-agent.git
 cd pi-extension-telegram-agent
-bun install --frozen-lockfile
+npm ci
+npm run build
 
 # 打开 Pi 完成模型 Provider 登录与默认模型选择（完成后退出即可）
 pi
@@ -98,7 +99,7 @@ export default defineConfig({
 前台启动测试：
 
 ```bash
-bun run start
+npm start
 ```
 
 看到日志输出 `"event":"ready"` 后，去 Telegram 群里 `@你的bot` 或发送 `/status` 即可测试。长期运行建议使用 systemd 托管，详见 [Daemon 运维手册](docs/runbooks/daemon.md)。
@@ -130,8 +131,8 @@ bun run start
 当 bot 没反应或行为异常时，先在主机上运行只读诊断工具（不联网、不写库、不暴露密钥）：
 
 ```bash
-bun run debug -- --since 30m
-bun run debug -- --bot friend --since 2h
+npm run debug -- --since 30m
+npm run debug -- --bot friend --since 2h
 ```
 
 - **用户指南**（[中文在线版](https://mizorewww.github.io/pi-extension-telegram-agent/zh/) · [本地目录](docs/user-guide/zh/src/README.md)）：

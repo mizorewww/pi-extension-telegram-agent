@@ -10,7 +10,7 @@ Telegram ── poller × N ── daemon（唯一长驻进程）── SQLite
 ```
 
 - **daemon**（`src/daemon/index.ts`）：持有 SQLite、全部 poller 与每 bot 一个 `BotRuntime`。整个进程只创建一个 Pi `ModelRuntime`。
-- 依赖：Bun；Pi 各包（含 pi-codemode、pi-schema）精确锁定 1.5.0；Telegram 直接调用 Bot API（fetch long polling），无第三方 SDK。
+- 依赖：Node.js 24+；Pi 各包（含 pi-codemode、pi-schema）精确锁定 1.5.0；Telegram 直接调用 Bot API（fetch long polling），无第三方 SDK。
 
 ## 一条消息的路径
 
@@ -130,5 +130,5 @@ Telegram create 不可回滚，所以：
 ## 进程管理与配置
 
 - 配置只有 `telegram.config.ts`（受信本机代码，`defineConfig()` 提供类型）+ `.env`（`key: value`，只放项目自己的 secret：bot token、`tiny_fish_api_key`、可选 `router_secret`）+ Pi auth store（模型凭据）。配置类型与结构校验共用 TypeBox schema，由 Pi schema 执行严格校验（不进行类型强制转换）；未知字段直接报错。跨字段、文件存在性和凭据是否配置仍由业务代码检查。
-- 进程由 systemd user unit 托管（见 [runbook](runbooks/daemon.md)），仓库不自带 start/stop 控制器；`bun run start` 只是前台运行入口。daemon 启动最早一步用 `openSync(wx)` 独占 pid 文件，记录的 pid 仍存活就拒绝启动，绝不让两个 daemon 轮询同一 token。
+- 进程由 systemd user unit 托管（见 [runbook](runbooks/daemon.md)），仓库不自带 start/stop 控制器；`npm run start` 只是前台运行入口。daemon 启动最早一步用 `openSync(wx)` 独占 pid 文件，记录的 pid 仍存活就拒绝启动，绝不让两个 daemon 轮询同一 token。
 - 一个工作目录只对应一个群：`data/`、DB、session、pid 都由工作目录决定。多群必须用隔离的 clone。

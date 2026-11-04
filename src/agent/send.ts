@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import type { BotApi } from "../telegram/api.ts";
 import { isReactionEmoji } from "../telegram/api.ts";
 import { groupMessage } from "../db/message-events.ts";
@@ -128,7 +128,7 @@ function preflight(
 	// Resolve the sticker before sending anything: a late failure would make the model retry
 	// and double-send the text.
 	if (!params.sticker) return { params, stickerFileId: null };
-	const row = context.db.query("SELECT file_unique_id FROM media WHERE short_id = ?").get(params.sticker) as {
+	const row = context.db.prepare("SELECT file_unique_id FROM media WHERE short_id = ?").get(params.sticker) as {
 		file_unique_id: string;
 	} | null;
 	if (!row)

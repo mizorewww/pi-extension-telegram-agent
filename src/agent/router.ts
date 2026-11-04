@@ -2,7 +2,7 @@
 // Priority: explicit @mention > reply to bot > name keyword > deterministic probability.
 // Probability routing uses one shared HMAC value per message (restart/replay/duplicate-safe).
 
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import { createHmac } from "node:crypto";
 import { claimRoutingDecision, finishRoutingClaim } from "../db/routing-claims.ts";
 import { log } from "../observability/log.ts";
@@ -68,7 +68,7 @@ export function explicitTriggerReason(db: Database, row: MessageRow, bot: BotIde
 	if (row.reply_to_message_id != null) {
 		if (row.reply_to_sender_id === bot.userId) return "reply";
 		const parent = db
-			.query("SELECT sender_id FROM messages WHERE chat_id = ? AND message_id = ?")
+			.prepare("SELECT sender_id FROM messages WHERE chat_id = ? AND message_id = ?")
 			.get(row.chat_id, row.reply_to_message_id) as { sender_id: number | null } | null;
 		if (parent?.sender_id === bot.userId) return "reply";
 	}
@@ -175,7 +175,7 @@ export function routeMessageDecision(
 	// feedback loop.
 	if (!fire || row.edit_date != null) return makeDecision("nobody", "nobody");
 	const control = db
-		.query("SELECT 1 FROM telegram_control_messages WHERE chat_id = ? AND message_id = ?")
+		.prepare("SELECT 1 FROM telegram_control_messages WHERE chat_id = ? AND message_id = ?")
 		.get(row.chat_id, row.message_id);
 	if (control) return makeDecision("nobody", "nobody");
 	const decision = normalDecision(db, row, bots, config, makeDecision);

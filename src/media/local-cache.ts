@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import { createHash } from "node:crypto";
 import {
 	closeSync,
@@ -112,7 +112,7 @@ export function isVisionMedia(kind: string, mime: string | null | undefined): bo
 
 export function fileIdForBot(db: Database, botId: string, fileUniqueId: string): string | null {
 	const row = db
-		.query("SELECT file_id FROM media_file_ids WHERE bot_id = ? AND file_unique_id = ?")
+		.prepare("SELECT file_id FROM media_file_ids WHERE bot_id = ? AND file_unique_id = ?")
 		.get(botId, fileUniqueId) as { file_id: string } | null;
 	return row?.file_id ?? null;
 }
@@ -125,7 +125,7 @@ export function downloadSource(
 	botApis?: ReadonlyMap<string, MediaDownloadApi>,
 ): { api: MediaDownloadApi; fileId: string } | null {
 	const mappings = db
-		.query(`
+		.prepare(`
 			SELECT bot_id AS botId, file_id AS fileId
 			  FROM media_file_ids
 			 WHERE file_unique_id = ?
@@ -221,7 +221,7 @@ async function ensureLocalMediaInner(
 ): Promise<LocalMediaResult> {
 	const { cacheDir, signal } = options;
 	if (signal?.aborted) return { ok: false, outcome: "aborted" };
-	const media = db.query("SELECT kind, mime, local_path FROM media WHERE file_unique_id = ?").get(fileUniqueId) as {
+	const media = db.prepare("SELECT kind, mime, local_path FROM media WHERE file_unique_id = ?").get(fileUniqueId) as {
 		kind: string;
 		mime: string | null;
 		local_path: string | null;
@@ -267,7 +267,7 @@ async function ensureLocalMediaInner(
 			rmSync(sourcePath, { force: true });
 			return { ok: false, outcome: "aborted" };
 		}
-		db.query("UPDATE media SET local_path = ? WHERE file_unique_id = ?").run(basename(sourcePath), fileUniqueId);
+		db.prepare("UPDATE media SET local_path = ? WHERE file_unique_id = ?").run(basename(sourcePath), fileUniqueId);
 	} catch {
 		if (sourcePath) {
 			try {

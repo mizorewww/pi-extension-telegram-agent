@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { BotFire, FIRE_BOT_TRIGGER_BUDGET } from "../agent/router.ts";
 import type {
@@ -130,7 +130,7 @@ export class TelegramControlCommandService {
 		const startedAt = Date.now();
 		const authorized = isHuman(command.sender) && this.isAdmin(command.sender);
 		const owned = this.db
-			.query(`SELECT 1 FROM telegram_control_messages c JOIN messages m USING (chat_id, message_id)
+			.prepare(`SELECT 1 FROM telegram_control_messages c JOIN messages m USING (chat_id, message_id)
 			WHERE c.chat_id = ? AND c.message_id = ? AND m.first_seen_by = ? AND m.is_bot = 1`)
 			.get(command.chatId, command.messageId, command.replyBotId);
 		let executed: ControlExecutionResult;
@@ -160,7 +160,7 @@ export class TelegramControlCommandService {
 	/** Persist and expose a sent control reply so it remains outside every future provider epoch. */
 	consumeReply(_botId: string, chatId: number, messageId: number): void {
 		this.db
-			.query("INSERT OR IGNORE INTO telegram_control_messages (chat_id, message_id) VALUES (?, ?)")
+			.prepare("INSERT OR IGNORE INTO telegram_control_messages (chat_id, message_id) VALUES (?, ?)")
 			.run(chatId, messageId);
 		this.consumeEveryRuntime(messageId);
 	}
@@ -168,7 +168,7 @@ export class TelegramControlCommandService {
 	private claim(command: ParsedTelegramControlCommand): boolean {
 		return (
 			this.db
-				.query("INSERT OR IGNORE INTO telegram_control_messages (chat_id, message_id) VALUES (?, ?)")
+				.prepare("INSERT OR IGNORE INTO telegram_control_messages (chat_id, message_id) VALUES (?, ?)")
 				.run(command.chatId, command.messageId).changes > 0
 		);
 	}
@@ -357,7 +357,7 @@ export class TelegramControlCommandService {
 	private audit(command: ParsedTelegramControlCommand, authorized: boolean, outcome: string, startedAt: number): void {
 		const finishedAt = Date.now();
 		try {
-			this.db.query("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES (?, ?, ?, ?)").run(
+			this.db.prepare("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES (?, ?, ?, ?)").run(
 				command.replyBotId,
 				finishedAt,
 				CONTROL_COMMAND_AUDIT_EVENT,
@@ -401,7 +401,7 @@ export class TelegramControlCommandService {
 
 /** IDs marked here stay out of provider suffixes across every context generation. */
 export function consumedControlMessageIds(db: Database, chatId: number): Set<number> {
-	const rows = db.query("SELECT message_id FROM telegram_control_messages WHERE chat_id = ?").all(chatId) as {
+	const rows = db.prepare("SELECT message_id FROM telegram_control_messages WHERE chat_id = ?").all(chatId) as {
 		message_id: number;
 	}[];
 	return new Set(rows.map((row) => row.message_id));

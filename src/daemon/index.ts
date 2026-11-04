@@ -1,5 +1,5 @@
 // Daemon entry: long-running core. Owns SQLite, pollers and bot runtimes.
-// Run as `bun run src/daemon/index.ts`, supervised by the systemd user unit (docs/runbooks/daemon.md).
+// Run as `node dist/src/daemon/index.js`, supervised by the systemd user unit (docs/runbooks/daemon.md).
 
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
@@ -191,8 +191,8 @@ for (const [botId, rt] of runtimes) {
 	rt.sentMessageSink = (rawMsg) => {
 		const m = rawMsg as { chat: { id: number }; message_id: number };
 		const row = db
-			.query("SELECT * FROM messages WHERE chat_id = ? AND message_id = ?")
-			.get(m.chat.id, m.message_id) as MessageRow | null;
+			.prepare("SELECT * FROM messages WHERE chat_id = ? AND message_id = ?")
+			.get(m.chat.id, m.message_id) as unknown as MessageRow | null;
 		if (!row) return; // persistence failed: nothing durable to route
 		// Only agent sends reach this sink; control replies never route.
 		router.routeLocalSend(row);
@@ -251,8 +251,8 @@ const onMessage = async (result: IngestResult, update: unknown, botId: string) =
 	});
 	if (result.chatId == null || result.messageId == null) return;
 	const row = db
-		.query("SELECT * FROM messages WHERE chat_id = ? AND message_id = ?")
-		.get(result.chatId, result.messageId) as MessageRow | null;
+		.prepare("SELECT * FROM messages WHERE chat_id = ? AND message_id = ?")
+		.get(result.chatId, result.messageId) as unknown as MessageRow | null;
 	if (!row) return;
 	const command = parseTelegramControlCommand(update, botId, identities);
 	if (command) telegramControlCoordinator.dispatch(command);

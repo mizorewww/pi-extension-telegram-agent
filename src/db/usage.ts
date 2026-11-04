@@ -1,9 +1,9 @@
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 
 /** Retained, billed facts across sessions; Pi owns the current session's statistics. */
 export function loadBotStats(db: Database, botId: string) {
 	return db
-		.query(`SELECT COUNT(*) runs, MIN(ts) since,
+		.prepare(`SELECT COUNT(*) runs, MIN(ts) since,
 		COALESCE(SUM(context_tokens), 0) prompt,
 		COALESCE(SUM(output_tokens), 0) output,
 		COALESCE(SUM(COALESCE(cache_read_estimated, cache_read)), 0) cacheRead,

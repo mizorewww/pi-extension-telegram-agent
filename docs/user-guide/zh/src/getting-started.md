@@ -2,12 +2,13 @@
 
 ## 1. 准备本机
 
-需要 [Bun](https://bun.sh/) 和本机安装的 Pi（`pi --version` 能运行）。
+需要 [Node.js 24+](https://nodejs.org/) 和本机安装的 Pi（`pi --version` 能运行）。
 
 ```bash
 git clone https://github.com/mizorewww/pi-extension-telegram-agent.git
 cd pi-extension-telegram-agent
-bun install --frozen-lockfile
+npm ci
+npm run build
 ```
 
 可选：安装 `ffmpeg`（同时提供 `ffprobe`），开启看图后 bot 才能看懂视频；没有它，视频只显示成文字占位，其它功能不受影响。macOS 用 `brew install ffmpeg`，Debian/Ubuntu 用 `sudo apt install ffmpeg`，Arch 用 `sudo pacman -S ffmpeg`。
@@ -53,7 +54,7 @@ cp personas/template.zh.md personas/friend.local.md
 ## 5. 启动
 
 ```bash
-bun run start
+npm start
 ```
 
 daemon 在前台运行，Ctrl-C 停止；长期运行请交给 systemd，见[日常运维](operations.md#启动和停止)。输出里出现 `"ready"` 后，去群里 @ 你的 bot 试试，或发 `/help`、`/status` 查看群内命令与状态。

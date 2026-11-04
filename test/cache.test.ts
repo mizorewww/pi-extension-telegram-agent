@@ -1,12 +1,13 @@
+import assert from "node:assert/strict";
 // Golden hashes lock the cache-visible protocol (docs/cache.md). A failure means the provider
 // prefix changed: confirm it is intended, bump CACHE_SCHEMA_VERSION, then update GOLDEN.
 
-import { expect, test } from "bun:test";
+import { test } from "node:test";
 
-// bun test forces UTC; the daemon serializes in local time. Pin the deployment TZ first.
+// npm test forces UTC; the daemon serializes in local time. Pin the deployment TZ first.
 process.env.TZ = "Asia/Singapore";
 
-import { Database } from "bun:sqlite";
+import { DatabaseSync as Database } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { serializeMessageEvents, type MessageRow } from "../src/agent/serialize.ts";
 import {
@@ -58,17 +59,20 @@ function schemaDb(): Database {
 }
 
 test("prompt, tool and protocol hashes are stable", () => {
-	expect(CACHE_SCHEMA_VERSION).toBe(GOLDEN.schemaVersion);
+	assert.equal(CACHE_SCHEMA_VERSION, GOLDEN.schemaVersion);
 	const allTools = { send: true, search: true, codemode: true, sandbox: false, tasks: false, viewImage: false };
-	expect(sha256Short(buildSystemPrompt(readFileSync("personas/template.zh.md", "utf8"), allTools))).toBe(
+	assert.equal(
+		sha256Short(buildSystemPrompt(readFileSync("personas/template.zh.md", "utf8"), allTools)),
 		GOLDEN.systemZhTemplate,
 	);
-	expect(sha256Short(buildSystemPrompt(readFileSync("personas/template.en.md", "utf8"), allTools))).toBe(
+	assert.equal(
+		sha256Short(buildSystemPrompt(readFileSync("personas/template.en.md", "utf8"), allTools)),
 		GOLDEN.systemEnTemplate,
 	);
-	expect(
+	assert.equal(
 		sha256Short(buildSystemPrompt(readFileSync("personas/template.zh.md", "utf8"), { ...allTools, sandbox: true })),
-	).toBe(GOLDEN.systemSandboxTemplate);
+		GOLDEN.systemSandboxTemplate,
+	);
 	// A bot is only ever told about the tools it really has.
 	const sendOnly = toolCapabilityDeclaration({
 		send: true,
@@ -78,17 +82,17 @@ test("prompt, tool and protocol hashes are stable", () => {
 		tasks: false,
 		viewImage: false,
 	});
-	expect(sendOnly).toContain("你有一个工具：send");
-	expect(sendOnly).not.toContain("search（");
-	expect(sendOnly).toContain("你不能联网搜索");
+	assert.ok(sendOnly.includes("你有一个工具：send"));
+	assert.ok(!sendOnly.includes("search（"));
+	assert.ok(sendOnly.includes("你不能联网搜索"));
 	for (const missing of ["### codemode", "sh_exec", "view_image", "### task", "files", "tg_post", "await"])
-		expect(sendOnly).not.toContain(missing);
-	expect(toolProtocolHash(TOOL_DEFS)).toBe(GOLDEN.tools);
-	expect(toolProtocolHash(CODEMODE_TOOL_DEFS)).toBe(GOLDEN.codemodeTools);
-	expect(toolProtocolHash([sendToolWithFiles()])).toBe(GOLDEN.sendWithFiles);
-	expect(toolProtocolHash([taskToolDefinition(["search"])])).toBe(GOLDEN.taskTool);
-	expect(toolProtocolHash([JOB_TOOL_DEF])).toBe(GOLDEN.jobTool);
-	expect(sha256Short(COMPACTION_SUMMARY_PROMPT)).toBe(GOLDEN.compactionPrompt);
+		assert.ok(!sendOnly.includes(missing));
+	assert.equal(toolProtocolHash(TOOL_DEFS), GOLDEN.tools);
+	assert.equal(toolProtocolHash(CODEMODE_TOOL_DEFS), GOLDEN.codemodeTools);
+	assert.equal(toolProtocolHash([sendToolWithFiles()]), GOLDEN.sendWithFiles);
+	assert.equal(toolProtocolHash([taskToolDefinition(["search"])]), GOLDEN.taskTool);
+	assert.equal(toolProtocolHash([JOB_TOOL_DEF]), GOLDEN.jobTool);
+	assert.equal(sha256Short(COMPACTION_SUMMARY_PROMPT), GOLDEN.compactionPrompt);
 	const summaryInput = buildCompactionContent(
 		[
 			{
@@ -104,13 +108,14 @@ test("prompt, tool and protocol hashes are stable", () => {
 		"previous summary",
 		() => ({ type: "image", data: "Zml4dHVyZQ==", mimeType: "image/png" }),
 	);
-	expect(sha256Short(JSON.stringify(summaryInput))).toBe(GOLDEN.multimodalCompaction);
-	expect(sha256Short(REPLY_RECOVERY_PROMPT)).toBe(GOLDEN.replyRecovery);
-	expect(
+	assert.equal(sha256Short(JSON.stringify(summaryInput)), GOLDEN.multimodalCompaction);
+	assert.equal(sha256Short(REPLY_RECOVERY_PROMPT), GOLDEN.replyRecovery);
+	assert.equal(
 		sha256Short(
 			JSON.stringify({ type: TELEGRAM_CONTEXT_TYPE, version: TELEGRAM_CONTEXT_VERSION, noSend: NO_SEND_MARKER }),
 		),
-	).toBe(GOLDEN.contextProtocol);
+		GOLDEN.contextProtocol,
+	);
 });
 
 test("immutable event serialization grammar is stable", () => {
@@ -157,5 +162,5 @@ test("immutable event serialization grammar is stable", () => {
 		}),
 		event(4, "media_update", 2, 1754612402, { file_unique_id: "u", media_kind: "photo", text: "a cat" }),
 	]);
-	expect(sha256Short(out)).toBe(GOLDEN.eventSerialize);
+	assert.equal(sha256Short(out), GOLDEN.eventSerialize);
 });

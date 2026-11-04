@@ -3,7 +3,7 @@
 // creates a reply obligation on the origin message and wakes the bot; progress only wakes it
 // at most every PROGRESS_INTERVAL_MS.
 
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import { spawn } from "node:child_process";
 import { appendNoteEvent, type NotePayload } from "../db/message-events.ts";
 import { log } from "../observability/log.ts";
@@ -114,8 +114,8 @@ export class TaskManager {
 
 	list(botId: string, limit = 10): TaskRow[] {
 		return this.deps.db
-			.query("SELECT * FROM tasks WHERE bot_id = ? ORDER BY created_at DESC LIMIT ?")
-			.all(botId, limit) as TaskRow[];
+			.prepare("SELECT * FROM tasks WHERE bot_id = ? ORDER BY created_at DESC LIMIT ?")
+			.all(botId, limit) as unknown as TaskRow[];
 	}
 
 	/**
@@ -125,8 +125,8 @@ export class TaskManager {
 	async recover(): Promise<void> {
 		await (this.deps.removeStaleContainers ?? removeTaskContainers)(this.deps.run.dockerHost);
 		const rows = this.deps.db
-			.query("SELECT * FROM tasks WHERE status IN ('running', 'need_input') ORDER BY created_at")
-			.all() as TaskRow[];
+			.prepare("SELECT * FROM tasks WHERE status IN ('running', 'need_input') ORDER BY created_at")
+			.all() as unknown as TaskRow[];
 		for (const row of rows) {
 			if (!this.deps.box(row.bot_id)) {
 				this.setStatus(row.task_id, "interrupted");
@@ -153,14 +153,14 @@ export class TaskManager {
 			throw new TaskError(`already running ${running} tasks; finish or cancel one first`);
 		const now = Date.now();
 		const { lastInsertRowid } = this.deps.db
-			.query(
+			.prepare(
 				`INSERT INTO tasks (task_id, bot_id, chat_id, origin_message_id, workflow, title, status, created_at, updated_at)
 				 VALUES ('', ?, ?, ?, ?, ?, 'running', ?, ?)`,
 			)
 			.run(botId, this.deps.chatId, originMessageId, workflow, title, now, now);
 		// Ids from rowid, like sticker short ids: stable and race-free.
 		const taskId = `t${lastInsertRowid}`;
-		this.deps.db.query("UPDATE tasks SET task_id = ? WHERE rowid = ?").run(taskId, lastInsertRowid);
+		this.deps.db.prepare("UPDATE tasks SET task_id = ? WHERE rowid = ?").run(taskId, lastInsertRowid);
 		const task = this.track(taskId, botId, now);
 		try {
 			await box.extractTar(task.process.workdir, await (this.deps.packWorkflow ?? packWorkflowDir)(dir));
@@ -235,7 +235,7 @@ export class TaskManager {
 
 	private recordUsage(taskId: string, usage: TaskUsage): void {
 		this.deps.db
-			.query(
+			.prepare(
 				"UPDATE tasks SET input_tokens = input_tokens + ?, output_tokens = output_tokens + ?, cost = cost + ? WHERE task_id = ?",
 			)
 			.run(usage.input, usage.output, usage.cost, taskId);
@@ -248,11 +248,13 @@ export class TaskManager {
 	}
 
 	private row(taskId: string): TaskRow | null {
-		return this.deps.db.query("SELECT * FROM tasks WHERE task_id = ?").get(taskId) as TaskRow | null;
+		return this.deps.db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId) as unknown as TaskRow | null;
 	}
 
 	private setStatus(taskId: string, status: TaskStatus): void {
-		this.deps.db.query("UPDATE tasks SET status = ?, updated_at = ? WHERE task_id = ?").run(status, Date.now(), taskId);
+		this.deps.db
+			.prepare("UPDATE tasks SET status = ?, updated_at = ? WHERE task_id = ?")
+			.run(status, Date.now(), taskId);
 	}
 
 	private note(row: TaskRow, phase: NonNullable<NotePayload["phase"]>, text: string, files: string[] = []): void {

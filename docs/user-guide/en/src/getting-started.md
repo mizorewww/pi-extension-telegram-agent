@@ -2,12 +2,13 @@
 
 ## 1. Prepare the machine
 
-You need [Bun](https://bun.sh/) and a local Pi installation (`pi --version` works).
+You need [Node.js 24+](https://nodejs.org/) and a local Pi installation (`pi --version` works).
 
 ```bash
 git clone https://github.com/mizorewww/pi-extension-telegram-agent.git
 cd pi-extension-telegram-agent
-bun install --frozen-lockfile
+npm ci
+npm run build
 ```
 
 Optional: install `ffmpeg` (which also provides `ffprobe`) so bots that look at media can understand videos. Without it, videos show up as a text placeholder and everything else keeps working. Use `brew install ffmpeg` on macOS, `sudo apt install ffmpeg` on Debian/Ubuntu, or `sudo pacman -S ffmpeg` on Arch.
@@ -53,7 +54,7 @@ All three files are ignored by Git and stay on your machine.
 ## 5. Start
 
 ```bash
-bun run start
+npm start
 ```
 
 The daemon runs in the foreground; Ctrl-C stops it. For long-running use, hand it to systemd as described in [Daily operations](operations.md#start-and-stop). Once the output shows `"ready"`, mention your bot in the group or send `/help` and `/status` to see the group commands and usage.

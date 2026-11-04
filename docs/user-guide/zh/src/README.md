@@ -8,7 +8,7 @@
 
 1. 在 BotFather 创建 bot，关闭 group privacy，把它加进你的 supergroup。
 2. 运行 `pi`，用 Pi 的 `/login` 和 `/model` 选好模型。
-3. 复制 `telegram.config.example.ts` 为 `telegram.config.ts`，填群 ID 和 bot，token 写进 `.env`；`bun run start` 启动后去群里 @ 它试试，或发 `/status` 查看状态。
+3. 复制 `telegram.config.example.ts` 为 `telegram.config.ts`，填群 ID 和 bot，token 写进 `.env`；`npm start` 启动后去群里 @ 它试试，或发 `/status` 查看状态。
 
 ## 章节
 

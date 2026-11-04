@@ -1,3 +1,4 @@
+import { transaction as atomic } from "../db/db.ts";
 // Fixed sticker catalog per bot (REQ-STICKER-0001).
 // Each bot can configure Telegram sticker set names; at startup the sets are fetched, media
 // identity + per-bot file_id persisted, and short_ids assigned from rowids. Catalog lines and
@@ -7,7 +8,7 @@
 // new epoch when it changes); sendable user stickers outside the catalog are listed once, in a
 // labelled note after the batch where they first appear (extensions/context.ts).
 
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import { SYSTEM_NOTE_LABEL } from "../agent/prompt.ts";
 import { errorCategory, log } from "../observability/log.ts";
 import { createHash } from "node:crypto";
@@ -34,7 +35,9 @@ export function stickerMime(sticker: { is_animated?: boolean; is_video?: boolean
 
 /** short_id from rowid: stable, unique, race-free; a no-op once assigned. */
 export function assignStickerShortId(db: Database, fileUniqueId: string): void {
-	db.query("UPDATE media SET short_id = 's' || rowid WHERE file_unique_id = ? AND short_id IS NULL").run(fileUniqueId);
+	db.prepare("UPDATE media SET short_id = 's' || rowid WHERE file_unique_id = ? AND short_id IS NULL").run(
+		fileUniqueId,
+	);
 }
 
 /** Fetch one Telegram sticker set (public sets work for any bot token). */
@@ -65,7 +68,7 @@ export async function fetchStickerSet(api: BotApi, setName: string): Promise<Cat
 export async function ensureStickerCatalog(db: Database, api: BotApi, botId: string, sets: string[]): Promise<void> {
 	let total = 0;
 	let truncated = false;
-	const upsertMedia = db.query(
+	const upsertMedia = db.prepare(
 		`INSERT INTO media (file_unique_id, kind, mime, sticker_set, sticker_emoji)
 		 VALUES (?, 'sticker', ?, ?, ?)
 		 ON CONFLICT(file_unique_id) DO UPDATE SET
@@ -73,21 +76,22 @@ export async function ensureStickerCatalog(db: Database, api: BotApi, botId: str
 		   sticker_set = COALESCE(excluded.sticker_set, media.sticker_set),
 		   sticker_emoji = COALESCE(excluded.sticker_emoji, media.sticker_emoji)`,
 	);
-	const upsertMapping = db.query(
+	const upsertMapping = db.prepare(
 		"INSERT OR IGNORE INTO media_file_ids (bot_id, file_id, file_unique_id) VALUES (?, ?, ?)",
 	);
-	const persistSet = db.transaction((setName: string, stickers: CatalogSticker[]) => {
-		for (const s of stickers) {
-			if (total >= STICKER_CATALOG_MAX) {
-				truncated = true;
-				break;
+	const persistSet = (setName: string, stickers: CatalogSticker[]) =>
+		atomic(db, () => {
+			for (const s of stickers) {
+				if (total >= STICKER_CATALOG_MAX) {
+					truncated = true;
+					break;
+				}
+				upsertMedia.run(s.file_unique_id, s.mime, setName, s.emoji);
+				upsertMapping.run(botId, s.file_id, s.file_unique_id);
+				assignStickerShortId(db, s.file_unique_id);
+				total++;
 			}
-			upsertMedia.run(s.file_unique_id, s.mime, setName, s.emoji);
-			upsertMapping.run(botId, s.file_id, s.file_unique_id);
-			assignStickerShortId(db, s.file_unique_id);
-			total++;
-		}
-	});
+		});
 	for (const setName of sets) {
 		if (total >= STICKER_CATALOG_MAX) {
 			truncated = true;
@@ -121,7 +125,7 @@ interface CatalogRow {
 /** Sendable catalog stickers for this bot in its configured sets, deterministically ordered. */
 function catalogRows(db: Database, botId: string, sets: readonly string[]): CatalogRow[] {
 	return db
-		.query(`
+		.prepare(`
 		SELECT sticker_emoji, vision, short_id
 		  FROM media m
 		 WHERE kind = 'sticker' AND short_id IS NOT NULL
@@ -132,7 +136,7 @@ function catalogRows(db: Database, botId: string, sets: readonly string[]): Cata
 		   )
 		 ORDER BY sticker_set, rowid
 	`)
-		.all(JSON.stringify([...sets]), botId) as CatalogRow[];
+		.all(JSON.stringify([...sets]), botId) as unknown as CatalogRow[];
 }
 
 /**
@@ -190,7 +194,7 @@ export function batchStickerCandidates(
 ): string {
 	if (messageIds.length === 0) return "";
 	const rows = db
-		.query(`
+		.prepare(`
 			SELECT media.rowid, media.file_unique_id, media.short_id, media.sticker_emoji, media.vision
 			  FROM json_each(?3) batch
 			  JOIN messages message
@@ -211,7 +215,7 @@ export function batchStickerCandidates(
 			chatId,
 			JSON.stringify([...new Set(messageIds)]),
 			JSON.stringify([...catalogSets]),
-		) as ContextStickerRow[];
+		) as unknown as ContextStickerRow[];
 	const seen = new Set<string>();
 	const lines: string[] = [];
 	for (const row of rows) {

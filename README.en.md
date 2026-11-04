@@ -39,7 +39,7 @@ Each tool is toggled per bot in `telegram.config.ts`. Disabled tools are complet
 ## Quick Start
 
 ### 1. Prerequisites
-- [Bun](https://bun.sh/)
+- [Node.js 24+](https://nodejs.org/)
 - Local [Pi CLI](https://github.com/earendil-works/pi) installation (used once to authenticate model providers into `~/.pi/agent/auth.json`)
 - A Telegram supergroup and at least one [@BotFather](https://t.me/BotFather) bot with **Group Privacy turned off**, added to the group
 - *(Optional)* `ffmpeg` on the host (for video frame extraction) and rootless Docker (for `sandbox` work boxes and `tasks`; see the [sandbox runbook](docs/runbooks/sandbox.md))
@@ -49,7 +49,8 @@ Each tool is toggled per bot in `telegram.config.ts`. Disabled tools are complet
 ```bash
 git clone https://github.com/mizorewww/pi-extension-telegram-agent.git
 cd pi-extension-telegram-agent
-bun install --frozen-lockfile
+npm ci
+npm run build
 
 # Log in to your model provider and pick a default model in Pi (exit when done)
 pi
@@ -98,7 +99,7 @@ export default defineConfig({
 Run in the foreground:
 
 ```bash
-bun run start
+npm start
 ```
 
 Once `"event":"ready"` appears in the output, mention `@your_bot` or send `/status` in the Telegram group. For long-running production use under systemd, see the [daemon runbook](docs/runbooks/daemon.md).
@@ -130,8 +131,8 @@ Send commands directly in the Telegram group (use `/command@bot_username` when r
 To diagnose why a bot did not reply or inspect recent runs without touching secrets or making network calls:
 
 ```bash
-bun run debug -- --since 30m
-bun run debug -- --bot friend --since 2h
+npm run debug -- --since 30m
+npm run debug -- --bot friend --since 2h
 ```
 
 - **User Guide** ([Online](https://mizorewww.github.io/pi-extension-telegram-agent/en/) · [Local](docs/user-guide/en/src/README.md)):

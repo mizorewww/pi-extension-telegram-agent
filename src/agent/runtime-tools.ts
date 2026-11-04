@@ -1,7 +1,7 @@
 // Per-bot tool wiring and execution handlers for BotRuntime.
 // Tool names, descriptions, parameters and registration order follow src/agent/tools.ts.
 
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import { join } from "node:path";
 import { validateToolArguments, type JsonValue } from "@earendil-works/pi-ai";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";

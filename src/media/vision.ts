@@ -2,7 +2,7 @@
 // Provider execution uses the daemon's shared Pi ModelRuntime; this module never
 // starts another CLI or reads provider credential material.
 
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import { log } from "../observability/log.ts";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { contentText, type AssistantMessage, type Context } from "@earendil-works/pi-ai";
@@ -258,7 +258,7 @@ async function ensureVisionInner(
 	options: EnsureVisionOptions,
 ): Promise<string | null> {
 	const startedAt = performance.now();
-	const media = db.query("SELECT kind, mime, vision FROM media WHERE file_unique_id = ?").get(fileUniqueId) as {
+	const media = db.prepare("SELECT kind, mime, vision FROM media WHERE file_unique_id = ?").get(fileUniqueId) as {
 		kind: string;
 		mime: string | null;
 		vision: string | null;
@@ -276,7 +276,7 @@ async function ensureVisionInner(
 
 /** Only outcomes that cannot change on retry are cached; ffmpeg/provider/transport failures retry later. */
 function persistUnsupported(db: Database, fileUniqueId: string, kind: VisionKind, outcome: VisionOutcome): void {
-	db.query("UPDATE media SET vision = ? WHERE file_unique_id = ?").run(
+	db.prepare("UPDATE media SET vision = ? WHERE file_unique_id = ?").run(
 		JSON.stringify({ model: "none", kind, text: null, unsupported: true, outcome, at: Date.now() }),
 		fileUniqueId,
 	);
@@ -310,7 +310,7 @@ async function ensureVisionPrepared(
 	const result = await describe();
 	const text = result.text?.trim() || null;
 	if (text) {
-		db.query("UPDATE media SET vision = ? WHERE file_unique_id = ?").run(
+		db.prepare("UPDATE media SET vision = ? WHERE file_unique_id = ?").run(
 			JSON.stringify({ model: executor.modelRef, kind, text, outcome: result.telemetry.outcome, at: Date.now() }),
 			fileUniqueId,
 		);

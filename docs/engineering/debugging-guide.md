@@ -10,11 +10,11 @@
 4. **一切有界。** 单条日志 ≤4096 字节、≤24 个字段、字符串 ≤256；debug 报告每 bot 最多 20 claims / 20 runs / 50 events / 100 logs，窗口最长 7 天。
 5. **用已有 identity 关联**（`bot_id`、`message_id`、run id、epoch、`ingest_seq`、`request_id`），不在日志里建平行状态。
 
-## 第一入口：`bun run debug`
+## 第一入口：`npm run debug`
 
 ```bash
-bun run debug -- --since 30m
-bun run debug -- --bot A --since 2h
+npm run debug -- --since 30m
+npm run debug -- --bot A --since 2h
 ```
 
 只读：本地配置身份、SQLite 和日志尾部 64 KiB；不读取 `.env`、Pi 凭据或 session 内容，不联网、不写库。JSON schema 2 输出 daemon 存活状态、每 bot 的 cursor / high-water / 回复义务数量 / pending dispatch、保留期用量、最近 claims、runs、事件种类与结构化日志。
@@ -66,7 +66,7 @@ bun run debug -- --bot A --since 2h
 1. 成功、合法 no-op/沉默、可重试失败、不可重试/结果未知分别怎么观察？
 2. 用哪些已有 identity 跨边界关联？
 3. 哪些字段绝不能记？每个事件/查询/队列的上限是多少？
-4. `bun run debug` 能否判断故障停在哪一层？需要补充哪条有界事实？
+4. `npm run debug` 能否判断故障停在哪一层？需要补充哪条有界事实？
 5. Cache impact 是否仍为 NONE、0 新增 LLM 调用？
 
 只写“加日志”而没有状态区分、隐私边界与验证，不算完成。修复时改职责拥有层，日志只补缺失的可观察状态，绝不用重试掩盖结果未知的提交。

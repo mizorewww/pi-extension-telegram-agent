@@ -1,6 +1,6 @@
 // E2E agent test: trigger one configured bot with a synthetic human message, real provider + Telegram group.
 // Verifies: serialization -> session -> LLM -> send tool (terminate) -> DB insert -> telemetry.
-// Usage: bun run scripts/e2e-agent.ts --bot <id>
+// Usage: node dist/scripts/e2e-agent.js --bot <id>
 import { loadConfig } from "../src/config.ts";
 import { openDb, setBotState } from "../src/db/db.ts";
 import { BotApi } from "../src/telegram/api.ts";
@@ -21,7 +21,7 @@ setBotState(db, bot.id, "bot_username", me.username);
 
 // synthetic human trigger message (identifiable as a test)
 const syntheticId = Math.floor(Date.now() / 1000);
-db.query(
+db.prepare(
 	`INSERT OR IGNORE INTO messages (chat_id, message_id, date, sender_id, display_name, username, is_bot, text, first_seen_by)
 	 VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'test')`,
 ).run(
@@ -39,9 +39,9 @@ const rt = new BotRuntime(db, bot, config, modelRuntime, { videoTranscoder: insp
 await rt.init();
 
 console.log(`[e2e] triggering bot ${bot.id} (${bot.provider}/${bot.model})...`);
-const runsBefore = (db.query("SELECT COUNT(*) c FROM llm_runs WHERE bot_id = ?").get(bot.id) as { c: number }).c;
+const runsBefore = (db.prepare("SELECT COUNT(*) c FROM llm_runs WHERE bot_id = ?").get(bot.id) as { c: number }).c;
 const sendsBefore = (
-	db.query("SELECT COUNT(*) c FROM agent_events WHERE bot_id = ? AND kind = 'send'").get(bot.id) as { c: number }
+	db.prepare("SELECT COUNT(*) c FROM agent_events WHERE bot_id = ? AND kind = 'send'").get(bot.id) as { c: number }
 ).c;
 rt.trigger();
 
@@ -52,12 +52,12 @@ let ranOnce = false;
 // pre-trigger baseline so historical runs never satisfy the assertion)
 const deadline = Date.now() + 120_000;
 while (Date.now() < deadline) {
-	const usage = db.query("SELECT COUNT(*) c FROM llm_runs WHERE bot_id = ?").get(bot.id) as { c: number };
+	const usage = db.prepare("SELECT COUNT(*) c FROM llm_runs WHERE bot_id = ?").get(bot.id) as { c: number };
 	if (usage.c > runsBefore) {
 		ranOnce = true;
 		// give the run a moment to potentially call send after first llm response
 		await new Promise((r) => setTimeout(r, 5000));
-		const send2 = db.query("SELECT COUNT(*) c FROM agent_events WHERE bot_id = ? AND kind = 'send'").get(bot.id) as {
+		const send2 = db.prepare("SELECT COUNT(*) c FROM agent_events WHERE bot_id = ? AND kind = 'send'").get(bot.id) as {
 			c: number;
 		};
 		if (send2.c > sendsBefore) {
@@ -70,19 +70,19 @@ while (Date.now() < deadline) {
 	await new Promise((r) => setTimeout(r, 1000));
 }
 
-const events = db.query("SELECT kind, payload FROM agent_events WHERE bot_id = ? ORDER BY id").all(bot.id) as {
+const events = db.prepare("SELECT kind, payload FROM agent_events WHERE bot_id = ? ORDER BY id").all(bot.id) as {
 	kind: string;
 	payload: string;
 }[];
 for (const e of events) console.log(`  event ${e.kind}: ${e.payload.slice(0, 160)}`);
 const runs = db
-	.query(
+	.prepare(
 		"SELECT context_tokens, cache_read, cache_miss, output_tokens, cost, epoch, system_hash, tools_hash FROM llm_runs WHERE bot_id = ?",
 	)
 	.all(bot.id);
 console.log("[e2e] llm_runs:", JSON.stringify(runs));
 const sent = db
-	.query("SELECT message_id, text, username FROM messages WHERE sender_id = ? ORDER BY message_id DESC LIMIT 1")
+	.prepare("SELECT message_id, text, username FROM messages WHERE sender_id = ? ORDER BY message_id DESC LIMIT 1")
 	.get(me.id) as Record<string, unknown> | null;
 console.log("[e2e] latest bot message in transcript:", JSON.stringify(sent));
 

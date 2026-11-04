@@ -5,7 +5,7 @@
 // appear (serializer v4). Written bytes never change retroactively: a later vision description
 // arrives as a media_update delta.
 
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import type { MediaUpdatePayload, MessageEvent, NotePayload } from "../db/message-events.ts";
 import type { ReplySnapshot } from "../telegram/normalize.ts";
 
@@ -55,16 +55,16 @@ export interface MessageRow {
 
 /** Stable short alias (u<N>) for users without username. */
 export function getOrCreateAlias(db: Database, chatId: number, userId: number): string {
-	const existing = db.query("SELECT alias FROM aliases WHERE chat_id = ? AND user_id = ?").get(chatId, userId) as {
+	const existing = db.prepare("SELECT alias FROM aliases WHERE chat_id = ? AND user_id = ?").get(chatId, userId) as {
 		alias: string;
 	} | null;
 	if (existing) return existing.alias;
 	// alias from rowid: stable, unique, race-free (same pattern as sticker short_id).
 	const { lastInsertRowid } = db
-		.query("INSERT INTO aliases (chat_id, user_id, alias) VALUES (?, ?, '')")
+		.prepare("INSERT INTO aliases (chat_id, user_id, alias) VALUES (?, ?, '')")
 		.run(chatId, userId);
 	const alias = `u${lastInsertRowid}`;
-	db.query("UPDATE aliases SET alias = ? WHERE rowid = ?").run(alias, lastInsertRowid);
+	db.prepare("UPDATE aliases SET alias = ? WHERE rowid = ?").run(alias, lastInsertRowid);
 	return alias;
 }
 
@@ -121,10 +121,10 @@ export function replySnapshot(db: Database, row: MessageRow): ReplySnapshot | nu
 	if (row.reply_snapshot) return JSON.parse(row.reply_snapshot) as ReplySnapshot;
 	if (row.reply_to_message_id == null) return null;
 	const parent = db
-		.query(
+		.prepare(
 			"SELECT text, caption, media, display_name, username, sender_id FROM messages WHERE chat_id = ? AND message_id = ?",
 		)
-		.get(row.chat_id, row.reply_to_message_id) as MessageRow | null;
+		.get(row.chat_id, row.reply_to_message_id) as unknown as MessageRow | null;
 	if (!parent) return null;
 	return {
 		display_name: parent.display_name,
@@ -177,7 +177,7 @@ function serializeSegments(db: Database, events: MessageEvent[]): { event: Messa
 	let lastDate: string | null = null;
 	for (const event of events) {
 		if (event.kind === "message") {
-			const row = event.payload as MessageRow;
+			const row = event.payload as unknown as MessageRow;
 			const day = fmtDate(row.date);
 			const separator = day !== lastDate ? `--- ${day} ---\n` : "";
 			lastDate = day;
@@ -196,7 +196,7 @@ function serializeSegments(db: Database, events: MessageEvent[]): { event: Messa
 			segments.push({ event, text: `[media_update #${event.messageId}] [${label}: ${payload.text}]` });
 			continue;
 		}
-		const row = event.payload as MessageRow;
+		const row = event.payload as unknown as MessageRow;
 		if (event.kind === "edit") {
 			const body = row.text ?? row.caption ?? "";
 			const reply = renderReply(db, row, visible);

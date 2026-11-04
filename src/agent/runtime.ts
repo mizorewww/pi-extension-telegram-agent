@@ -1,7 +1,8 @@
+import { transaction as atomic } from "../db/db.ts";
 // BotRuntime: one persona bot = one Pi AgentSession + immutable event consumption + visible refs.
 // See docs/architecture.md.
 
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { clampThinkingLevel, isContextOverflow, type Api, type Model } from "@earendil-works/pi-ai";
@@ -1236,14 +1237,14 @@ export class BotRuntime {
 			const epoch = this.epoch + 1;
 			const committed = nextSession;
 			const chatId = this.config.groupChatId;
-			this.db.transaction(() => {
+			atomic(this.db, () => {
 				setBotState(this.db, this.bot.id, EPOCH_KEY, String(epoch));
 				replaceVisibleMessageIds(this.db, this.bot.id, chatId, epoch, []);
 				// A fresh session cannot answer for bytes it never saw; drop the old
 				// session's obligations atomically with the swap.
 				const through = hooks.resetThrough ?? messageEventHighWater(this.db, chatId);
 				this.db
-					.query(`DELETE FROM reply_obligations WHERE bot_id = ? AND chat_id = ? AND message_id IN
+					.prepare(`DELETE FROM reply_obligations WHERE bot_id = ? AND chat_id = ? AND message_id IN
 					(SELECT message_id FROM message_events WHERE chat_id = ? AND ingest_seq <= ? AND kind = 'message')`)
 					.run(this.bot.id, chatId, chatId, through);
 				setConsumedSeq(this.db, this.bot.id, chatId, Math.max(through, getConsumedSeq(this.db, this.bot.id, chatId)));
@@ -1254,7 +1255,7 @@ export class BotRuntime {
 					contextFingerprint: fingerprint,
 					createdAt: Date.now(),
 				});
-			})();
+			});
 			hooks.afterCommit?.();
 			const previous = this.session!;
 			this.session = committed;
@@ -1306,7 +1307,7 @@ export class BotRuntime {
 	/** Lazy vision: bounded per turn, with direct-reply events ordered before ordinary catch-up. */
 	private async ensureBatchVision(batch: readonly MessageEvent[], obligationIds: ReadonlySet<number>): Promise<void> {
 		if (this.config.media.mode !== "hybrid" || this.config.media.maxPerTurn <= 0) return;
-		const described = this.db.query("SELECT vision FROM media WHERE file_unique_id = ?");
+		const described = this.db.prepare("SELECT vision FROM media WHERE file_unique_id = ?");
 		const pending = pendingMediaIds(batch, obligationIds, this.config.media.maxPerTurn, (id) =>
 			Boolean((described.get(id) as { vision: string | null } | null)?.vision),
 		);

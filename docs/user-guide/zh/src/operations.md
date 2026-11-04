@@ -11,7 +11,7 @@ systemctl --user stop telegram-agent      # 停止
 systemctl --user status telegram-agent    # 查看是否在运行
 ```
 
-没有 systemd 的机器（例如 macOS）在终端或 tmux 里 `bun run start` 前台运行，Ctrl-C 停止。同一份部署只能跑一个 daemon。
+没有 systemd 的机器（例如 macOS）在终端或 tmux 里 `npm run start` 前台运行，Ctrl-C 停止。同一份部署只能跑一个 daemon。
 
 systemd 下日志在 `data/daemon.log`，前台运行时直接打印在终端（结构化 JSON，不含聊天正文）。工作区和后台任务的主机准备见 [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md)。
 

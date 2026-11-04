@@ -8,7 +8,7 @@
 // details.visibleMessageIds is the cumulative union computed by this same walker, so
 // re-adding it could never shrink the set (RC1 phantom visibility).
 
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import type { SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
 import { getConsumedSeq, replaceVisibleMessageIds, setConsumedSeq } from "../db/message-events.ts";
 import { removeReplyObligations } from "../db/reply-obligations.ts";

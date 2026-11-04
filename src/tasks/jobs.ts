@@ -3,7 +3,7 @@
 // and sandbox as codemode; its result returns as a note on the requester's message, which owes
 // them a reply, exactly like a finished task.
 
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import {
 	CodemodeSandbox,
 	CodemodeSourceError,

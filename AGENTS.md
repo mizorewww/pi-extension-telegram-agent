@@ -50,14 +50,14 @@
 
 - 不搞 TDD：先想清楚设计再写代码，验证靠类型检查、真实运行和 e2e，而不是堆单测。
 - `test/` 只留极少数守卫：cache golden、零外网、安全边界（沙箱 / codemode / search / 管理员命令）。新增守卫要能说清它守的是哪条一旦破了代价很高的 invariant，文件开头一行写明；不为 bug 机械补回归测试，不断言 prompt 字符串。
-- `bun test` 零外网、零付费调用，由 `bunfig.toml` 的 test preload 机械保证。
+- `npm test` 零外网、零付费调用，由 `npm test` 的 Node `--import` preload 机械保证。
 
 ## 6. 验证漏斗
 
-1. `bun test <相关文件>` → `bun test`
-2. `bun run check`（tsc --noEmit）
-3. `bun run lint`（Biome lint + format check；`bun run format` 自动修）
-4. `bun run docs:check`（文档站构建 + 链接检查）
+1. `npm run build && node --import ./dist/test/network-guard.js --test dist/test/<相关文件>.js` → `npm test`
+2. `npm run check`（tsc --noEmit）
+3. `npm run lint`（Biome lint + format check；`npm run format` 自动修）
+4. `npm run docs:check`（文档站构建 + 链接检查）
 5. opt-in e2e：`scripts/e2e-*.ts`（需 `.env`，触真实服务，用户明确授权才跑）
 
 规范命令以 `docs/testing.md` 为准；仓库已有脚本时不要猜底层命令。
@@ -71,7 +71,7 @@
 
 ## 8. 已知坑
 
-- `bun test` 强制 UTC：涉时间序列化的测试必须 pin TZ（参考 `test/cache.test.ts`，生产为 Asia/Singapore）。
+- `npm test` 强制 UTC：涉时间序列化的测试必须 pin TZ（参考 `test/cache.test.ts`，生产为 Asia/Singapore）。
 - 本机 `telegram.config.ts`/`.env` 可能与生产共用 bot token：不要在开发机启动 daemon 或跑 e2e，两个 poller 会抢同一 token（409）并造成线上停摆。需要真实验证时在服务器上做。
 - `.env` 是 `key: value` 冒号格式，由 `src/config.ts` 自解析，不是 dotenv 的 `KEY=value`。
 - Pi 各包（agent-core、ai、coding-agent、tui、schema，以及后台 job 直接用的 pi-codemode）精确锁定 registry `1.5.0`；升级必须同一原子提交一起更新 manifest、lock 并做兼容性验证。

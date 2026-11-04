@@ -1,3 +1,5 @@
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,19 +39,23 @@ export interface ExtractVideoFramesOptions {
 	runner?: VideoCommandRunner;
 }
 
+const exec = promisify(execFile);
 const defaultRunner: VideoCommandRunner = {
-	which: (command) => Bun.which(command),
+	which(command) {
+		try {
+			return execFileSync("which", [command], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
+		} catch {
+			return null;
+		}
+	},
 	async run(argv) {
 		try {
-			const child = Bun.spawn([...argv], {
-				stdin: "ignore",
-				stdout: "pipe",
-				stderr: "ignore",
+			const { stdout } = await exec(argv[0]!, argv.slice(1), {
 				timeout: VIDEO_COMMAND_TIMEOUT_MS,
+				killSignal: "SIGKILL",
 				maxBuffer: 1024 * 1024,
 			});
-			const stdout = await new Response(child.stdout).text();
-			return { exitCode: await child.exited, stdout };
+			return { exitCode: 0, stdout };
 		} catch {
 			return { exitCode: 1, stdout: "" };
 		}

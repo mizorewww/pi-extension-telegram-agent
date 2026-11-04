@@ -3,7 +3,7 @@
 Start with the read-only report; compare recent requests, pending replies and logs:
 
 ```bash
-bun run debug -- --since 30m
+npm run debug -- --since 30m
 ```
 
 Do not delete `data/` or pid files "just to try".
@@ -23,9 +23,9 @@ Then read the log (`data/daemon.log` under systemd). Typical causes: a wrong tok
 ## The bot ignores a mention
 
 - Check that group privacy is off in BotFather and the bot is in the right group with permission to post.
-- Run `bun run debug`: `context.pending_reply_obligations > 0` means replies are still owed (retried on the next trigger or restart). Compare `claims` and `runs`, then look for `flush_failed` / `provider_attempt_failed` in the log.
+- Run `npm run debug`: `context.pending_reply_obligations > 0` means replies are still owed (retried on the next trigger or restart). Compare `claims` and `runs`, then look for `flush_failed` / `provider_attempt_failed` in the log.
 - 401: the token was revoked; fix `.env` and restart.
-- 409: another process uses the same token. Make sure only one daemon runs (do not run another `bun run start` next to systemd, and do not start the same token on another machine).
+- 409: another process uses the same token. Make sure only one daemon runs (do not run another `npm run start` next to systemd, and do not start the same token on another machine).
 
 ## The bot keeps talking off-topic
 
@@ -33,7 +33,7 @@ Its context may be stuck on a misunderstanding, which summaries then carry forwa
 
 ## Videos are not understood
 
-`video_transcoder_unavailable` in `bun run debug` means `ffmpeg`/`ffprobe` is missing. Install it and restart; nothing else is affected. Videos above 20 MiB are not processed.
+`video_transcoder_unavailable` in `npm run debug` means `ffmpeg`/`ffprobe` is missing. Install it and restart; nothing else is affected. Videos above 20 MiB are not processed.
 
 ## Search or page reading fails
 

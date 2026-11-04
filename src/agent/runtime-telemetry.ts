@@ -1,5 +1,5 @@
 // Best-effort facts only. Session statistics and context usage belong to Pi.
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import type { Usage, Api, Model } from "@earendil-works/pi-ai";
 import type { BotConfig } from "../config.ts";
 import { log } from "../observability/log.ts";
@@ -25,7 +25,7 @@ export class BotRuntimeTelemetry {
 	recordEvent(kind: string, payload: unknown): void {
 		this.write(() => {
 			this.db
-				.query("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES (?, ?, ?, ?)")
+				.prepare("INSERT INTO agent_events (bot_id, ts, kind, payload) VALUES (?, ?, ?, ?)")
 				.run(this.bot.id, Date.now(), kind, JSON.stringify(payload));
 		});
 	}
@@ -46,7 +46,7 @@ export class BotRuntimeTelemetry {
 		}
 		this.write(() => {
 			this.db
-				.query(`INSERT INTO llm_runs
+				.prepare(`INSERT INTO llm_runs
 				(bot_id, ts, model, epoch, context_tokens, cache_read, cache_write, cache_read_estimated,
 				 cache_miss, output_tokens, cost, compaction, provider, api, cache_retention, system_hash, tools_hash)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)

@@ -1,6 +1,6 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 
-import { Database } from "bun:sqlite";
+import { DatabaseSync as Database } from "node:sqlite";
 import { parseArgs } from "node:util";
 
 import { join } from "node:path";
@@ -10,7 +10,7 @@ import { buildDebugReport, parseDebugDuration } from "../src/observability/debug
 import { readStructuredLogTail } from "../src/observability/log.ts";
 
 function usage(): string {
-	return "Usage: bun run debug -- [--bot <id>] [--since <30s|15m|2h|7d>]\n";
+	return "Usage: npm run debug -- [--bot <id>] [--since <30s|15m|2h|7d>]\n";
 }
 
 export async function main(args = process.argv.slice(2), rootDir = process.cwd()): Promise<number> {
@@ -48,7 +48,7 @@ export async function main(args = process.argv.slice(2), rootDir = process.cwd()
 			process.stderr.write(`Unknown bot id. Valid ids: ${configuredIds.join(", ")}\n`);
 			return 2;
 		}
-		db = new Database(config.dbPath, { readonly: true, strict: true });
+		db = new Database(config.dbPath, { readOnly: true });
 		const pid = readPid(join(config.dataDir, "daemon.pid"));
 		const report = buildDebugReport(db, {
 			botIds,

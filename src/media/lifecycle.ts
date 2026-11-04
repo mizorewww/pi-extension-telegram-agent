@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { resolveMediaSourcePath } from "./local-cache.ts";
@@ -89,7 +89,7 @@ export function pruneUnreferencedMediaCache(
 	if (!botIdsJson) return { scanned: 0, deleted: 0, stale: 0, failed: 0 };
 	const limit = Math.min(MEDIA_PRUNE_BATCH_LIMIT, Math.max(1, Math.floor(options.limit ?? MEDIA_PRUNE_BATCH_LIMIT)));
 	const rows = db
-		.query(`
+		.prepare(`
 			SELECT media.file_unique_id AS fileUniqueId, media.local_path AS localPath
 			  FROM media
 			 WHERE media.local_path IS NOT NULL
@@ -99,7 +99,7 @@ export function pruneUnreferencedMediaCache(
 		`)
 		.all(botIdsJson, limit) as Array<{ fileUniqueId: string; localPath: string }>;
 	const result: MediaPruneResult = { scanned: rows.length, deleted: 0, stale: 0, failed: 0 };
-	const clear = db.query("UPDATE media SET local_path = NULL WHERE file_unique_id = ? AND local_path IS ?");
+	const clear = db.prepare("UPDATE media SET local_path = NULL WHERE file_unique_id = ? AND local_path IS ?");
 	const remove = options.remove ?? defaultRemove;
 	for (const row of rows) {
 		const path = resolveMediaSourcePath(mediaDir, row.localPath);

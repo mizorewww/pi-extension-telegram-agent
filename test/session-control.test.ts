@@ -1,6 +1,7 @@
+import assert from "node:assert/strict";
 // Only human admins can run mutating control commands, and no command reaches the provider context.
 
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, test } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -102,19 +103,19 @@ test("mutating control commands require a human admin and never reach the provid
 			[{ id: "A", username: "alpha_bot" }],
 		)!;
 	try {
-		expect((await service.handle(command(1, { id: 99 }))).text).toContain("权限不足");
-		expect((await service.handle(command(2, { id: 42, is_bot: true }))).text).toBeNull();
-		expect(resets).toBe(0);
-		expect((await service.handle(command(3, { id: 42 }))).text).toContain("epoch=7");
-		expect(resets).toBe(1);
+		assert.ok(((await service.handle(command(1, { id: 99 }))).text ?? "").includes("权限不足"));
+		assert.equal((await service.handle(command(2, { id: 42, is_bot: true }))).text, null);
+		assert.equal(resets, 0);
+		assert.ok(((await service.handle(command(3, { id: 42 }))).text ?? "").includes("epoch=7"));
+		assert.equal(resets, 1);
 		// /task is public; cancelling one is an admin mutation like the others.
-		expect((await service.handle(command(4, { id: 99 }, "/task"))).text).toContain("t1 [running]");
-		expect((await service.handle(command(5, { id: 99 }, "/task cancel t1"))).text).toContain("权限不足");
-		expect(cancelled).toEqual([]);
-		expect((await service.handle(command(6, { id: 42 }, "/task cancel t1"))).text).toContain("已取消 t1");
-		expect(cancelled).toEqual(["t1"]);
+		assert.ok(((await service.handle(command(4, { id: 99 }, "/task"))).text ?? "").includes("t1 [running]"));
+		assert.ok(((await service.handle(command(5, { id: 99 }, "/task cancel t1"))).text ?? "").includes("权限不足"));
+		assert.deepEqual(cancelled, []);
+		assert.ok(((await service.handle(command(6, { id: 42 }, "/task cancel t1"))).text ?? "").includes("已取消 t1"));
+		assert.deepEqual(cancelled, ["t1"]);
 		// Every command message is excluded from provider context, whatever its outcome.
-		expect(consumedControlMessageIds(db, CHAT)).toEqual(new Set([1, 2, 3, 4, 5, 6]));
+		assert.deepEqual(consumedControlMessageIds(db, CHAT), new Set([1, 2, 3, 4, 5, 6]));
 	} finally {
 		db.close();
 	}

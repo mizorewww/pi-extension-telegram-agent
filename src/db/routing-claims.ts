@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import type { RoutingDecision, TriggerResult } from "../agent/router.ts";
 
 /**
@@ -11,7 +11,7 @@ export function claimRoutingDecision(
 	routeVersion: number,
 ): boolean {
 	const accepted = db
-		.query(`
+		.prepare(`
 		SELECT 1
 		  FROM routing_claims
 		 WHERE chat_id = ? AND message_id = ?
@@ -22,7 +22,7 @@ export function claimRoutingDecision(
 	if (accepted) return false;
 	const now = Date.now();
 	const result = db
-		.query(`
+		.prepare(`
 		INSERT INTO routing_claims
 			(chat_id, message_id, bot_id, route_version, reason, status, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
@@ -42,7 +42,7 @@ export function finishRoutingClaim(
 	routeVersion: number,
 	status: TriggerResult | "missing_runtime",
 ): void {
-	db.query(`
+	db.prepare(`
 		UPDATE routing_claims
 		   SET status = ?, updated_at = ?
 		 WHERE chat_id = ? AND message_id = ? AND bot_id = ? AND route_version = ?

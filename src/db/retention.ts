@@ -1,4 +1,5 @@
-import type { Database } from "bun:sqlite";
+import { transaction as atomic } from "./db.ts";
+import type { DatabaseSync as Database } from "node:sqlite";
 import type { RetentionConfig } from "../config.ts";
 
 const DAY_MS = 86_400_000;
@@ -16,11 +17,15 @@ export interface RetentionResult {
  */
 export function pruneUnconfiguredBotState(db: Database, botIds: readonly string[]): number {
 	const placeholders = botIds.map(() => "?").join(", ");
-	const prune = db.transaction(
-		(): number =>
-			db.query(`DELETE FROM bot_cursors WHERE bot_id NOT IN (${placeholders})`).run(...botIds).changes +
-			db.query(`DELETE FROM reply_obligations WHERE bot_id NOT IN (${placeholders})`).run(...botIds).changes,
-	);
+	const prune = () =>
+		atomic(
+			db,
+			() =>
+				Number(db.prepare(`DELETE FROM bot_cursors WHERE bot_id NOT IN (${placeholders})`).run(...botIds).changes) +
+				Number(
+					db.prepare(`DELETE FROM reply_obligations WHERE bot_id NOT IN (${placeholders})`).run(...botIds).changes,
+				),
+		);
 	return prune();
 }
 
@@ -32,16 +37,17 @@ export function applyRetention(db: Database, config: RetentionConfig, now = Date
 	const telemetryCutoffMs = now - config.telemetryDays * DAY_MS;
 	const rawCutoffSec = Math.floor((now - config.rawUpdateDays * DAY_MS) / 1000);
 	const eventCutoffSec = Math.floor((now - config.messageEventDays * DAY_MS) / 1000);
-	const prune = db.transaction((): RetentionResult => {
-		const agentEvents = db.query("DELETE FROM agent_events WHERE ts < ?").run(telemetryCutoffMs).changes;
-		const llmRuns = db.query("DELETE FROM llm_runs WHERE ts < ?").run(telemetryCutoffMs).changes;
-		const rawUpdates = db
-			.query(
-				"DELETE FROM raw_updates WHERE received_at < ? AND NOT EXISTS (SELECT 1 FROM pending_telegram_dispatch p WHERE p.bot_id = raw_updates.bot_id AND p.update_id = raw_updates.update_id)",
-			)
-			.run(rawCutoffSec).changes;
-		const messageEvents = db
-			.query(`
+	const prune = () =>
+		atomic(db, () => {
+			const agentEvents = db.prepare("DELETE FROM agent_events WHERE ts < ?").run(telemetryCutoffMs).changes;
+			const llmRuns = db.prepare("DELETE FROM llm_runs WHERE ts < ?").run(telemetryCutoffMs).changes;
+			const rawUpdates = db
+				.prepare(
+					"DELETE FROM raw_updates WHERE received_at < ? AND NOT EXISTS (SELECT 1 FROM pending_telegram_dispatch p WHERE p.bot_id = raw_updates.bot_id AND p.update_id = raw_updates.update_id)",
+				)
+				.run(rawCutoffSec).changes;
+			const messageEvents = db
+				.prepare(`
 			DELETE FROM message_events
 			 WHERE event_date < ?
 			   AND EXISTS (
@@ -63,8 +69,13 @@ export function applyRetention(db: Database, config: RetentionConfig, now = Date
 			        AND o.message_id = message_events.message_id
 			   )
 		`)
-			.run(eventCutoffSec).changes;
-		return { agentEvents, llmRuns, rawUpdates, messageEvents };
-	});
+				.run(eventCutoffSec).changes;
+			return {
+				agentEvents: Number(agentEvents),
+				llmRuns: Number(llmRuns),
+				rawUpdates: Number(rawUpdates),
+				messageEvents: Number(messageEvents),
+			};
+		});
 	return prune();
 }

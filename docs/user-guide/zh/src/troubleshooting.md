@@ -3,7 +3,7 @@
 先跑一次只读诊断，结合最近请求、回复义务和日志定位问题：
 
 ```bash
-bun run debug -- --since 30m
+npm run debug -- --since 30m
 ```
 
 不要为了“试一下”删除 `data/` 或 pid 文件。
@@ -23,9 +23,9 @@ systemctl --user status telegram-agent
 ## 群里 @ 了 bot 但没反应
 
 - 确认 BotFather 里已关闭 group privacy，bot 在正确的群里且能发言。
-- 跑 `bun run debug`：`context.pending_reply_obligations > 0` 表示还有待答消息（bot 会在下次触发或重启时补上）；对比 `claims` 与 `runs`，并看日志里的 `flush_failed` / `provider_attempt_failed`。
+- 跑 `npm run debug`：`context.pending_reply_obligations > 0` 表示还有待答消息（bot 会在下次触发或重启时补上）；对比 `claims` 与 `runs`，并看日志里的 `flush_failed` / `provider_attempt_failed`。
 - 401：token 被撤销，修正 `.env` 后重启。
-- 409：同一个 token 被另一个进程使用。确认只有一个 daemon 在运行（不要在 systemd 之外再 `bun run start` 一份，也不要在另一台机器上用同一 token 启动）。
+- 409：同一个 token 被另一个进程使用。确认只有一个 daemon 在运行（不要在 systemd 之外再 `npm run start` 一份，也不要在另一台机器上用同一 token 启动）。
 
 ## bot 一直说跟话题无关的话
 

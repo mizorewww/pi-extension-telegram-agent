@@ -1,4 +1,5 @@
-import type { Database } from "bun:sqlite";
+import { transaction as atomic } from "./db.ts";
+import type { DatabaseSync as Database } from "node:sqlite";
 import { createHash } from "node:crypto";
 import type { MessageRow } from "../agent/serialize.ts";
 
@@ -51,7 +52,7 @@ function decodeEvent(row: MessageEventDbRow): MessageEvent {
 		revision: row.revision,
 		kind: row.kind,
 		eventDate: row.eventDate,
-		payload: JSON.parse(row.payloadJson) as MessageRow | MediaUpdatePayload | NotePayload,
+		payload: JSON.parse(row.payloadJson) as unknown as MessageRow | MediaUpdatePayload | NotePayload,
 	};
 }
 
@@ -67,7 +68,7 @@ const EVENT_SELECT = `
 
 export function messageEventHighWater(db: Database, chatId: number): number {
 	const row = db
-		.query("SELECT COALESCE(MAX(ingest_seq), 0) AS seq FROM message_events WHERE chat_id = ?")
+		.prepare("SELECT COALESCE(MAX(ingest_seq), 0) AS seq FROM message_events WHERE chat_id = ?")
 		.get(chatId) as { seq: number };
 	return row.seq;
 }
@@ -85,30 +86,30 @@ export function listRecentMessageEvents(
 ): MessageEvent[] {
 	if (throughSeq <= afterSeq || limit <= 0) return [];
 	const rows = db
-		.query(`${EVENT_SELECT}
+		.prepare(`${EVENT_SELECT}
 			WHERE chat_id = ? AND ingest_seq > ? AND ingest_seq <= ?
 			ORDER BY ingest_seq DESC
 			LIMIT ?`)
-		.all(chatId, afterSeq, throughSeq, limit) as MessageEventDbRow[];
+		.all(chatId, afterSeq, throughSeq, limit) as unknown as MessageEventDbRow[];
 	return rows.reverse().map(decodeEvent);
 }
 
 /** Obligations remain addressable even after the ordinary cursor advanced past their event. */
 export function listReplyObligationEvents(db: Database, botId: string, chatId: number, limit = 64): MessageEvent[] {
 	const rows = db
-		.query(`${EVENT_SELECT}
+		.prepare(`${EVENT_SELECT}
 			JOIN reply_obligations o
 			  ON o.chat_id = e.chat_id AND o.message_id = e.message_id
 			WHERE o.bot_id = ? AND o.chat_id = ? AND e.kind = 'message'
 			ORDER BY e.ingest_seq
 			LIMIT ?`)
-		.all(botId, chatId, Math.max(1, Math.floor(limit))) as MessageEventDbRow[];
+		.all(botId, chatId, Math.max(1, Math.floor(limit))) as unknown as MessageEventDbRow[];
 	return rows.map(decodeEvent);
 }
 
 export function getConsumedSeq(db: Database, botId: string, chatId: number): number {
 	const row = db
-		.query("SELECT consumed_seq AS consumedSeq FROM bot_cursors WHERE bot_id = ? AND chat_id = ?")
+		.prepare("SELECT consumed_seq AS consumedSeq FROM bot_cursors WHERE bot_id = ? AND chat_id = ?")
 		.get(botId, chatId) as { consumedSeq: number } | null;
 	return row?.consumedSeq ?? 0;
 }
@@ -116,7 +117,7 @@ export function getConsumedSeq(db: Database, botId: string, chatId: number): num
 export function setConsumedSeq(db: Database, botId: string, chatId: number, consumedSeq: number): void {
 	const current = getConsumedSeq(db, botId, chatId);
 	if (consumedSeq < current) throw new Error(`consumed cursor cannot move backwards (${consumedSeq} < ${current})`);
-	db.query(`
+	db.prepare(`
 		INSERT INTO bot_cursors (bot_id, chat_id, consumed_seq, updated_at)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(bot_id, chat_id) DO UPDATE SET
@@ -128,7 +129,7 @@ export function setConsumedSeq(db: Database, botId: string, chatId: number, cons
 export function listVisibleMessageIds(db: Database, botId: string, chatId: number, epoch: number): number[] {
 	return (
 		db
-			.query(`
+			.prepare(`
 			SELECT message_id AS messageId
 			  FROM bot_visible_messages
 			 WHERE bot_id = ? AND chat_id = ? AND context_epoch = ?
@@ -145,15 +146,16 @@ export function replaceVisibleMessageIds(
 	epoch: number,
 	messageIds: readonly number[],
 ): void {
-	const replace = db.transaction(() => {
-		db.query("DELETE FROM bot_visible_messages WHERE bot_id = ? AND chat_id = ?").run(botId, chatId);
-		const insert = db.query(`
+	const replace = () =>
+		atomic(db, () => {
+			db.prepare("DELETE FROM bot_visible_messages WHERE bot_id = ? AND chat_id = ?").run(botId, chatId);
+			const insert = db.prepare(`
 			INSERT OR IGNORE INTO bot_visible_messages
 				(bot_id, chat_id, message_id, context_epoch)
 			VALUES (?, ?, ?, ?)
 		`);
-		for (const messageId of new Set(messageIds)) insert.run(botId, chatId, messageId, epoch);
-	});
+			for (const messageId of new Set(messageIds)) insert.run(botId, chatId, messageId, epoch);
+		});
 	replace();
 }
 
@@ -165,14 +167,15 @@ export function addVisibleMessageIds(
 	messageIds: readonly number[],
 ): void {
 	if (messageIds.length === 0) return;
-	const insert = db.query(`
+	const insert = db.prepare(`
 		INSERT OR IGNORE INTO bot_visible_messages
 			(bot_id, chat_id, message_id, context_epoch)
 		VALUES (?, ?, ?, ?)
 	`);
-	const transaction = db.transaction(() => {
-		for (const messageId of new Set(messageIds)) insert.run(botId, chatId, messageId, epoch);
-	});
+	const transaction = () =>
+		atomic(db, () => {
+			for (const messageId of new Set(messageIds)) insert.run(botId, chatId, messageId, epoch);
+		});
 	transaction();
 }
 
@@ -188,17 +191,18 @@ export function commitConsumedContext(
 		deliveredObligationIds: readonly number[];
 	},
 ): void {
-	const transaction = db.transaction(() => {
-		setConsumedSeq(db, input.botId, input.chatId, input.consumedSeq);
-		replaceVisibleMessageIds(db, input.botId, input.chatId, input.epoch, input.visibleMessageIds);
-		const removeObligation = db.query(`
+	const transaction = () =>
+		atomic(db, () => {
+			setConsumedSeq(db, input.botId, input.chatId, input.consumedSeq);
+			replaceVisibleMessageIds(db, input.botId, input.chatId, input.epoch, input.visibleMessageIds);
+			const removeObligation = db.prepare(`
 			DELETE FROM reply_obligations
 			 WHERE bot_id = ? AND chat_id = ? AND message_id = ?
 		`);
-		for (const messageId of new Set(input.deliveredObligationIds)) {
-			removeObligation.run(input.botId, input.chatId, messageId);
-		}
-	});
+			for (const messageId of new Set(input.deliveredObligationIds)) {
+				removeObligation.run(input.botId, input.chatId, messageId);
+			}
+		});
 	transaction();
 }
 
@@ -207,7 +211,7 @@ export function appendMediaUpdateEvents(db: Database, fileUniqueId: string, text
 	const normalized = text.trim();
 	if (!normalized) return 0;
 	const rows = db
-		.query(`
+		.prepare(`
 			SELECT chat_id AS chatId, message_id AS messageId, date,
 			       COALESCE(json_extract(media, '$.kind'), 'media') AS mediaKind
 			  FROM messages
@@ -216,25 +220,26 @@ export function appendMediaUpdateEvents(db: Database, fileUniqueId: string, text
 		.all(fileUniqueId) as { chatId: number; messageId: number; date: number; mediaKind: string }[];
 	const revisionHex = createHash("sha256").update(normalized).digest("hex").slice(0, 12);
 	const revision = Number.parseInt(revisionHex, 16);
-	const insert = db.query(`
+	const insert = db.prepare(`
 		INSERT OR IGNORE INTO message_events
 			(event_key, chat_id, message_id, revision, kind, event_date, payload_json)
 		VALUES (?, ?, ?, ?, 'media_update', ?, ?)
 	`);
 	let changes = 0;
-	const transaction = db.transaction(() => {
-		for (const row of rows) {
-			const result = insert.run(
-				`media:${row.chatId}:${row.messageId}:${revisionHex}`,
-				row.chatId,
-				row.messageId,
-				revision,
-				Math.max(row.date, Math.floor(Date.now() / 1000)),
-				JSON.stringify({ file_unique_id: fileUniqueId, media_kind: row.mediaKind, text: normalized }),
-			);
-			changes += result.changes;
-		}
-	});
+	const transaction = () =>
+		atomic(db, () => {
+			for (const row of rows) {
+				const result = insert.run(
+					`media:${row.chatId}:${row.messageId}:${revisionHex}`,
+					row.chatId,
+					row.messageId,
+					revision,
+					Math.max(row.date, Math.floor(Date.now() / 1000)),
+					JSON.stringify({ file_unique_id: fileUniqueId, media_kind: row.mediaKind, text: normalized }),
+				);
+				changes += Number(result.changes);
+			}
+		});
 	transaction();
 	return changes;
 }
@@ -242,13 +247,13 @@ export function appendMediaUpdateEvents(db: Database, fileUniqueId: string, text
 /** One real message of the group; control commands and their replies do not count. */
 export function groupMessage(db: Database, chatId: number, messageId: number): MessageRow | null {
 	return db
-		.query(
+		.prepare(
 			`SELECT m.* FROM messages m
 			  WHERE m.chat_id = ? AND m.message_id = ?
 			    AND NOT EXISTS (SELECT 1 FROM telegram_control_messages c
 			                     WHERE c.chat_id = m.chat_id AND c.message_id = m.message_id)`,
 		)
-		.get(chatId, messageId) as MessageRow | null;
+		.get(chatId, messageId) as unknown as MessageRow | null;
 }
 
 /** Notes belong to one bot; every other bot's cursor just passes over them. */
@@ -265,7 +270,7 @@ export function appendNoteEvent(
 	payload: NotePayload,
 ): number | null {
 	const result = db
-		.query(`
+		.prepare(`
 			INSERT OR IGNORE INTO message_events
 				(event_key, chat_id, message_id, revision, kind, event_date, payload_json)
 			VALUES (?, ?, ?, 0, 'note', ?, ?)
@@ -284,7 +289,7 @@ export interface SessionManifest {
 
 export function getSessionManifest(db: Database, botId: string): SessionManifest | null {
 	return db
-		.query(`
+		.prepare(`
 		SELECT bot_id AS botId,
 		       session_id AS sessionId,
 		       session_file AS sessionFile,
@@ -293,11 +298,11 @@ export function getSessionManifest(db: Database, botId: string): SessionManifest
 		  FROM bot_session_manifest
 		 WHERE bot_id = ?
 	`)
-		.get(botId) as SessionManifest | null;
+		.get(botId) as unknown as SessionManifest | null;
 }
 
 export function setSessionManifest(db: Database, manifest: SessionManifest): void {
-	db.query(`
+	db.prepare(`
 		INSERT INTO bot_session_manifest
 			(bot_id, session_id, session_file, context_fingerprint, created_at)
 		VALUES (?, ?, ?, ?, ?)

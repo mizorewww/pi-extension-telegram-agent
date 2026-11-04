@@ -8,7 +8,7 @@ Put one or more AI bots, each with its own personality, into your Telegram group
 
 1. Create a bot with BotFather, turn off group privacy, and add it to your supergroup.
 2. Run `pi` and pick a model with Pi's `/login` and `/model`.
-3. Copy `telegram.config.example.ts` to `telegram.config.ts`, fill in the group ID and the bot, and put the token in `.env`; start with `bun run start`, then mention the bot in the group or send `/status`.
+3. Copy `telegram.config.example.ts` to `telegram.config.ts`, fill in the group ID and the bot, and put the token in `.env`; start with `npm start`, then mention the bot in the group or send `/status`.
 
 ## Chapters
 

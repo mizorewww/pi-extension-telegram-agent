@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import { log } from "../observability/log.ts";
 import type { ParsedTelegramControlCommand, TelegramControlResult } from "./control-command.ts";
 import type { InlineKeyboardMarkup } from "./api.ts";

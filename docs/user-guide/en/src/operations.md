@@ -11,7 +11,7 @@ systemctl --user stop telegram-agent      # stop
 systemctl --user status telegram-agent    # is it running?
 ```
 
-Without systemd (for example on macOS), run `bun run start` in the foreground in a terminal or tmux; Ctrl-C stops it. One deployment runs exactly one daemon.
+Without systemd (for example on macOS), run `npm run start` in the foreground in a terminal or tmux; Ctrl-C stops it. One deployment runs exactly one daemon.
 
 Under systemd the log is `data/daemon.log`; in the foreground it prints to the terminal (structured JSON without chat content). Host setup for work boxes and background tasks is in the [sandbox runbook](https://github.com/mizorewww/pi-extension-telegram-agent/blob/main/docs/runbooks/sandbox.md).
 

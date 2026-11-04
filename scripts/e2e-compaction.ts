@@ -1,7 +1,7 @@
 // Compaction e2e: real session + real summary LLM call through BotRuntime's public
 // control boundary. The automatic threshold can sit near 984K tokens on a 1M-window
 // model, so this script drives the same explicit path used by Telegram /compact.
-// Usage: bun run scripts/e2e-compaction.ts --bot <id>   (touches real services, needs .env)
+// Usage: node dist/scripts/e2e-compaction.js --bot <id>   (touches real services, needs .env)
 import { loadConfig } from "../src/config.ts";
 import { openDb, getBotState, setBotState } from "../src/db/db.ts";
 import { BotApi } from "../src/telegram/api.ts";
@@ -28,7 +28,7 @@ try {
 	const epochAfter = Number(getBotState(db, bot.id, "context_epoch") ?? "1");
 	if (epochAfter <= epochBefore) throw new Error(`epoch did not advance (${epochBefore} -> ${epochAfter})`);
 	const errors = db
-		.query("SELECT payload FROM agent_events WHERE bot_id = ? AND kind = 'error' AND ts > ?")
+		.prepare("SELECT payload FROM agent_events WHERE bot_id = ? AND kind = 'error' AND ts > ?")
 		.all(bot.id, Date.now() - 120_000);
 	if (errors.length > 0) throw new Error(`unexpected error events: ${JSON.stringify(errors)}`);
 

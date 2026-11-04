@@ -5,11 +5,12 @@
 	"type": "module",
 	"description": "Configurable Telegram group companions powered by Pi SDK",
 	"scripts": {
-		"docs:build": "bun run scripts/docs-site.ts build",
-		"docs:check": "bun run scripts/docs-site.ts check",
-		"start": "bun run src/daemon/index.ts",
-		"debug": "bun run scripts/debug-report.ts",
-		"test": "bun test",
+		"build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
+		"start": "node dist/src/daemon/index.js",
+		"debug": "node dist/scripts/debug-report.js",
+		"docs:build": "npm run build && node dist/scripts/docs-site.js build",
+		"docs:check": "npm run build && node dist/scripts/docs-site.js check",
+		"test": "npm run build && TZ=UTC node --import ./dist/test/network-guard.js --test dist/test/*.test.js",
 		"check": "tsc --noEmit",
 		"lint": "biome check .",
 		"format": "biome check --write ."
@@ -19,15 +20,17 @@
 		"@earendil-works/pi-ai": "1.5.0",
 		"@earendil-works/pi-codemode": "1.5.0",
 		"@earendil-works/pi-coding-agent": "1.5.0",
+		"@earendil-works/pi-schema": "1.5.0",
 		"@earendil-works/pi-tui": "1.5.0",
 		"jiti": "2.7.0",
-		"@earendil-works/pi-schema": "1.5.0",
 		"typebox": "1.3.27"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.5.7",
-		"@types/node": "^24.0.0",
-		"bun-types": "^1.3.14",
-		"typescript": "^5.9.0"
+		"@biomejs/biome": "2.5.7",
+		"@types/node": "24.13.3",
+		"typescript": "5.9.3"
+	},
+	"engines": {
+		"node": ">=24.0.0"
 	}
 }

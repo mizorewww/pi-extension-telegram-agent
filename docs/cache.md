@@ -26,7 +26,7 @@ provider prefix cache 是本项目的第一成本杠杆。本文是“哪些字�
 ## 改动 cache-visible 内容的流程
 
 1. bump `src/agent/prompt.ts` 的 `CACHE_SCHEMA_VERSION`（旁边注释写一句理由，历史看 git log）；
-2. 跑 `bun test test/cache.test.ts`，确认失败的正是你预期改变的那几项 golden，再更新 expected；
+2. 跑 `npm test test/cache.test.ts`，确认失败的正是你预期改变的那几项 golden，再更新 expected；
 3. 部署后每个 bot 会新建 session（新 epoch），首个请求冷缓存，旧 session 文件保留。
 
 当前 schema v47：升级 Pi 1.5.0，补答通过 `agent_before_settle` 返回持久化 custom message 和 `continue: true`；新增 `tg-reply-repair` 扩展。工具 schema、共享 prompt 与消息序列化 grammar 不变。升级时 fingerprint 改变，每个 bot 新建 session 和 epoch，旧 session 文件保留。

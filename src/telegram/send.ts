@@ -1,6 +1,6 @@
 // Shared Telegram send -> canonical DB transaction used by agent tools and operator IPC.
 
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import { TelegramApiError, type InlineKeyboardMarkup } from "./api.ts";
 import { insertSentMessage } from "./ingest.ts";
 import { formatTelegramMarkdown, TelegramMarkdownError, type TelegramMessageEntity } from "./markdown.ts";

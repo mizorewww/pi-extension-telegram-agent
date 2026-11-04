@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 
@@ -43,18 +44,12 @@ export interface CommandResult {
 	stderr: string;
 }
 
-async function run(command: readonly string[], cwd: string): Promise<CommandResult> {
-	const child = Bun.spawn([...command], {
-		cwd,
-		stdout: "pipe",
-		stderr: "pipe",
+function run(command: readonly string[], cwd: string): Promise<CommandResult> {
+	return new Promise((resolve) => {
+		execFile(command[0]!, command.slice(1), { cwd, maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
+			resolve({ exitCode: error ? (typeof error.code === "number" ? error.code : 1) : 0, stdout, stderr });
+		});
 	});
-	const [exitCode, stdout, stderr] = await Promise.all([
-		child.exited,
-		new Response(child.stdout).text(),
-		new Response(child.stderr).text(),
-	]);
-	return { exitCode, stdout, stderr };
 }
 
 export interface LinkIssue {
@@ -299,7 +294,7 @@ export async function checkDocumentation(rootDir: string): Promise<LinkReport[]>
 }
 
 if (import.meta.main) {
-	const rootDir = resolve(import.meta.dir, "..");
+	const rootDir = process.cwd();
 	const command = process.argv[2] ?? "check";
 	try {
 		if (command === "build") {
@@ -311,7 +306,7 @@ if (import.meta.main) {
 				`Documentation OK: ${source.files} Markdown files / ${source.links} links; ${generated.files} HTML files / ${generated.links} links.`,
 			);
 		} else {
-			throw new Error("Usage: bun run scripts/docs-site.ts <build|check>");
+			throw new Error("Usage: node dist/scripts/docs-site.js <build|check>");
 		}
 	} catch (error) {
 		console.error(error instanceof Error ? error.message : "Documentation build failed.");

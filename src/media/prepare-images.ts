@@ -5,7 +5,7 @@
 // view_image installs it as derived cache files whose names follow from the media identity, so
 // pruning and projection need no record of them. No provider call happens here.
 
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import { readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
@@ -76,7 +76,7 @@ export async function prepareMediaImages(
 	fileUniqueId: string,
 	options: PrepareMediaImagesOptions,
 ): Promise<PrepareMediaImagesResult> {
-	const media = db.query("SELECT kind, mime FROM media WHERE file_unique_id = ?").get(fileUniqueId) as {
+	const media = db.prepare("SELECT kind, mime FROM media WHERE file_unique_id = ?").get(fileUniqueId) as {
 		kind: string;
 		mime: string | null;
 	} | null;

@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { DatabaseSync as Database } from "node:sqlite";
 import {
 	eventsForBot,
 	listRecentMessageEvents,
@@ -73,7 +73,7 @@ export function pendingMediaIds(
 	for (const event of prioritized) {
 		if (pending.length >= limit) break;
 		if (event.kind === "media_update" || event.kind === "note") continue;
-		const row = event.payload as MessageRow;
+		const row = event.payload as unknown as MessageRow;
 		if (!row.media) continue;
 		const media = JSON.parse(row.media) as { kind: string; mime?: string; file_unique_id?: string };
 		if (!media.file_unique_id || !isVisionMedia(media.kind, media.mime) || seen.has(media.file_unique_id)) continue;
@@ -147,7 +147,7 @@ export function capMessageEvent(event: MessageEvent, maxTokens = DEFAULT_MESSAGE
 		const payload = event.payload as MediaUpdatePayload | NotePayload;
 		return { ...event, payload: { ...payload, text: truncateBody(payload.text, maxTokens) } };
 	}
-	const row = event.payload as MessageRow;
+	const row = event.payload as unknown as MessageRow;
 	const parent = row.reply_snapshot ? (JSON.parse(row.reply_snapshot) as ReplySnapshot) : null;
 	const quote = row.quote ? (JSON.parse(row.quote) as { text?: string }) : null;
 	const bodyField = row.text != null ? "text" : "caption";
@@ -203,7 +203,7 @@ export function packMessageEvents(
 		const key = eventKey(source);
 		if (selectedKeys.has(key)) return true;
 		if (source.kind !== "media_update") {
-			const row = source.payload as MessageRow;
+			const row = source.payload as unknown as MessageRow;
 			const parent = replySnapshot(db, row);
 			if (parent) source = { ...source, payload: { ...row, reply_snapshot: JSON.stringify(parent) } };
 		}

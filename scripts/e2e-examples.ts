@@ -2,8 +2,8 @@
 // in Pi's codemode sandbox against the real script tools — tg_messages on a read-only database,
 // real TinyFish search, a scratch work box "ex", real Telegram getFile. send and task are only
 // recorded (nothing reaches the group); a job's code really runs, in a nested sandbox without them. Paid search calls and network; run only with authorization.
-// Usage: bun run scripts/e2e-examples.ts --photo <msg id> --pdf <msg id> --thread <msg id> --sender @user [--only 03]
-import { Database } from "bun:sqlite";
+// Usage: node dist/scripts/e2e-examples.js --photo <msg id> --pdf <msg id> --thread <msg id> --sender @user [--only 03]
+import { DatabaseSync as Database } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { loadConfig } from "../src/config.ts";
@@ -24,7 +24,7 @@ if (!photo || !pdf || !thread || !sender) {
 }
 const config = loadConfig(process.cwd());
 if (!config.sandbox) throw new Error("this deployment has no sandbox section");
-const db = new Database(config.dbPath, { readonly: true });
+const db = new Database(config.dbPath, { readOnly: true });
 const box = new WorkBox("ex", config.sandbox);
 const api = new BotApi(config.bots[0]!.token);
 const posts: string[] = [];
@@ -56,7 +56,7 @@ const tools = [
 		name: "tg_download",
 		execute: async (input: any) => {
 			const row = db
-				.query("SELECT media FROM messages WHERE chat_id = ? AND message_id = ?")
+				.prepare("SELECT media FROM messages WHERE chat_id = ? AND message_id = ?")
 				.get(config.groupChatId, input.message_id) as { media: string | null } | null;
 			const media = row?.media ? JSON.parse(row.media) : null;
 			if (!media) throw new Error("tg_download failed: no attachment on that message");

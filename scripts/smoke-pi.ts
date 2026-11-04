@@ -1,5 +1,5 @@
 // Opt-in provider smoke. One synthetic prompt, no Telegram sends or persistent session.
-// Usage: bun run scripts/smoke-pi.ts --bot <id>
+// Usage: node dist/scripts/smoke-pi.js --bot <id>
 import {
 	createAgentSession,
 	DefaultResourceLoader,
