@@ -26,6 +26,7 @@ import {
 	listRecentMessageEvents,
 	messageEventHighWater,
 	appendNoteEvent,
+	type MessageEvent,
 } from "../db/message-events.ts";
 import type { MediaDownloadApi } from "../media/local-cache.ts";
 import {
@@ -45,7 +46,7 @@ import { type BotApi, groupReactionAllowlist } from "../telegram/api.ts";
 import { buildSystemPrompt, CACHE_SCHEMA_VERSION, REPLY_RECOVERY_PROMPT, sha256Short } from "./prompt.ts";
 import { guardModels } from "./provider-guard.ts";
 import { buildBotRuntimeTools } from "./runtime-tools.ts";
-import { renderMessageLine, serializeMessageEvents, type MessageRow } from "./serialize.ts";
+import { serializeMessageEvents, serializeMessageSegments, type MessageRow } from "./serialize.ts";
 import type { RoutingTrigger, TriggerResult, TriggerSource } from "./router.ts";
 
 export type ModelControlSelection = Pick<BotConfig, "provider" | "model" | "reasoningEffort">;
@@ -97,12 +98,10 @@ const messageText = (message: { content: string | readonly { type: string; text?
 	typeof message.content === "string"
 		? message.content
 		: message.content.flatMap((part) => (part.type === "text" ? [part.text ?? ""] : [])).join("\n");
-function pendingInput(pending: Record<string, string>, budget: number, first?: number) {
+function pendingInput(pending: Record<string, string>, budget: number) {
 	let text = "";
 	const required: number[] = [];
 	const entries = Object.entries(pending);
-	const priority = entries.findIndex(([id]) => Number(id) === first);
-	if (priority > 0) entries.unshift(...entries.splice(priority, 1));
 	for (const [id, value] of entries.slice(0, MAX_PENDING)) {
 		const addition = `${text ? "\n" : ""}${value}`;
 		if (text.length + addition.length > budget) break;
@@ -238,7 +237,12 @@ export class BotRuntime {
 			context,
 		);
 		this.conversation = await this.harness.root(context);
-		await this.conversation.commit((tx) => tx.doc(TelegramState, this.conversation.id), context);
+		if (!(await this.state())) {
+			await this.conversation.commit(async (tx) => {
+				const state = await tx.doc(TelegramState, this.conversation.id);
+				state.admittedSeq = messageEventHighWater(this.db, this.config.groupChatId);
+			}, context);
+		}
 		this.prompt = buildSystemPrompt(
 			readFileSync(this.bot.personaPath, "utf8"),
 			this.bot.tools,
@@ -336,40 +340,57 @@ export class BotRuntime {
 			).filter((event) => !this.isControl(event.messageId));
 			const row = groupMessage(this.db, this.config.groupChatId, trigger.messageId);
 			if (!row) return "skipped_stopping";
-			const current = bounded(renderMessageLine(this.db, row), MAX_MESSAGE_CHARS);
-			if (this.bot.tools.send && source === "explicit" && !trigger.fromBot)
-				state.pending[String(trigger.messageId)] = current;
-			// The projected note and all text share one admission budget; pending replies take priority.
+			const current: MessageEvent = {
+				ingestSeq: high,
+				chatId: trigger.chatId,
+				messageId: trigger.messageId,
+				revision: 0,
+				kind: "message",
+				eventDate: row.date,
+				payload: row,
+			};
+			const currentSize = serializeMessageEvents(this.db, [current], MAX_MESSAGE_CHARS).length;
+			const currentIsPending =
+				state.pending[String(trigger.messageId)] != null ||
+				(this.bot.tools.send && source === "explicit" && !trigger.fromBot);
+			const pending = pendingInput(
+				Object.fromEntries(Object.entries(state.pending).filter(([id]) => Number(id) !== trigger.messageId)),
+				MAX_INPUT_CHARS - currentSize - 16,
+			);
+			const required = currentIsPending ? [trigger.messageId, ...pending.required] : pending.required;
+			const owed = pending.text ? `〔待回应〕\n${pending.text}` : "";
+			const selected = [current];
+			let remaining = MAX_INPUT_CHARS - currentSize - owed.length - 2;
+			const included = new Set([trigger.messageId, ...required]);
+			for (const event of [...events].reverse()) {
+				if (event.kind === "message" && included.has(event.messageId)) continue;
+				const size = serializeMessageEvents(this.db, [event], MAX_MESSAGE_CHARS).length;
+				if (size + 1 > remaining) continue;
+				selected.unshift(event);
+				remaining -= size + 1;
+				if (event.kind === "message") included.add(event.messageId);
+			}
+			// Serialize the admitted batch once: parent visibility and date separators span every event.
+			const segments = serializeMessageSegments(this.db, selected, MAX_MESSAGE_CHARS);
+			if (currentIsPending) state.pending[String(trigger.messageId)] = segments.at(-1)!.text;
+			const content = [segments.map((segment) => segment.text).join("\n"), owed].filter(Boolean).join("\n\n");
 			const stickerNote = bounded(
 				batchStickerCandidates(
 					this.db,
 					this.bot.id,
 					this.config.groupChatId,
-					events.map((event) => event.messageId),
+					[
+						...new Set([
+							...selected
+								.filter((event) => event.kind === "message" || event.kind === "edit")
+								.map((event) => event.messageId),
+							...required,
+						]),
+					],
 					this.bot.stickerSets,
 				),
-				MAX_MESSAGE_CHARS,
+				Math.min(MAX_MESSAGE_CHARS, MAX_INPUT_CHARS - content.length),
 			);
-			const currentIsPending = state.pending[String(trigger.messageId)] != null;
-			const pending = pendingInput(
-				state.pending,
-				MAX_INPUT_CHARS - stickerNote.length - (currentIsPending ? 0 : current.length) - 16,
-				trigger.messageId,
-			);
-			const owed = pending.text ? `〔待回应〕\n${pending.text}` : "";
-			const selected: string[] = currentIsPending ? [] : [current];
-			let remaining =
-				MAX_INPUT_CHARS - stickerNote.length - owed.length - (currentIsPending ? 0 : current.length + 1) - 2;
-			const included = new Set([trigger.messageId, ...pending.required]);
-			for (const event of [...events].reverse()) {
-				if (event.kind === "message" && included.has(event.messageId)) continue;
-				const text = bounded(serializeMessageEvents(this.db, [event]), MAX_MESSAGE_CHARS);
-				if (text.length + 1 > remaining) continue;
-				selected.unshift(text);
-				remaining -= text.length + 1;
-				if (event.kind === "message") included.add(event.messageId);
-			}
-			const content = [selected.join("\n"), owed].filter(Boolean).join("\n\n");
 			await this.conversation.submit(tx, {
 				type: "input",
 				requestId,
@@ -377,7 +398,7 @@ export class BotRuntime {
 				whenBusy: "steer",
 				entry: {
 					kind: "telegram.input",
-					data: { messageId: trigger.messageId, required: pending.required, through: high, stickerNote },
+					data: { messageId: trigger.messageId, required, through: high, stickerNote },
 				},
 			});
 			state.admittedSeq = high;

@@ -1,7 +1,7 @@
 // Cache-visible protocol: changes start a new context epoch.
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 48; // Native Durable sessions, tools, images and compaction.
+export const CACHE_SCHEMA_VERSION = 49; // New-session admission and body-first, batch-aware history rendering.
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
 
 interface EnabledTools {

@@ -21,7 +21,7 @@ import {
 } from "../src/agent/tools.ts";
 process.env.TZ = "Asia/Singapore";
 const GOLDEN = {
-	schemaVersion: 48,
+	schemaVersion: 49,
 	systemZhTemplate: "b4bf0da548c6",
 	systemEnTemplate: "be0f71c64253",
 	systemSandboxTemplate: "96dc5a0c4fed",
@@ -33,6 +33,7 @@ const GOLDEN = {
 	nativeTools: "19524518f475",
 	replyRecovery: "4fc7e277e338",
 	eventSerialize: "a05c0584eb08",
+	boundedBatchSerialize: "0311b765bbce",
 };
 const CHAT_ID = -1004402809405;
 function schemaDb() {
@@ -65,6 +66,7 @@ test("prompt and native tool protocol hashes are stable", () => {
 		),
 		replyRecovery: sha256Short(REPLY_RECOVERY_PROMPT),
 		eventSerialize: GOLDEN.eventSerialize,
+		boundedBatchSerialize: GOLDEN.boundedBatchSerialize,
 	};
 	assert.deepEqual(actual, GOLDEN);
 });
@@ -92,8 +94,14 @@ test("immutable event serialization grammar is stable", () => {
 		edit_date: null,
 		media: null,
 	};
-	const event = (ingestSeq: number, kind: string, revision: number, eventDate: number, payload: unknown) =>
-		({ ingestSeq, chatId: CHAT_ID, messageId: 200, revision, kind, eventDate, payload }) as never;
+	const event = (
+		ingestSeq: number,
+		kind: string,
+		revision: number,
+		eventDate: number,
+		payload: unknown,
+		messageId = 200,
+	) => ({ ingestSeq, chatId: CHAT_ID, messageId, revision, kind, eventDate, payload }) as never;
 	const out = serializeMessageEvents(schemaDb(), [
 		event(1, "message", 0, row.date, row),
 		event(2, "edit", 1754612400, 1754612400, { ...row, text: "edited", edit_date: 1754612400 }),
@@ -114,6 +122,42 @@ test("immutable event serialization grammar is stable", () => {
 		event(4, "media_update", 2, 1754612402, { file_unique_id: "u", media_kind: "photo", text: "a cat" }),
 	]);
 	assert.equal(sha256Short(out), GOLDEN.eventSerialize);
+	const bounded = serializeMessageEvents(
+		schemaDb(),
+		[
+			event(1, "message", 0, row.date, row),
+			event(
+				2,
+				"message",
+				0,
+				row.date,
+				{
+					...row,
+					message_id: 201,
+					text: "A short question must survive its long quoted parent.",
+					reply_to_message_id: 199,
+					reply_snapshot: JSON.stringify({ username: "bob", text: "long parent ".repeat(500) }),
+				},
+				201,
+			),
+			event(
+				3,
+				"message",
+				0,
+				row.date,
+				{
+					...row,
+					message_id: 202,
+					text: "This parent is already visible in this batch.",
+					reply_to_message_id: 200,
+					reply_snapshot: JSON.stringify({ username: "alice", text: row.text }),
+				},
+				202,
+			),
+		],
+		4000,
+	);
+	assert.equal(sha256Short(bounded), GOLDEN.boundedBatchSerialize);
 });
 
 // Positional notes must never rewrite provider history or poison native compaction input.
