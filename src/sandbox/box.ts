@@ -158,7 +158,6 @@ export class WorkBox {
 		if (state.code === 0) await this.call(["rm", "--force", this.container]);
 		for (const args of [
 			this.runArgs(),
-			["exec", "--user", "0", this.container, "chown", "1000:1000", BOX_WORKDIR],
 			["exec", this.container, "mkdir", "-p", `${BOX_WORKDIR}/.home`, `${BOX_WORKDIR}/inbox`],
 		]) {
 			if ((await this.call(args)).code !== 0) throw new BoxError("box start failed");
