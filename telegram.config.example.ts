@@ -1,10 +1,10 @@
-// The single config file for this project (non-secret). Secrets live in .env (`key: value`);
+// /etc/pi-telegram-agent/telegram.config.ts (or TG_CONFIG_DIR). Secrets live beside it in .env (`key: value`);
 // this file only names the .env key of each bot token. Restart the daemon to apply changes;
 // admin group commands (`/set`, `/model`) write back into this file. Unknown or misspelled
 // fields are rejected at startup.
-import { defineConfig } from "./src/config.ts";
-
-export default defineConfig({
+// Relative persona and workflow paths are relative to this configuration directory.
+// No imports from the installed program are needed; startup validates every field.
+export default {
 	// ===== Required =====
 
 	// Target Telegram supergroup id. Bare, negative, and -100-prefixed forms are accepted.
@@ -35,7 +35,7 @@ export default defineConfig({
 	provider_timeout_ms: 300_000,
 	provider_retries: 2,
 
-	// ===== Work box for tools.sandbox (host setup: docs/runbooks/sandbox.md) =====
+	// ===== Work box for tools.sandbox (host setup: README.md) =====
 	// sandbox: { image: "tg-box:4", docker_host: "unix:///run/tgbox/docker.sock", memory: "1g", cpus: 2, pids: 256, network: true },
 
 	// Each workflow directory contains AGENTS.md instructions for a native Pi child conversation.
@@ -87,4 +87,4 @@ export default defineConfig({
 			},
 		},
 	],
-});
+};

@@ -1,5 +1,5 @@
 // Write-through edits of telegram.config.ts for the group /set and /model commands. The file
-// stays the only configuration source; every edit is validated by loading a temporary copy first.
+// stays in the resolved configuration directory; validate a temporary sibling before replacing it.
 
 import { randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, chmodSync } from "node:fs";

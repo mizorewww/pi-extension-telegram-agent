@@ -7,10 +7,10 @@ import { acquirePidLock, releasePidLock } from "../src/daemon/pid.ts";
 import { BotApi } from "../src/telegram/api.ts";
 import { inspectVideoTranscoder } from "../src/media/video-frames.ts";
 import { BotRuntime } from "../src/agent/runtime.ts";
-import { createSharedModelRuntime } from "../src/agent/model-runtime.ts";
+import { createInstalledPiModelRuntime, createSharedModelRuntime } from "../src/agent/model-runtime.ts";
 import { selectConfiguredBot } from "./bot-selection.ts";
 
-const config = loadConfig(process.cwd());
+const config = loadConfig();
 const { values } = parseArgs({ options: { bot: { type: "string" }, message: { type: "string" } } });
 const bot = selectConfiguredBot(config.bots, ["--bot", values.bot ?? ""]);
 const messageId = Number(values.message);
@@ -33,11 +33,17 @@ try {
 	const me = await api.getMe();
 	setBotState(db, bot.id, "bot_user_id", String(me.id));
 	setBotState(db, bot.id, "bot_username", me.username);
-	runtime = new BotRuntime(db, bot, config, await createSharedModelRuntime([bot]), {
-		api,
-		botApis: new Map(config.bots.map((b) => [b.id, new BotApi(b.token)])),
-		videoTranscoder: inspectVideoTranscoder(),
-	});
+	runtime = new BotRuntime(
+		db,
+		bot,
+		config,
+		await createSharedModelRuntime([bot], () => createInstalledPiModelRuntime({ cwd: config.configDir })),
+		{
+			api,
+			botApis: new Map(config.bots.map((b) => [b.id, new BotApi(b.token)])),
+			videoTranscoder: inspectVideoTranscoder(),
+		},
+	);
 	await runtime.init();
 	let sent = false;
 	runtime.sentMessageSink = () => {

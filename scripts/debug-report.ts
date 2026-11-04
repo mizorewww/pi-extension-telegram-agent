@@ -4,7 +4,7 @@ import { Database } from "../src/db/db.ts";
 import { parseArgs } from "node:util";
 
 import { join } from "node:path";
-import { loadConfig } from "../src/config.ts";
+import { configDirectory, loadConfig } from "../src/config.ts";
 import { readPid, pidAlive } from "../src/daemon/pid.ts";
 import { buildDebugReport, parseDebugDuration } from "../src/observability/debug-report.ts";
 import { readStructuredLogTail } from "../src/observability/log.ts";
@@ -13,7 +13,7 @@ function usage(): string {
 	return "Usage: npm run debug -- [--bot <id>] [--since <30s|15m|2h|7d>]\n";
 }
 
-export async function main(args = process.argv.slice(2), rootDir = process.cwd()): Promise<number> {
+export async function main(args = process.argv.slice(2), rootDir = configDirectory()): Promise<number> {
 	let values: { bot?: string; since?: string; help?: boolean };
 	try {
 		({ values } = parseArgs({

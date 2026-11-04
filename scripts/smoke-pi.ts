@@ -3,12 +3,15 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { AssistantEntry, Harness, MemoryStorage, createRegistry } from "@earendil-works/pi-durable";
 import { contentText } from "@earendil-works/pi-ai";
 import { loadConfig } from "../src/config.ts";
-import { createSharedModelRuntime } from "../src/agent/model-runtime.ts";
+import { createInstalledPiModelRuntime, createSharedModelRuntime } from "../src/agent/model-runtime.ts";
 import { guardModels } from "../src/agent/provider-guard.ts";
 import { selectConfiguredBot } from "./bot-selection.ts";
-const config = loadConfig(process.cwd());
+const config = loadConfig();
 const bot = selectConfiguredBot(config.bots, process.argv.slice(2));
-const models = guardModels(await createSharedModelRuntime([bot]), () => ({ timeoutMs: bot.providerTimeoutMs }));
+const models = guardModels(
+	await createSharedModelRuntime([bot], () => createInstalledPiModelRuntime({ cwd: config.configDir })),
+	() => ({ timeoutMs: bot.providerTimeoutMs }),
+);
 const harness = await Harness.open(new MemoryStorage(), { models, registry: createRegistry() }, context);
 try {
 	const conversation = await harness.root(context, {

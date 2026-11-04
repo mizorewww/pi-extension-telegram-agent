@@ -1,4 +1,4 @@
-// The only configuration source: trusted `telegram.config.ts` (project root) plus `.env`
+// The only configuration source: trusted `telegram.config.ts` in TG_CONFIG_DIR plus `.env`
 // (`key: value`) for Telegram/TinyFish/router secrets. LLM credentials stay in Pi's auth store.
 // Validation collects every error and throws one ConfigError listing them all.
 
@@ -66,7 +66,7 @@ const botSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
-const configSchema = Type.Object(
+export const configSchema = Type.Object(
 	{
 		...shared.properties,
 		group_peer_id: Type.Union([Type.String(), Type.Number()]),
@@ -127,11 +127,6 @@ export type TelegramBotConfigInput = Static<typeof botSchema>;
 export type TelegramConfigInput = Static<typeof configSchema>;
 export type TelegramAdmin = number;
 
-/** Editor types and runtime validation derive from the same schema. */
-export function defineConfig<const T extends TelegramConfigInput>(config: T): T {
-	return config;
-}
-
 export interface BotConfig {
 	id: string;
 	name: string;
@@ -158,6 +153,7 @@ export interface RetentionConfig {
 }
 
 export interface AppConfig {
+	configDir: string;
 	dataDir: string;
 	dbPath: string;
 	groupPeerId: number;
@@ -214,11 +210,19 @@ function resolvePath(rootDir: string, p: string): string {
 
 const configJiti = createJiti(import.meta.url, { interopDefault: false, moduleCache: false });
 
-export function defaultConfigPath(rootDir: string): string {
+export function configDirectory(): string {
+	return resolve(process.env.TG_CONFIG_DIR || "/etc/pi-telegram-agent");
+}
+
+export function stateDirectory(): string {
+	return resolve(process.env.TG_STATE_DIR || "/var/lib/pi-telegram-agent");
+}
+
+export function defaultConfigPath(rootDir = configDirectory()): string {
 	return join(rootDir, "telegram.config.ts");
 }
 
-function loadConfigSource(path: string): TelegramConfigInput {
+export function loadConfigSource(path: string): TelegramConfigInput {
 	if (!existsSync(path)) {
 		throw new ConfigError([
 			`[config] missing configuration: ${path}`,
@@ -273,6 +277,8 @@ function validate(
 }
 
 export interface LoadConfigOptions {
+	/** Explicit runtime data directory for embedders; independent of the configuration directory. */
+	stateDir?: string;
 	/** Explicit trusted local .ts source; config writes validate a temporary copy through it. */
 	configPath?: string;
 	/** Deterministic injection for tests/embedders; production reads merged Pi settings. */
@@ -284,7 +290,8 @@ export interface LoadConfigOptions {
 	identityOnly?: boolean;
 }
 
-export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): AppConfig {
+export function loadConfig(rootDir = configDirectory(), options: LoadConfigOptions = {}): AppConfig {
+	rootDir = resolve(rootDir);
 	const identityOnly = options.identityOnly === true;
 	const env = identityOnly ? {} : { ...parseEnvFile(join(rootDir, ".env")), ...process.env };
 	const raw = loadConfigSource(options.configPath ?? defaultConfigPath(rootDir));
@@ -363,8 +370,9 @@ export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): Ap
 		errors.push('[config] tools.search: needs "tiny_fish_api_key" in .env');
 	if (errors.length > 0) throw new ConfigError(errors);
 
-	const dataDir = join(rootDir, "data");
+	const dataDir = resolve(options.stateDir ?? stateDirectory());
 	return {
+		configDir: rootDir,
 		dataDir,
 		dbPath: join(dataDir, "agent.db"),
 		groupPeerId,

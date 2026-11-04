@@ -1,11 +1,16 @@
 // Daemon entry: long-running core. Owns SQLite, pollers and bot runtimes.
-// Run as `node dist/src/daemon/index.js`, supervised by the systemd user unit (docs/runbooks/daemon.md).
+// The release installer runs this entry under the dedicated system service.
 
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { parsePiModelReference } from "../agent/model-ref.ts";
-import { createSharedModelRuntime, PiModelConfigurationError, piAuthSource } from "../agent/model-runtime.ts";
+import {
+	createInstalledPiModelRuntime,
+	createSharedModelRuntime,
+	PiModelConfigurationError,
+	piAuthSource,
+} from "../agent/model-runtime.ts";
 import { BotFire, type BotIdentity, MessageRouter } from "../agent/router.ts";
 import { BotRuntime } from "../agent/runtime.ts";
 import type { MessageRow } from "../agent/serialize.ts";
@@ -29,8 +34,7 @@ import type { IngestResult } from "../telegram/ingest.ts";
 import { Poller } from "../telegram/poller.ts";
 import { acquirePidLock, releasePidLock } from "./pid.ts";
 
-const rootDir = process.cwd();
-const config = loadConfig(rootDir);
+const config = loadConfig();
 // Exclusive pid lock before any slow init (getMe / model runtime / sessions), so a second copy
 // can never race this one onto the same tokens. Released on shutdown; stale pid files are taken over.
 acquirePidLock(config.dataDir);
@@ -56,10 +60,10 @@ const chatModels = config.bots.map((bot) => ({
 }));
 const { sharedModelRuntime, sharedVisionExecutor } = await (async () => {
 	try {
-		const runtime = await createSharedModelRuntime([
-			...chatModels,
-			...(visualModel ? [{ ...visualModel, purpose: "vision" }] : []),
-		]);
+		const runtime = await createSharedModelRuntime(
+			[...chatModels, ...(visualModel ? [{ ...visualModel, purpose: "vision" }] : [])],
+			() => createInstalledPiModelRuntime({ cwd: config.configDir }),
+		);
 		if (config.media.mode === "hybrid") {
 			// view_image attaches image blocks; a chat model without image input would silently
 			// degrade every viewed photo/sticker/video to a bare placeholder, so fail fast.
@@ -173,7 +177,7 @@ for (const rt of runtimes.values()) {
 const telegramControl = new TelegramControlCommandService(
 	db,
 	config.bots,
-	rootDir,
+	config.configDir,
 	runtimes,
 	config.telegramAdmins,
 	sharedModelRuntime,
