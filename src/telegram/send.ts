@@ -3,7 +3,7 @@
 import type { DatabaseSync as Database } from "node:sqlite";
 import { TelegramApiError, type InlineKeyboardMarkup } from "./api.ts";
 import { insertSentMessage } from "./ingest.ts";
-import { formatTelegramMarkdown, TelegramMarkdownError, type TelegramMessageEntity } from "./markdown.ts";
+import { formatTelegramMarkdown, TelegramMarkdownError } from "./markdown.ts";
 import type { CanonicalMessage } from "./normalize.ts";
 
 export interface TextSendApi {
@@ -16,12 +16,7 @@ export interface TextSendApi {
 }
 
 export interface MarkdownTextSendApi extends TextSendApi {
-	sendMessageWithEntities(
-		chatId: number,
-		text: string,
-		entities: readonly TelegramMessageEntity[],
-		replyToMessageId?: number,
-	): Promise<Record<string, unknown>>;
+	sendMessageWithHtml(chatId: number, html: string, replyToMessageId?: number): Promise<Record<string, unknown>>;
 }
 
 export type SentMessageTransport = "plain" | "formatted" | "plain_fallback" | "sticker" | "file";
@@ -130,7 +125,7 @@ export async function sendTextAndPersist(
 }
 
 const PARSE_REJECTIONS = ["can't parse", "cannot parse", "failed to parse", "parse error"];
-const ENTITY_REJECTIONS = [
+const FORMAT_REJECTIONS = [
 	...PARSE_REJECTIONS,
 	"message entit",
 	"entity offset",
@@ -144,7 +139,7 @@ function isFormatRejection(error: unknown, phrases: readonly string[]): error is
 	return phrases.some((phrase) => description.includes(phrase));
 }
 
-/** Agent Markdown send with one safe entity-free fallback and exactly-once persistence. */
+/** Agent Markdown send with one plain fallback only after a definite HTML parse rejection. */
 export async function sendMarkdownTextAndPersist(
 	db: Database,
 	api: MarkdownTextSendApi,
@@ -161,9 +156,9 @@ export async function sendMarkdownTextAndPersist(
 	let raw: Record<string, unknown>;
 	let transport: "formatted" | "plain_fallback" = "formatted";
 	try {
-		raw = await api.sendMessageWithEntities(chatId, formatted.text, formatted.entities, replyToMessageId);
+		raw = await api.sendMessageWithHtml(chatId, formatted.html, replyToMessageId);
 	} catch (error) {
-		if (!isFormatRejection(error, ENTITY_REJECTIONS)) throw error;
+		if (!isFormatRejection(error, FORMAT_REJECTIONS)) throw error;
 		transport = "plain_fallback";
 		raw = await api.sendMessage(chatId, formatted.text, replyToMessageId);
 	}

@@ -64,7 +64,7 @@ Telegram create 不可回滚，所以：
 - 只有 Telegram 确定性的 4xx 拒绝（且之前没有任何提交）才把错误还给模型重试。超时、断线、429、5xx、非 JSON 一律算结果未知，返回固定 `no_retry` 并结束本轮。
 - 提交后的本地记账（canonical 写库、可见性、广播、事件）失败只降级为 `committed`，不重发；SQLite busy 有 25/100/250 ms 有界重试。
 - `files`（只有带工作区的 bot 声明）：发送前先把全部文件从工作区拷出（容器内 `realpath` 后必须仍在 `/work`），任何文件缺失、过大或类型不符都在第一次 create 之前报错；顺序为文字 → 图片（≤10 MB 的 jpg/png/webp，多张合成相册）→ 文件（≤50 MB）→ sticker，只有第一条 create 带 `reply_to`。
-- 文字由本地 Markdown → Telegram entities 转换（`src/telegram/markdown.ts`）；只有 Telegram 确定性拒绝 entities 时才用同一文本无格式重发一次。
+- 文字由本地 Markdown 转为转义后的 HTML（`src/telegram/markdown.ts`），Telegram 原生解析格式；只有 Telegram 确定性拒绝格式时才用同一文本无格式重发一次。
 - 成功返回固定 `ok`、降级返回固定 `no_retry`，两者都 `terminate:true`，不产生 follow-up provider 调用。
 
 ## 上下文与压缩
