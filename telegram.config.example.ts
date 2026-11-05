@@ -20,7 +20,7 @@ export default {
 	// Mentions, replies and the name from a human always get a reply. Every other message (other
 	// bots included) is judged by this Pi classifier model, which needs Pi auth for its provider;
 	// without a decider every message gets a turn. A higher threshold makes the bot quieter.
-	// decider: { model: "openrouter/perplexity/pplx-decider-v1.2", threshold: 0.45 },
+	// decider: { model: "openrouter/perplexity/pplx-decider-v1.2", threshold: 0.15 },
 
 	// ===== Models (omit provider/model to inherit Pi's /login + /model defaults) =====
 

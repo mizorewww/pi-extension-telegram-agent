@@ -1,13 +1,14 @@
 // Whether an unaddressed slice of the group deserves a turn. A Pi classifier model reads only the
 // recent lines; it never sees the bot's context, so it adds nothing to the main provider prefix.
-// Wording, examples and the default threshold were tuned on 150 hand-labelled real slices
-// (held-out: accuracy 0.82, reply precision 0.75 / recall 0.71 at 0.45); the examples are invented.
+// Wording and examples were tuned on 150 hand-labelled real slices; the examples are invented. The
+// default threshold is set for a warm bot: on 356 slices labelled "a chatty member would join",
+// 0.15 gives reply precision 0.52 / recall 0.57 and admits about a third of ambient messages.
 import type { ClassifierBoolQuestion } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { DeciderConfig } from "../config.ts";
 import { log } from "../observability/log.ts";
 
-export const DEFAULT_DECIDER_THRESHOLD = 0.45;
+export const DEFAULT_DECIDER_THRESHOLD = 0.15;
 
 const INSTRUCTIONS =
 	"你在替群聊里的 bot「{name}」判断：读完 state 里的群聊片段后，{name} 现在要不要主动说话。{name} 爱捧场，对技术和新鲜事好奇，但有分寸：没话说就安静围观，不抢话、不刷屏。片段格式：[时间] #消息id 名字 (@用户名 · bot): 内容；带「· bot」的是机器人，{name} 自己的消息也会出现。state.earlier 是上下文，state.recent 是新消息。只根据新消息判断。";
