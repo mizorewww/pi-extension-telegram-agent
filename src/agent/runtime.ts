@@ -21,14 +21,12 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { AppConfig, BotConfig } from "../config.ts";
 import type { Database } from "../db/db.ts";
 import {
-	eventsForBot,
 	groupMessage,
 	listRecentMessageEvents,
 	messageEventHighWater,
 	appendNoteEvent,
 	type MessageEvent,
 } from "../db/message-events.ts";
-import type { MediaDownloadApi } from "../media/local-cache.ts";
 import {
 	ensureStickerCatalog,
 	stickerCatalogSnapshot,
@@ -49,6 +47,7 @@ import { guardModels } from "./provider-guard.ts";
 import { buildBotRuntimeTools } from "./runtime-tools.ts";
 import { serializeMessageEvents, serializeMessageSegments, type MessageRow } from "./serialize.ts";
 import type { RoutingTrigger, TriggerResult, TriggerSource } from "./router.ts";
+import type { Decider } from "./decider.ts";
 
 export type ModelControlSelection = Pick<BotConfig, "provider" | "model" | "reasoningEffort">;
 export type ModelControlResult =
@@ -94,6 +93,8 @@ export const TelegramState = defineDoc<{
 const MAX_INPUT_CHARS = 32_000;
 const MAX_MESSAGE_CHARS = 4_000;
 const MAX_PENDING = 64;
+/** Per decider field; the decider reads only recent lines, never the bot's context. */
+const DECIDER_SLICE_CHARS = 6_000;
 const TRUNCATED = "\n[truncated]";
 const bounded = (text: string, limit: number) =>
 	text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - TRUNCATED.length))}${TRUNCATED}`.slice(0, limit);
@@ -126,11 +127,14 @@ export class BotRuntime {
 	private stopping = false;
 	private changing = false;
 	private completedAt = 0;
+	/** The newest ambient message still waiting for a decision. */
+	private ambientPending: RoutingTrigger | null = null;
+	private deciding = false;
+	private cooldownTimer: ReturnType<typeof setTimeout> | null = null;
 	private lastCompact: RuntimeControlSnapshot["lastCompact"] = null;
 	private reactions: ReadonlySet<string> | null = null;
 	private readonly typing: TelegramTypingLease;
 	readonly workBox: WorkBox | null;
-	sentMessageSink?: (raw: Record<string, unknown>) => void;
 
 	constructor(
 		private readonly db: Database,
@@ -139,20 +143,20 @@ export class BotRuntime {
 		private readonly models: ModelRuntime,
 		private readonly deps: {
 			api: BotApi;
-			botApis: ReadonlyMap<string, MediaDownloadApi>;
+			decider: Decider | null;
 			videoTranscoder: boolean;
 			visionExecutor?: VisionExecutor;
 			visionScheduler?: VisionScheduler;
 		},
 	) {
-		this.workBox = bot.tools.sandbox && config.sandbox ? new WorkBox(bot.id, config.sandbox) : null;
+		this.workBox = bot.tools.sandbox && config.sandbox ? new WorkBox(config.sandbox) : null;
 		this.typing = new TelegramTypingLease((signal) => deps.api.sendChatAction(config.groupChatId, signal));
 	}
 
 	async init(): Promise<void> {
 		if (this.contextWindow() <= 16_384) throw new Error("main model context window must exceed 16384 tokens");
 		await this.workBox?.ensure();
-		await ensureStickerCatalog(this.db, this.deps.api, this.bot.id, this.bot.stickerSets);
+		await ensureStickerCatalog(this.db, this.deps.api, this.bot.stickerSets);
 		this.reactions = await this.deps.api
 			.getChat(this.config.groupChatId)
 			.then(groupReactionAllowlist)
@@ -169,8 +173,7 @@ export class BotRuntime {
 			allowedReactions: () => this.reactions,
 			currentMessage: (_api, ctx) => this.currentMessage(ctx),
 			recordSend: (_api, ctx) => this.recordSend(ctx),
-			onSent: (raw) => this.sentMessageSink?.(raw),
-			recordEvent: (kind) => log.info("agent", kind, { bot_id: this.bot.id }),
+			recordEvent: (kind) => log.info("agent", kind),
 			resetBox: (reason) => this.resetBox(reason),
 		});
 		this.tasks = tools.tasks;
@@ -192,7 +195,6 @@ export class BotRuntime {
 							if (api.conversationId !== this.conversation.id) return;
 							if (message.stopReason === "error" || message.stopReason === "aborted") this.typing.stop();
 							log.info("agent", "response", {
-								bot_id: this.bot.id,
 								outcome: message.stopReason,
 								input_tokens: message.usage.input,
 								output_tokens: message.usage.output,
@@ -205,6 +207,7 @@ export class BotRuntime {
 							if (api.conversationId === this.conversation.id) {
 								this.typing.stop();
 								this.completedAt = Date.now();
+								this.wakeAmbient();
 							}
 							return undefined;
 						},
@@ -215,7 +218,7 @@ export class BotRuntime {
 		const directory = join(this.config.dataDir, "pi");
 		mkdirSync(directory, { recursive: true });
 		this.harness = await Harness.open(
-			await openNodeSqliteStorage(join(directory, `${this.bot.id}.sqlite`)),
+			await openNodeSqliteStorage(join(directory, "agent.sqlite")),
 			{
 				models: guardModels(this.models, () => ({
 					timeoutMs: this.bot.providerTimeoutMs,
@@ -236,7 +239,7 @@ export class BotRuntime {
 					steeringMode: "all",
 					followUpMode: "all",
 				}),
-				onReport: () => log.error("agent", "pi_runtime_failure", { bot_id: this.bot.id }),
+				onReport: () => log.error("agent", "pi_runtime_failure"),
 			},
 			context,
 		);
@@ -266,7 +269,7 @@ export class BotRuntime {
 
 	/** Catalog descriptions refresh only when the context restarts anyway; otherwise a restart would reset it. */
 	private async refreshPrompt(force: boolean): Promise<void> {
-		const current = stickerCatalogSnapshot(this.db, this.bot.id, this.bot.stickerSets);
+		const current = stickerCatalogSnapshot(this.db, this.bot.stickerSets);
 		const catalog = await this.conversation.commit(async (tx) => {
 			const state = await tx.doc(TelegramState, this.conversation.id);
 			if (force || state.stickerCatalog?.ids !== current.ids) state.stickerCatalog = current;
@@ -324,32 +327,94 @@ export class BotRuntime {
 		const live = await this.harness.snapshot(LiveDoc, this.conversation.id, context);
 		if (this.changing || live?.run) return "busy";
 		if (live?.compactions?.length) return "compacting";
-		return Date.now() - this.completedAt < this.bot.samplingCooldownMs ? "cooldown" : "idle";
+		return Date.now() - this.completedAt < this.bot.cooldownMs ? "cooldown" : "idle";
+	}
+
+	/** Re-judge the newest ambient message once the turn or the cooldown it waited for is over. */
+	private wakeAmbient(): void {
+		const pending = this.ambientPending;
+		if (!pending) return;
+		this.ambientPending = null;
+		void this.trigger("ambient", pending).catch(() =>
+			log.warn("routing", "ambient_retry_failed", { category: "local_failure" }),
+		);
+	}
+
+	/** Ambient messages wait out a running turn, its cooldown and an in-flight decision. */
+	private async ambientGate(trigger: RoutingTrigger): Promise<TriggerResult | null> {
+		const status = await this.samplingState();
+		if (status === "stopping") return "skipped_stopping";
+		if (status !== "idle" || this.deciding) {
+			this.ambientPending = trigger;
+			if (status === "cooldown" && !this.cooldownTimer) {
+				this.cooldownTimer = setTimeout(
+					() => {
+						this.cooldownTimer = null;
+						this.wakeAmbient();
+					},
+					this.bot.cooldownMs - (Date.now() - this.completedAt),
+				);
+				this.cooldownTimer.unref();
+			}
+			return status === "cooldown" ? "skipped_cooldown" : "skipped_busy";
+		}
+		if (!this.deps.decider) return null;
+		this.deciding = true;
+		let probability: number | null;
+		try {
+			probability = await this.deps.decider(await this.deciderSlice());
+		} finally {
+			this.deciding = false;
+		}
+		log.info("routing", "decider", { message_id: trigger.messageId, probability });
+		// A failed decision answers like no decider at all: the message gets its turn.
+		if (probability == null || probability >= this.bot.decider!.threshold) return null;
+		// Messages that arrived during the decision were not part of the slice.
+		this.wakeAmbient();
+		return "declined";
+	}
+
+	/** The unadmitted lines, after a few admitted ones for context. */
+	private async deciderSlice(): Promise<{ earlier: string; recent: string }> {
+		const admitted = (await this.state())!.admittedSeq;
+		const high = messageEventHighWater(this.db, this.config.groupChatId);
+		// The newest lines matter most, so an oversized slice keeps its tail.
+		const render = (from: number, through: number, limit: number) =>
+			serializeMessageEvents(
+				this.db,
+				listRecentMessageEvents(this.db, this.config.groupChatId, from, through, limit).filter(
+					(event) => event.kind === "message" && !this.isControl(event.messageId),
+				),
+				MAX_MESSAGE_CHARS,
+			).slice(-DECIDER_SLICE_CHARS);
+		return { earlier: render(0, admitted, 6), recent: render(admitted, high, 40) };
 	}
 
 	async trigger(source: TriggerSource, trigger: RoutingTrigger): Promise<TriggerResult> {
-		const status = await this.samplingState();
 		if (this.stopping || this.changing) return "skipped_stopping";
-		if (source === "probability" && status !== "idle")
-			return status === "cooldown" ? "skipped_cooldown" : "skipped_busy";
+		if (source === "ambient") {
+			const gated = await this.ambientGate(trigger);
+			if (gated) return gated;
+		}
+		if (this.stopping || this.changing) return "skipped_stopping";
 		const epoch = (await this.state())!.epoch;
 		await this.prepareVision();
 		const requestId = `telegram:${trigger.chatId}:${trigger.messageId}`;
-		return this.conversation.commit(async (tx): Promise<TriggerResult> => {
+		const result = await this.conversation.commit(async (tx): Promise<TriggerResult> => {
 			const state = await tx.doc(TelegramState, this.conversation.id);
 			if (this.stopping || this.changing || state.epoch !== epoch) return "skipped_stopping";
 			const live = await tx.doc(LiveDoc, this.conversation.id);
-			if (source === "probability") {
-				if (live.run || live.compactions?.length) return "skipped_busy";
-				if (Date.now() - this.completedAt < this.bot.samplingCooldownMs) return "skipped_cooldown";
+			// A turn started while the decider ran; this message waits for it to finish.
+			if (source === "ambient" && (live.run || live.compactions?.length)) {
+				this.ambientPending = trigger;
+				return "skipped_busy";
 			}
 			const accepted = live.run ? "coalesced" : "started";
 			if (await tx.submissionByRequest(this.conversation.id, requestId)) return accepted;
 			const high = messageEventHighWater(this.db, this.config.groupChatId);
-			const events = eventsForBot(
-				listRecentMessageEvents(this.db, this.config.groupChatId, state.admittedSeq, high, 256),
-				this.bot.id,
-			).filter((event) => !this.isControl(event.messageId));
+			const events = listRecentMessageEvents(this.db, this.config.groupChatId, state.admittedSeq, high, 256).filter(
+				(event) => !this.isControl(event.messageId),
+			);
 			const row = groupMessage(this.db, this.config.groupChatId, trigger.messageId);
 			if (!row) return "skipped_stopping";
 			const current: MessageEvent = {
@@ -363,8 +428,7 @@ export class BotRuntime {
 			};
 			const currentSize = serializeMessageEvents(this.db, [current], MAX_MESSAGE_CHARS).length;
 			const currentIsPending =
-				state.pending[String(trigger.messageId)] != null ||
-				(this.bot.tools.send && source === "explicit" && !trigger.fromBot);
+				state.pending[String(trigger.messageId)] != null || (this.bot.tools.send && source === "direct");
 			const pending = pendingInput(
 				Object.fromEntries(Object.entries(state.pending).filter(([id]) => Number(id) !== trigger.messageId)),
 				MAX_INPUT_CHARS - currentSize - 16,
@@ -389,7 +453,6 @@ export class BotRuntime {
 			const stickerNote = bounded(
 				batchStickerCandidates(
 					this.db,
-					this.bot.id,
 					this.config.groupChatId,
 					[
 						...new Set([
@@ -416,6 +479,10 @@ export class BotRuntime {
 			state.admittedSeq = high;
 			return accepted;
 		}, context);
+		// The admitted batch already carries every message up to this one.
+		if ((result === "started" || result === "coalesced") && (this.ambientPending?.messageId ?? 0) <= trigger.messageId)
+			this.ambientPending = null;
+		return result;
 	}
 
 	private isControl(id: number): boolean {
@@ -446,10 +513,9 @@ export class BotRuntime {
 		].slice(-this.config.media.maxPerTurn);
 		const work = Promise.allSettled(
 			ids.map((id) =>
-				ensureVision(this.db, this.deps.api, this.bot.id, id, this.deps.visionExecutor!, {
+				ensureVision(this.db, this.deps.api, id, this.deps.visionExecutor!, {
 					cacheDir: join(this.config.dataDir, "media"),
 					videoTranscoder: this.deps.videoTranscoder,
-					botApis: this.deps.botApis,
 					scheduler: this.deps.visionScheduler,
 				}),
 			),
@@ -536,8 +602,8 @@ export class BotRuntime {
 			reasoningEffort: this.bot.reasoningEffort,
 			contextWindow: this.contextWindow(),
 			currentContextTokens: estimateContextTokens(view.messages).tokens,
-			routingP: this.bot.routingP,
-			samplingCooldownMs: this.bot.samplingCooldownMs,
+			cooldownMs: this.bot.cooldownMs,
+			decider: this.bot.decider,
 			lastCompact: this.lastCompact,
 			usage: await this.harness.usage(context),
 		};
@@ -668,8 +734,7 @@ export class BotRuntime {
 				await this.tasks?.clear();
 			}
 			await this.workBox.reset();
-			appendNoteEvent(this.db, this.config.groupChatId, 0, `box:${this.bot.id}:${Date.now()}`, {
-				bot_id: this.bot.id,
+			appendNoteEvent(this.db, this.config.groupChatId, 0, `box:${Date.now()}`, {
 				source: "system",
 				text: "工作区已清空。",
 			});
@@ -680,6 +745,7 @@ export class BotRuntime {
 	async stop(): Promise<void> {
 		this.stopping = true;
 		this.typing.stop();
+		if (this.cooldownTimer) clearTimeout(this.cooldownTimer);
 		try {
 			await this.harness?.close(context);
 		} finally {

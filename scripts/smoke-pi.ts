@@ -5,9 +5,8 @@ import { contentText } from "@earendil-works/pi-ai";
 import { loadConfig } from "../src/config.ts";
 import { createInstalledPiModelRuntime, createSharedModelRuntime } from "../src/agent/model-runtime.ts";
 import { guardModels } from "../src/agent/provider-guard.ts";
-import { selectConfiguredBot } from "./bot-selection.ts";
 const config = loadConfig();
-const bot = selectConfiguredBot(config.bots, process.argv.slice(2));
+const { bot } = config;
 const models = guardModels(
 	await createSharedModelRuntime([bot], () => createInstalledPiModelRuntime({ cwd: config.configDir })),
 	() => ({ timeoutMs: bot.providerTimeoutMs }),

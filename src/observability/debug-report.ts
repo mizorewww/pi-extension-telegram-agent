@@ -1,4 +1,4 @@
-import { type Database, getBotState } from "../db/db.ts";
+import { type Database, getDaemonState } from "../db/db.ts";
 import { messageEventHighWater } from "../db/message-events.ts";
 import type { LogRecord } from "./log.ts";
 
@@ -6,7 +6,6 @@ import type { LogRecord } from "./log.ts";
 export function buildDebugReport(
 	db: Database,
 	input: {
-		botIds: readonly string[];
 		chatId: number;
 		sinceMs: number;
 		now?: number;
@@ -17,28 +16,14 @@ export function buildDebugReport(
 	const now = input.now ?? Date.now();
 	const since = now - input.sinceMs;
 	return {
-		schema: 3,
+		schema: 4,
 		generated_at: new Date(now).toISOString(),
 		window_ms: input.sinceMs,
 		daemon: input.daemon ?? null,
 		archive: { chat_id: input.chatId, high_water: messageEventHighWater(db, input.chatId) },
-		bots: input.botIds.map((botId) => ({
-			bot_id: botId,
-			poll_offset: Number(getBotState(db, botId, "update_offset") ?? "0"),
-			pending_dispatch:
-				db.prepare("SELECT update_id, message_id, kind FROM pending_telegram_dispatch WHERE bot_id = ?").get(botId) ??
-				null,
-			claims: db
-				.prepare(`SELECT message_id, reason, status, updated_at FROM routing_claims
-				WHERE bot_id = ? AND chat_id = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT 20`)
-				.all(botId, input.chatId, since),
-			logs: (input.logs ?? [])
-				.filter(
-					(record) =>
-						Date.parse(record.ts) >= since && (record.fields?.bot_id == null || record.fields.bot_id === botId),
-				)
-				.slice(-100),
-		})),
+		poll_offset: Number(getDaemonState(db, "update_offset") ?? "0"),
+		pending_dispatch: db.prepare("SELECT update_id, message_id, kind FROM pending_telegram_dispatch").get() ?? null,
+		logs: (input.logs ?? []).filter((record) => Date.parse(record.ts) >= since).slice(-100),
 	};
 }
 

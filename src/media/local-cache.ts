@@ -37,7 +37,6 @@ export type LocalMediaResult =
 export interface EnsureLocalMediaOptions {
 	cacheDir: string;
 	signal?: AbortSignal;
-	botApis?: ReadonlyMap<string, MediaDownloadApi>;
 }
 export function sourceMediaMimeForPath(path: string): SourceMediaMime | null {
 	return MIMES[extname(path).slice(1).toLowerCase() as keyof typeof MIMES] ?? null;
@@ -52,32 +51,15 @@ export function isVideoMedia(kind: string, mime: string | null | undefined): boo
 export function isVisionMedia(kind: string, mime: string | null | undefined): boolean {
 	return kind === "photo" || (kind === "sticker" && mime !== "application/x-tgsticker") || isVideoMedia(kind, mime);
 }
-export function fileIdForBot(db: Database, botId: string, fileUniqueId: string): string | null {
+/** The bot's newest Telegram file_id for a media identity. */
+export function fileIdFor(db: Database, fileUniqueId: string): string | null {
 	return (
 		(
 			db
-				.prepare("SELECT file_id FROM media_file_ids WHERE bot_id = ? AND file_unique_id = ?")
-				.get(botId, fileUniqueId) as { file_id: string } | undefined
+				.prepare("SELECT file_id FROM media_file_ids WHERE file_unique_id = ? ORDER BY rowid DESC LIMIT 1")
+				.get(fileUniqueId) as { file_id: string } | undefined
 		)?.file_id ?? null
 	);
-}
-export function downloadSource(
-	db: Database,
-	preferredApi: MediaDownloadApi,
-	preferredBotId: string,
-	fileUniqueId: string,
-	botApis?: ReadonlyMap<string, MediaDownloadApi>,
-): { api: MediaDownloadApi; fileId: string } | null {
-	const mappings = db
-		.prepare(
-			`SELECT bot_id AS botId, file_id AS fileId FROM media_file_ids WHERE file_unique_id = ? ORDER BY bot_id = ? DESC, rowid DESC`,
-		)
-		.all(fileUniqueId, preferredBotId) as { botId: string; fileId: string }[];
-	for (const mapping of mappings) {
-		const api = mapping.botId === preferredBotId ? preferredApi : botApis?.get(mapping.botId);
-		if (api) return { api, fileId: mapping.fileId };
-	}
-	return null;
 }
 export function resolveMediaSourcePath(cacheDir: string, storedPath: string | null): string | null {
 	return storedPath &&
@@ -121,7 +103,6 @@ const inFlight = new Map<string, Promise<LocalMediaResult>>();
 export function ensureLocalMedia(
 	db: Database,
 	api: MediaDownloadApi,
-	botId: string,
 	fileUniqueId: string,
 	options: EnsureLocalMediaOptions,
 ): Promise<LocalMediaResult> {
@@ -148,11 +129,11 @@ export function ensureLocalMedia(
 				/* Evicted cache is downloaded again. */
 			}
 		}
-		const source = downloadSource(db, api, botId, fileUniqueId, options.botApis);
-		if (!source) return { ok: false, outcome: "file_id_unavailable" };
+		const fileId = fileIdFor(db, fileUniqueId);
+		if (!fileId) return { ok: false, outcome: "file_id_unavailable" };
 		let remotePath: string | undefined;
 		try {
-			remotePath = (await source.api.getFile(source.fileId, signal)).file_path;
+			remotePath = (await api.getFile(fileId, signal)).file_path;
 		} catch {
 			return { ok: false, outcome: signal?.aborted ? "aborted" : "telegram_file_unavailable" };
 		}
@@ -161,7 +142,7 @@ export function ensureLocalMedia(
 		if (!mimeType) return { ok: false, outcome: "unsupported_format" };
 		let bytes: Uint8Array;
 		try {
-			bytes = await source.api.downloadFile(remotePath, signal);
+			bytes = await api.downloadFile(remotePath, signal);
 		} catch {
 			return { ok: false, outcome: signal?.aborted ? "aborted" : "telegram_download_failed" };
 		}

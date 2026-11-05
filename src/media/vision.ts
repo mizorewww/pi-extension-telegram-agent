@@ -168,7 +168,6 @@ const inFlight = new Map<string, Promise<string | null>>();
 export function ensureVision(
 	db: Database,
 	api: BotApi,
-	botId: string,
 	fileUniqueId: string,
 	executor: VisionExecutor,
 	options: EnsureVisionOptions,
@@ -186,7 +185,7 @@ export function ensureVision(
 				: "photo";
 		const run = async () => {
 			const started = performance.now();
-			const prepared = await prepareMediaImages(db, api, botId, fileUniqueId, options);
+			const prepared = await prepareMediaImages(db, api, fileUniqueId, options);
 			const result = prepared.ok
 				? await executor.describe({
 						kind,

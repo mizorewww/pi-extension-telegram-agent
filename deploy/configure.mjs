@@ -20,11 +20,11 @@ import {
 import { loadPiModelDefaults } from "../dist/src/agent/model-settings.js";
 import { assertBotModelConfigured, createInstalledPiModelRuntime } from "../dist/src/agent/model-runtime.js";
 import { assertPiVisionExecutorReady, createPiVisionExecutor } from "../dist/src/media/vision.js";
+import { createDecider, DEFAULT_DECIDER_THRESHOLD } from "../dist/src/agent/decider.js";
 
 const directory = configDirectory(),
 	configPath = join(directory, "telegram.config.ts");
-const properties = configSchema.properties,
-	botProperties = properties.bots.items.properties;
+const properties = configSchema.properties;
 const defaults = {
 	reasoning_effort: "off",
 	cache_retention: "short",
@@ -43,7 +43,7 @@ const labels = {
 	context_window: "上下文窗口（token）",
 	compaction_threshold: "自动压缩触发值（token）",
 	compaction_keep_recent: "压缩后保留近期内容（token）",
-	cooldown_ms: "主动接话冷却（毫秒）",
+	cooldown_ms: "接话后再次判断的冷却（毫秒）",
 	provider_timeout_ms: "服务商每次请求超时（毫秒）",
 	provider_retries: "服务商额外重试次数",
 	raw_update_retention_days: "原始更新保留（天）",
@@ -53,7 +53,6 @@ const labels = {
 	codemode: "启用 Pi Code Mode",
 	sandbox: "启用沙箱文件/终端工具",
 	tasks: "启用 Pi 后台任务",
-	routing_p: "未被点名时接话概率（所有 bot 合计 ≤1）",
 	sticker_sets: "贴纸集名称（逗号分隔，- 清空）",
 	max_per_turn: "每轮最多描述的媒体数",
 	concurrency: "媒体处理并发数",
@@ -172,7 +171,7 @@ async function main() {
 	rl.on("close", () => cancelled.abort());
 	category = "invalid_configuration";
 	mkdirSync(directory, { recursive: true, mode: 0o700 });
-	const config = existsSync(configPath) ? loadConfigSource(configPath) : { bots: [] };
+	const config = existsSync(configPath) ? loadConfigSource(configPath) : {};
 	const env = parseEnvFile(join(directory, ".env")),
 		needed = {};
 	const secret = async (key, label) => {
@@ -201,6 +200,47 @@ async function main() {
 	const modelsPath = join(getAgentDir(), "models.json");
 	const custom = existsSync(modelsPath) ? JSON.parse(readFileSync(modelsPath, "utf8")) : { providers: {} };
 	const configuredProviders = new Set();
+	async function authenticate(id, provider) {
+		if (configuredProviders.has(id)) return;
+		const methods = [];
+		if (provider.auth.apiKey?.login) methods.push("API key");
+		if (provider.auth.oauth) methods.push("OAuth 登录");
+		const actions = runtime.hasConfiguredAuth(id)
+			? ["保留现有认证", ...(methods.length ? ["删除现有认证并重新登录"] : [])]
+			: [];
+		actions.push(...methods);
+		let action = await choose("认证（登录成功立即保存到 Pi；与应用配置分别保存）", actions);
+		if (action === "删除现有认证并重新登录") {
+			await runtime.logout(id);
+			action = await choose("重新登录", methods);
+		}
+		if (action !== "保留现有认证") {
+			category = "provider_login_failed";
+			await runtime.login(id, action === "API key" ? "api_key" : "oauth", {
+				signal: cancelled.signal,
+				prompt: async (prompt) =>
+					prompt.type === "select"
+						? ask(
+								prompt.message + "（" + prompt.options.map((item) => item.id + ": " + item.label).join(" / ") + "）",
+								prompt.options[0]?.id,
+								{ enum: prompt.options.map((item) => item.id) },
+								false,
+								prompt.signal,
+							)
+						: ask(prompt.message, "", { type: "string", minLength: 1 }, true, prompt.signal),
+				notify: (event) => {
+					if (event.type === "auth_url") print("Pi 登录：" + event.url + "\n" + (event.instructions ?? ""));
+					else if (event.type === "device_code")
+						print("Pi 登录：" + event.verificationUri + "\n设备码：" + event.userCode);
+					else if (event.type === "info") {
+						print(event.message);
+						for (const link of event.links ?? []) print(link.url);
+					} else print("正在等待 Pi 认证… ETA：等待服务商响应");
+				},
+			});
+		}
+		configuredProviders.add(id);
+	}
 	async function model(selection, fallback, vision = false) {
 		print(
 			"可用服务商：" +
@@ -273,46 +313,7 @@ async function main() {
 			files.set(modelsPath, JSON.stringify(custom, null, "\t") + "\n");
 			provider = runtime.getProvider(id);
 		}
-		if (!configuredProviders.has(id)) {
-			const methods = [];
-			if (provider.auth.apiKey?.login) methods.push("API key");
-			if (provider.auth.oauth) methods.push("OAuth 登录");
-			const actions = runtime.hasConfiguredAuth(id)
-				? ["保留现有认证", ...(methods.length ? ["删除现有认证并重新登录"] : [])]
-				: [];
-			actions.push(...methods);
-			let action = await choose("认证（登录成功立即保存到 Pi；与应用配置分别保存）", actions);
-			if (action === "删除现有认证并重新登录") {
-				await runtime.logout(id);
-				action = await choose("重新登录", methods);
-			}
-			if (action !== "保留现有认证") {
-				category = "provider_login_failed";
-				await runtime.login(id, action === "API key" ? "api_key" : "oauth", {
-					signal: cancelled.signal,
-					prompt: async (prompt) =>
-						prompt.type === "select"
-							? ask(
-									prompt.message + "（" + prompt.options.map((item) => item.id + ": " + item.label).join(" / ") + "）",
-									prompt.options[0]?.id,
-									{ enum: prompt.options.map((item) => item.id) },
-									false,
-									prompt.signal,
-								)
-							: ask(prompt.message, "", { type: "string", minLength: 1 }, true, prompt.signal),
-					notify: (event) => {
-						if (event.type === "auth_url") print("Pi 登录：" + event.url + "\n" + (event.instructions ?? ""));
-						else if (event.type === "device_code")
-							print("Pi 登录：" + event.verificationUri + "\n设备码：" + event.userCode);
-						else if (event.type === "info") {
-							print(event.message);
-							for (const link of event.links ?? []) print(link.url);
-						} else print("正在等待 Pi 认证… ETA：等待服务商响应");
-					},
-				});
-			}
-			configuredProviders.add(id);
-		}
+		await authenticate(id, provider);
 		const catalog = runtime.getModels(id).filter((entry) => !vision || entry.input.includes("image"));
 		selection.model = await choose(
 			"模型 ID",
@@ -331,80 +332,63 @@ async function main() {
 
 	step(3, "机器人、角色和工具");
 	category = "invalid_bot_configuration";
-	const count = await ask("机器人数量（减少会删除列表末尾的 bot）", config.bots.length || 1, {
-		type: "integer",
-		minimum: 1,
+	config.name = await ask("群内显示名称 / 触发词", config.name ?? "bot", properties.name);
+	config.token_env = await ask("Bot token 的 .env 键名", config.token_env ?? "telegram_bot_token", {
+		type: "string",
+		pattern: "^[A-Za-z_][A-Za-z0-9_]*$",
 	});
-	config.bots = config.bots.slice(0, count);
-	for (let index = 0; index < count; index++) {
-		const bot = config.bots[index] ?? {};
-		print("\n机器人 " + (index + 1) + "/" + count);
-		bot.id = await ask("稳定 ID（创建后请勿改名）", bot.id ?? "bot" + (index + 1), botProperties.id);
-		bot.name = await ask("群内显示名称 / 触发词", bot.name ?? bot.id, botProperties.name);
-		bot.token_env = await ask(
-			"Bot token 的 .env 键名",
-			bot.token_env ?? "telegram_" + bot.id.replaceAll("-", "_") + "_token",
-			{ type: "string", pattern: "^[A-Za-z_][A-Za-z0-9_]*$" },
+	await secret(config.token_env, "BotFather 提供的 bot token");
+	const persona = await choose("角色来源", [
+		...(config.persona_path ? ["保留"] : []),
+		"中文模板",
+		"English template",
+		"已有文件",
+		"输入文字",
+	]);
+	if (persona === "已有文件")
+		config.persona_path = await ask(
+			"角色文件路径（相对配置目录或绝对路径）",
+			config.persona_path ?? "",
+			properties.persona_path,
 		);
-		await secret(bot.token_env, "BotFather 提供的 bot token");
-		const persona = await choose("角色来源", [
-			...(bot.persona_path ? ["保留"] : []),
-			"中文模板",
-			"English template",
-			"已有文件",
-			"输入文字",
-		]);
-		if (persona === "已有文件")
-			bot.persona_path = await ask(
-				"角色文件路径（相对配置目录或绝对路径）",
-				bot.persona_path ?? "",
-				botProperties.persona_path,
-			);
-		else if (persona !== "保留") {
-			const text =
-				persona === "输入文字"
-					? ((await ask("角色文字（用 \\n 换行）", "", { type: "string", minLength: 1 })) + "\n").replaceAll(
-							"\\n",
-							"\n",
-						)
-					: readFileSync(
-							new URL("../personas/template." + (persona === "中文模板" ? "zh" : "en") + ".md", import.meta.url),
-							"utf8",
-						);
-			bot.persona_path = "personas/" + bot.id + ".md";
-			files.set(absolute(bot.persona_path), text);
-		}
-		bot.tools ??= {};
-		await fields(bot.tools, botProperties.tools.properties, {
-			send: true,
-			search: false,
-			codemode: false,
-			sandbox: false,
-			tasks: false,
-		});
-		if (bot.tools.tasks) bot.tools.sandbox = true;
-		await fields(bot, botProperties, { routing_p: 0, sticker_sets: [] });
-		if (await yes("此 bot 使用单独的模型或思考强度？", Boolean(bot.provider || bot.model || bot.reasoning_effort)))
-			await model(bot, config);
-		else {
-			delete bot.provider;
-			delete bot.model;
-			delete bot.reasoning_effort;
-		}
-		const overrides = Object.keys(defaults).filter((key) => key in botProperties && key !== "reasoning_effort");
-		if (
-			await yes(
-				"展开此 bot 的缓存 / 压缩 / 冷却 / 请求参数？",
-				overrides.some((key) => key in bot),
-			)
-		)
-			await fields(bot, botProperties, { ...defaults, ...config }, overrides);
-		config.bots[index] = bot;
+	else if (persona !== "保留") {
+		const text =
+			persona === "输入文字"
+				? ((await ask("角色文字（用 \\n 换行）", "", { type: "string", minLength: 1 })) + "\n").replaceAll(
+						"\\n",
+						"\n",
+					)
+				: readFileSync(
+						new URL("../personas/template." + (persona === "中文模板" ? "zh" : "en") + ".md", import.meta.url),
+						"utf8",
+					);
+		config.persona_path = "personas/bot.md";
+		files.set(absolute(config.persona_path), text);
 	}
-	if (config.bots.some((bot) => bot.tools.search)) await secret("tiny_fish_api_key", "TinyFish API key");
-	if (env.router_secret) needed.router_secret = env.router_secret;
-	if (await yes("设置或更换路由稳定密钥？（未设置时由 daemon 自动生成）"))
-		await secret("router_secret", "路由稳定密钥");
+	config.tools ??= {};
+	await fields(config.tools, properties.tools.properties, {
+		send: true,
+		search: false,
+		codemode: false,
+		sandbox: false,
+		tasks: false,
+	});
+	if (config.tools.tasks) config.tools.sandbox = true;
+	await fields(config, properties, { sticker_sets: [] });
+	if (config.tools.search) await secret("tiny_fish_api_key", "TinyFish API key");
+	print("没被点名的消息：配置接话判断模型时由它决定是否接话，否则每条都接。");
+	if (await yes("使用接话判断模型（OpenRouter Decider）？", Boolean(config.decider))) {
+		const decider = config.decider ?? { model: "openrouter/perplexity/pplx-decider-v1.2" };
+		decider.model = await ask("判断模型（provider/model）", decider.model, properties.decider.properties.model);
+		const providerId = decider.model.slice(0, decider.model.indexOf("/"));
+		await authenticate(providerId, runtime.getProvider(providerId));
+		decider.threshold = await ask(
+			"接话阈值（0–1，越高越安静）",
+			decider.threshold ?? DEFAULT_DECIDER_THRESHOLD,
+			properties.decider.properties.threshold,
+		);
+		config.decider = decider;
+	} else delete config.decider;
 
 	step(4, "图片和视频");
 	config.media ??= {};
@@ -420,7 +404,7 @@ async function main() {
 	} else config.media = { mode: "off" };
 
 	step(5, "工作沙箱和后台任务");
-	if (config.bots.some((bot) => bot.tools.sandbox)) {
+	if (config.tools.sandbox) {
 		config.sandbox ??= {};
 		await advanced("沙箱参数", config.sandbox, properties.sandbox.properties, {
 			image: "tg-box:4",
@@ -431,7 +415,7 @@ async function main() {
 			network: true,
 		});
 	} else delete config.sandbox;
-	if (config.bots.some((bot) => bot.tools.tasks)) {
+	if (config.tools.tasks) {
 		config.tasks ??= { workflows: {} };
 		const names = await ask("工作流名称（逗号分隔）", Object.keys(config.tasks.workflows), {
 			type: "array",
@@ -484,12 +468,11 @@ async function main() {
 	const validation = mkdtempSync(join(directory, ".configure-"));
 	try {
 		const candidate = structuredClone(config);
-		for (const bot of candidate.bots)
-			if (files.has(absolute(bot.persona_path))) {
-				const path = join(validation, bot.id + ".md");
-				atomic(path, files.get(absolute(bot.persona_path)));
-				bot.persona_path = path;
-			}
+		if (files.has(absolute(candidate.persona_path))) {
+			const path = join(validation, "persona.md");
+			atomic(path, files.get(absolute(candidate.persona_path)));
+			candidate.persona_path = path;
+		}
 		for (const [name, path] of Object.entries(candidate.tasks?.workflows ?? {})) {
 			const content = files.get(join(absolute(path), "AGENTS.md"));
 			if (content !== undefined) {
@@ -500,17 +483,20 @@ async function main() {
 		const path = join(validation, "telegram.config.ts");
 		atomic(path, "export default " + render(candidate) + ";\n");
 		const resolved = loadConfig(directory, { configPath: path });
-		for (const bot of resolved.bots) {
-			assertBotModelConfigured({ ...bot, thinkingLevel: bot.reasoningEffort }, runtime);
-			const selected = runtime.getModel(bot.provider, bot.model);
-			if (selected.contextWindow <= MIN_COMPACTION_RESERVE) {
-				category = "context_window_too_small";
-				throw new Error();
-			}
-			if (bot.tools.viewImage && !selected.input.includes("image")) {
-				category = "image_input_unsupported";
-				throw new Error();
-			}
+		const { bot } = resolved;
+		assertBotModelConfigured({ ...bot, thinkingLevel: bot.reasoningEffort }, runtime);
+		const selected = runtime.getModel(bot.provider, bot.model);
+		if (selected.contextWindow <= MIN_COMPACTION_RESERVE) {
+			category = "context_window_too_small";
+			throw new Error();
+		}
+		if (bot.tools.viewImage && !selected.input.includes("image")) {
+			category = "image_input_unsupported";
+			throw new Error();
+		}
+		if (bot.decider) {
+			category = "decider_unavailable";
+			createDecider(runtime, bot.decider, bot.name);
 		}
 		if (resolved.media.mode === "hybrid")
 			assertPiVisionExecutorReady(createPiVisionExecutor(runtime, resolved.media.visionModel));

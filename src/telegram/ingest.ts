@@ -8,27 +8,22 @@ import { extractUpdateMessage, normalizeMessage, type CanonicalMessage } from ".
 import { assignStickerShortId } from "../media/sticker-catalog.ts";
 
 export interface IngestResult {
-	kind: "inserted" | "edited" | "enriched" | "duplicate" | "ignored";
+	kind: "inserted" | "edited" | "duplicate" | "ignored";
 	chatId?: number;
 	messageId?: number;
-	/** Immutable routing generation: initial=1, reply metadata enrichment=2, edits=Telegram edit time. */
-	routeVersion?: number;
 }
-
-// first_seen_by for edits that arrive before the original message (started mid-history)
-const EDIT_UNKNOWN_BOT_ID = "edit-unknown";
 
 /**
  * Persist one raw update and its canonical projection. Must run inside the caller's SQLite
  * transaction (the poller commits it together with the dispatch handoff and the offset).
  */
-export function ingestUpdate(db: Database, botId: string, update: any, groupChatId: number): IngestResult {
+export function ingestUpdate(db: Database, update: any, groupChatId: number): IngestResult {
 	const updateId = update.update_id as number;
 
-	// 1. store raw update (bot_id + update_id dedupe)
+	// 1. store raw update (update_id dedupe)
 	const raw = db
-		.prepare("INSERT OR IGNORE INTO raw_updates (bot_id, update_id, received_at, json) VALUES (?, ?, ?, ?)")
-		.run(botId, updateId, Math.floor(Date.now() / 1000), JSON.stringify(update));
+		.prepare("INSERT OR IGNORE INTO raw_updates (update_id, received_at, json) VALUES (?, ?, ?)")
+		.run(updateId, Math.floor(Date.now() / 1000), JSON.stringify(update));
 	if (raw.changes === 0) return { kind: "duplicate" };
 
 	// 2. extract message; ignore non-message updates
@@ -38,17 +33,17 @@ export function ingestUpdate(db: Database, botId: string, update: any, groupChat
 	if (msg.chat.id !== groupChatId) return { kind: "ignored" };
 
 	const canonical = normalizeMessage(msg, payload.edited ? msg.edit_date : null);
-	recordMedia(db, botId, canonical); // media identity/file_id tracked even for duplicate messages
+	recordMedia(db, canonical); // media identity/file_id tracked even for duplicate messages
 
-	const result = payload.edited ? editMessage(db, canonical) : insertMessage(db, botId, canonical);
+	const result = payload.edited ? editMessage(db, canonical) : insertMessage(db, canonical);
 	if (canonical.rich_truncated && (result.kind === "inserted" || result.kind === "edited")) {
-		log.warn("telegram_ingest", "rich_parse_truncated", { bot_id: botId, message_id: canonical.message_id });
+		log.warn("telegram_ingest", "rich_parse_truncated", { message_id: canonical.message_id });
 	}
 	return result;
 }
 
-/** Persist media identity (shared file_unique_id) and this bot's file_id mapping. */
-function recordMedia(db: Database, botId: string, m: CanonicalMessage): void {
+/** Persist media identity (shared file_unique_id) and the bot's file_id mapping. */
+function recordMedia(db: Database, m: CanonicalMessage): void {
 	if (!m.media) return;
 	const media = m.media;
 	db.prepare(
@@ -59,22 +54,21 @@ function recordMedia(db: Database, botId: string, m: CanonicalMessage): void {
 		   sticker_set = COALESCE(excluded.sticker_set, media.sticker_set),
 		   sticker_emoji = COALESCE(excluded.sticker_emoji, media.sticker_emoji)`,
 	).run(media.file_unique_id, media.kind, media.mime ?? null, media.sticker_set ?? null, media.sticker_emoji ?? null);
-	db.prepare("INSERT OR IGNORE INTO media_file_ids (bot_id, file_id, file_unique_id) VALUES (?, ?, ?)").run(
-		botId,
+	db.prepare("INSERT OR IGNORE INTO media_file_ids (file_id, file_unique_id) VALUES (?, ?)").run(
 		media.file_id,
 		media.file_unique_id,
 	);
 	if (media.kind === "sticker") assignStickerShortId(db, media.file_unique_id);
 }
 
-function insertMessage(db: Database, botId: string, m: CanonicalMessage): IngestResult {
+function insertMessage(db: Database, m: CanonicalMessage): IngestResult {
 	const res = db
 		.prepare(
 			`INSERT OR IGNORE INTO messages (
 				chat_id, message_id, date, thread_id, sender_id, display_name, username,
 				sender_tag, sender_chat, is_bot, text, caption, entities, rich_message,
-				reply_to_message_id, reply_to_sender_id, reply_snapshot, quote, forward_origin, edit_date, media, first_seen_by
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				reply_to_message_id, reply_to_sender_id, reply_snapshot, quote, forward_origin, edit_date, media
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			m.chat_id,
@@ -98,7 +92,6 @@ function insertMessage(db: Database, botId: string, m: CanonicalMessage): Ingest
 			m.forward_origin ? JSON.stringify(m.forward_origin) : null,
 			m.edit_date,
 			m.media ? JSON.stringify(m.media) : null,
-			botId,
 		);
 	if (res.changes === 0) {
 		// Content enrichment appends a metadata delta, but cannot trigger another reply.
@@ -106,17 +99,6 @@ function insertMessage(db: Database, botId: string, m: CanonicalMessage): Ingest
 			db.prepare(
 				"UPDATE messages SET reply_snapshot = ? WHERE chat_id = ? AND message_id = ? AND reply_snapshot IS NULL",
 			).run(JSON.stringify(m.reply_snapshot), m.chat_id, m.message_id);
-		}
-		// A second bot's copy may carry the embedded reply sender snapshot that the first
-		// update omitted. Enrich once so the direct reply can still be routed durably.
-		if (m.reply_to_sender_id != null) {
-			const enriched = db
-				.prepare(
-					"UPDATE messages SET reply_to_sender_id = ? WHERE chat_id = ? AND message_id = ? AND reply_to_sender_id IS NULL",
-				)
-				.run(m.reply_to_sender_id, m.chat_id, m.message_id);
-			if (enriched.changes > 0)
-				return { kind: "enriched", chatId: m.chat_id, messageId: m.message_id, routeVersion: 2 };
 		}
 		return { kind: "duplicate", chatId: m.chat_id, messageId: m.message_id };
 	}
@@ -128,7 +110,7 @@ function insertMessage(db: Database, botId: string, m: CanonicalMessage): Ingest
 			.get(m.media.file_unique_id) as { text: string | null } | null;
 		if (cached?.text) appendMediaUpdateEvents(db, m.media.file_unique_id, cached.text);
 	}
-	return { kind: "inserted", chatId: m.chat_id, messageId: m.message_id, routeVersion: 1 };
+	return { kind: "inserted", chatId: m.chat_id, messageId: m.message_id };
 }
 
 function editMessage(db: Database, m: CanonicalMessage): IngestResult {
@@ -146,7 +128,7 @@ function editMessage(db: Database, m: CanonicalMessage): IngestResult {
 	} | null;
 	if (!existing) {
 		// edit arrived for a message we never saw (started mid-history): store as new
-		return insertMessage(db, EDIT_UNKNOWN_BOT_ID, m);
+		return insertMessage(db, m);
 	}
 	if (existing.edit_date != null && m.edit_date != null && m.edit_date <= existing.edit_date) {
 		return { kind: "duplicate", chatId: m.chat_id, messageId: m.message_id };
@@ -181,12 +163,7 @@ function editMessage(db: Database, m: CanonicalMessage): IngestResult {
 		m.chat_id,
 		m.message_id,
 	);
-	return {
-		kind: "edited",
-		chatId: m.chat_id,
-		messageId: m.message_id,
-		routeVersion: m.edit_date ?? Math.max(3, m.date),
-	};
+	return { kind: "edited", chatId: m.chat_id, messageId: m.message_id };
 }
 
 /** Persist a known control-menu edit through the same canonical/revision path as Telegram edits. */
@@ -196,12 +173,12 @@ export function persistEditedControlMessage(db: Database, raw: Record<string, un
 }
 
 /** Insert a message we just sent via Bot API (send tool). Dedupes against the later poller echo. */
-export function insertSentMessage(db: Database, botId: string, rawMsg: unknown): CanonicalMessage {
+export function insertSentMessage(db: Database, rawMsg: unknown): CanonicalMessage {
 	const canonical = normalizeMessage(rawMsg);
-	recordMedia(db, botId, canonical); // don't rely on the poller echo to fill file_id mappings
-	insertMessage(db, botId, canonical);
+	recordMedia(db, canonical); // don't rely on the poller echo to fill file_id mappings
+	insertMessage(db, canonical);
 	if (canonical.rich_truncated) {
-		log.warn("telegram_ingest", "rich_parse_truncated", { bot_id: botId, message_id: canonical.message_id });
+		log.warn("telegram_ingest", "rich_parse_truncated", { message_id: canonical.message_id });
 	}
 	return canonical;
 }

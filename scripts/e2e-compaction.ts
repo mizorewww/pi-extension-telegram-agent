@@ -6,12 +6,12 @@ import { BotApi } from "../src/telegram/api.ts";
 import { inspectVideoTranscoder } from "../src/media/video-frames.ts";
 import { BotRuntime } from "../src/agent/runtime.ts";
 import { createInstalledPiModelRuntime, createSharedModelRuntime } from "../src/agent/model-runtime.ts";
-import { selectConfiguredBot } from "./bot-selection.ts";
 
 const config = loadConfig();
-const bot = selectConfiguredBot(config.bots, process.argv.slice(2));
+const { bot } = config;
 acquirePidLock(config.dataDir);
-const db = openDb(config.dbPath);
+const api = new BotApi(bot.token);
+const db = openDb(config.dbPath, (await api.getMe()).id);
 let runtime: BotRuntime | undefined;
 try {
 	runtime = new BotRuntime(
@@ -20,8 +20,8 @@ try {
 		config,
 		await createSharedModelRuntime([bot], () => createInstalledPiModelRuntime({ cwd: config.configDir })),
 		{
-			api: new BotApi(bot.token),
-			botApis: new Map(config.bots.map((b) => [b.id, new BotApi(b.token)])),
+			api,
+			decider: null,
 			videoTranscoder: inspectVideoTranscoder(),
 		},
 	);

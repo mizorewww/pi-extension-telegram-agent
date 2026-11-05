@@ -1,7 +1,6 @@
-// Daemon entry: long-running core. Owns SQLite, pollers and bot runtimes.
+// Daemon entry: long-running core. Owns SQLite, the poller and the bot runtime.
 // The release installer runs this entry under the dedicated system service.
 
-import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { parsePiModelReference } from "../agent/model-ref.ts";
@@ -11,11 +10,12 @@ import {
 	PiModelConfigurationError,
 	piAuthSource,
 } from "../agent/model-runtime.ts";
-import { BotFire, type BotIdentity, MessageRouter } from "../agent/router.ts";
+import { createDecider } from "../agent/decider.ts";
+import { MessageRouter } from "../agent/router.ts";
 import { BotRuntime } from "../agent/runtime.ts";
 import type { MessageRow } from "../agent/serialize.ts";
 import { loadConfig } from "../config.ts";
-import { getDaemonState, openDb, setBotState, setDaemonState } from "../db/db.ts";
+import { getDaemonState, openDb, setDaemonState } from "../db/db.ts";
 import { applyRetention } from "../db/retention.ts";
 import { pruneMediaCache } from "../media/lifecycle.ts";
 import { inspectVideoTranscoder } from "../media/video-frames.ts";
@@ -29,7 +29,7 @@ import {
 	parseTelegramControlCommand,
 	TelegramControlCommandService,
 } from "../telegram/control-command.ts";
-import { publishTelegramControlMenus, TelegramControlCoordinator } from "../telegram/control-integration.ts";
+import { publishTelegramControlMenu, TelegramControlCoordinator } from "../telegram/control-integration.ts";
 import type { IngestResult } from "../telegram/ingest.ts";
 import { Poller } from "../telegram/poller.ts";
 import { acquirePidLock, releasePidLock } from "./pid.ts";
@@ -52,43 +52,64 @@ if (mediaNeedsFrames && !videoTranscoder) {
 // loadConfig already canonicalizes model references (config.ts), so values from config always parse.
 // Hybrid mode describes media with the auxiliary vision model.
 const visualModel = config.media.mode === "hybrid" ? parsePiModelReference(config.media.visionModel)! : null;
-const chatModels = config.bots.map((bot) => ({
-	provider: bot.provider,
-	model: bot.model,
-	thinkingLevel: bot.reasoningEffort,
-	purpose: `bot:${bot.id}`,
-}));
-const { sharedModelRuntime, sharedVisionExecutor } = await (async () => {
+const { bot } = config;
+const chatModel = { provider: bot.provider, model: bot.model, thinkingLevel: bot.reasoningEffort, purpose: "bot" };
+const { sharedModelRuntime, sharedVisionExecutor, decider } = await (async () => {
 	try {
 		const runtime = await createSharedModelRuntime(
-			[...chatModels, ...(visualModel ? [{ ...visualModel, purpose: "vision" }] : [])],
+			[chatModel, ...(visualModel ? [{ ...visualModel, purpose: "vision" }] : [])],
 			() => createInstalledPiModelRuntime({ cwd: config.configDir }),
 		);
 		if (config.media.mode === "hybrid") {
 			// view_image attaches image blocks; a chat model without image input would silently
 			// degrade every viewed photo/sticker/video to a bare placeholder, so fail fast.
-			for (const bot of chatModels) {
-				const model = runtime.getModel(bot.provider, bot.model);
-				if (model && !model.input.includes("image")) {
-					throw new PiModelConfigurationError("image_input_unsupported", bot.provider, bot.model, bot.purpose);
-				}
-			}
+			const model = runtime.getModel(bot.provider, bot.model);
+			if (model && !model.input.includes("image"))
+				throw new PiModelConfigurationError("image_input_unsupported", bot.provider, bot.model, "bot");
 		}
 		const executor = visualModel ? createPiVisionExecutor(runtime, visualModel.canonical) : null;
 		if (executor) assertPiVisionExecutorReady(executor);
-		return { sharedModelRuntime: runtime, sharedVisionExecutor: executor };
+		return {
+			sharedModelRuntime: runtime,
+			sharedVisionExecutor: executor,
+			decider: bot.decider ? createDecider(runtime, bot.decider, bot.name) : null,
+		};
 	} catch (error) {
 		releasePidLock(config.dataDir);
 		throw error;
 	}
 })();
 const visionScheduler = visualModel ? new VisionScheduler(config.media.concurrency) : null;
-const db = openDb(config.dbPath);
+log.info("daemon", "bot_configured", {
+	provider: bot.provider,
+	model: bot.model,
+	reasoning: bot.reasoningEffort,
+	auth: piAuthSource(sharedModelRuntime, bot.provider),
+	decider: bot.decider ? `${bot.decider.provider}/${bot.decider.model}` : null,
+});
+// The bot's identity recognizes its own messages and mentions; it also owns the archive's file_ids.
+const api = new BotApi(bot.token);
+const me = await api.getMe();
+const db = openDb(config.dbPath, me.id);
+if (getDaemonState(db, "bot_user_id") !== String(me.id)) {
+	// Another token: the previous bot's file_ids and update offset mean nothing to this one.
+	db.exec("DELETE FROM media_file_ids; DELETE FROM daemon_state WHERE key = 'update_offset';");
+	setDaemonState(db, "bot_user_id", String(me.id));
+}
+setDaemonState(db, "bot_username", me.username);
+const identity = { userId: me.id, username: me.username, name: bot.name };
+log.info("daemon", "bot_identity_ready", { telegram_user_id: me.id, username: me.username });
 const mediaDir = join(config.dataDir, "media");
-const runtimes = new Map<string, BotRuntime>();
+const runtime = new BotRuntime(db, bot, config, sharedModelRuntime, {
+	api,
+	decider,
+	...(sharedVisionExecutor ? { visionExecutor: sharedVisionExecutor } : {}),
+	...(visionScheduler ? { visionScheduler } : {}),
+	videoTranscoder,
+});
+await runtime.init();
 async function runRetentionMaintenance(): Promise<void> {
-	const cursors = await Promise.all([...runtimes.values()].map((rt) => rt.admittedThrough()));
-	const through = cursors.length ? Math.min(...cursors) : 0;
+	const through = await runtime.admittedThrough();
 	const now = Date.now();
 	const totals = { rawUpdates: 0, messageEvents: 0 };
 	while (true) {
@@ -107,90 +128,26 @@ const maintenance = () =>
 const retentionTimer = setInterval(maintenance, 24 * 60 * 60 * 1000);
 retentionTimer.unref();
 
-// router secret: stable across restarts, generated once
-if (!config.routerSecret) {
-	let secret = getDaemonState(db, "router_secret");
-	if (!secret) {
-		secret = randomBytes(32).toString("hex");
-		setDaemonState(db, "router_secret", secret);
-		log.info("daemon", "router_secret_created");
-	}
-	config.routerSecret = secret;
-}
-
-// resolve bot identities (getMe) so we can recognize own messages and mentions
-for (const bot of config.bots) {
-	log.info("daemon", "bot_configured", {
-		bot_id: bot.id,
-		provider: bot.provider,
-		model: bot.model,
-		reasoning: bot.reasoningEffort,
-		auth: piAuthSource(sharedModelRuntime, bot.provider),
-	});
-}
-const botApis = new Map(config.bots.map((bot) => [bot.id, new BotApi(bot.token)] as const));
-const identities: BotIdentity[] = [];
-for (const bot of config.bots) {
-	const me = await botApis.get(bot.id)!.getMe();
-	setBotState(db, bot.id, "bot_user_id", String(me.id));
-	setBotState(db, bot.id, "bot_username", me.username);
-	identities.push({ id: bot.id, userId: me.id, username: me.username, name: bot.name });
-	log.info("daemon", "bot_identity_ready", { bot_id: bot.id, telegram_user_id: me.id, username: me.username });
-}
-for (const bot of config.bots) {
-	const runtime = new BotRuntime(db, bot, config, sharedModelRuntime, {
-		api: botApis.get(bot.id)!,
-		botApis,
-		...(sharedVisionExecutor ? { visionExecutor: sharedVisionExecutor } : {}),
-		...(visionScheduler ? { visionScheduler } : {}),
-		videoTranscoder,
-	});
-	await runtime.init();
-	runtimes.set(bot.id, runtime);
-}
 maintenance();
 
-// `/fire` state shared by the control command (writer) and routing (reader); off on every start.
-const botFire = new BotFire();
-const router = new MessageRouter(
-	db,
-	identities,
-	() => ({ secret: config.routerSecret ?? "", probs: config.bots.map((b) => b.routingP) }),
-	runtimes,
-	botFire,
-);
-
-for (const rt of runtimes.values()) {
-	rt.sentMessageSink = (rawMsg) => {
-		const m = rawMsg as { chat: { id: number }; message_id: number };
-		const row = db
-			.prepare("SELECT * FROM messages WHERE chat_id = ? AND message_id = ?")
-			.get(m.chat.id, m.message_id) as unknown as MessageRow | null;
-		if (!row) return; // persistence failed: nothing durable to route
-		// Only agent sends reach this sink; control replies never route.
-		void router
-			.routeLocalSend(row)
-			.catch(() => log.warn("routing", "local_send_failed", { category: "local_failure" }));
-	};
-}
+const router = new MessageRouter(db, identity, runtime);
 
 const telegramControl = new TelegramControlCommandService(
 	db,
-	config.bots,
+	bot,
 	config.configDir,
-	runtimes,
+	runtime,
 	config.telegramAdmins,
 	sharedModelRuntime,
-	botFire,
 );
-const telegramControlCoordinator = new TelegramControlCoordinator(db, telegramControl, botApis);
-void publishTelegramControlMenus(botApis);
+const telegramControlCoordinator = new TelegramControlCoordinator(db, telegramControl, api);
+void publishTelegramControlMenu(api);
 
-const boxes = [...runtimes].flatMap(([botId, rt]) =>
-	rt.workBox ? [{ botId, busy: () => rt.tasksBusy(), resetBox: (reason: "weekly") => rt.resetBox(reason) }] : [],
-);
+const box = runtime.workBox
+	? { busy: () => runtime.tasksBusy(), resetBox: (reason: "weekly") => runtime.resetBox(reason) }
+	: null;
 const runBoxReset = () =>
-	void runWeeklyBoxReset(db, boxes).catch(() =>
+	void (box ? runWeeklyBoxReset(db, box) : Promise.resolve()).catch(() =>
 		log.warn("sandbox", "weekly_reset_failed", { category: "local_failure" }),
 	);
 runBoxReset();
@@ -198,9 +155,8 @@ const boxResetTimer = setInterval(runBoxReset, BOX_RESET_CHECK_MS);
 
 // Routing and control both run inside the poller's durable handoff: the pending dispatch is
 // only deleted after this handler returns, so a crash before claim/handle replays the update.
-const onMessage = async (result: IngestResult, update: unknown, botId: string) => {
+const onMessage = async (result: IngestResult, update: unknown) => {
 	log.info("telegram_ingest", "update_committed", {
-		bot_id: botId,
 		kind: result.kind,
 		chat_id: result.chatId,
 		message_id: result.messageId,
@@ -210,17 +166,15 @@ const onMessage = async (result: IngestResult, update: unknown, botId: string) =
 		.prepare("SELECT * FROM messages WHERE chat_id = ? AND message_id = ?")
 		.get(result.chatId, result.messageId) as unknown as MessageRow | null;
 	if (!row) return;
-	const command = parseTelegramControlCommand(update, botId, identities);
+	const command = parseTelegramControlCommand(update, me.username);
 	if (command) telegramControlCoordinator.dispatch(command);
 	else await router.route(result, row);
 };
-const onCallback = async (update: unknown, botId: string) => {
-	const command = parseTelegramControlCallback(update, botId, config.groupChatId);
+const onCallback = async (update: unknown) => {
+	const command = parseTelegramControlCallback(update, config.groupChatId);
 	if (command) telegramControlCoordinator.dispatch(command);
 };
-const pollers = config.bots.map(
-	(bot) => new Poller(db, bot.id, botApis.get(bot.id)!, config.groupChatId, onMessage, onCallback),
-);
+const poller = new Poller(db, api, config.groupChatId, onMessage, onCallback);
 
 let stopping = false;
 async function shutdown(signal: string, exitCode = 0) {
@@ -234,23 +188,16 @@ async function shutdown(signal: string, exitCode = 0) {
 		process.exit(1);
 	}, 35_000);
 	hardTimer.unref?.();
-	for (const p of pollers) p.stop();
+	poller.stop();
 	clearInterval(retentionTimer);
 	clearInterval(boxResetTimer);
-	const runtimeStops = await Promise.allSettled([...runtimes.values()].map((rt) => rt.stop()));
-	for (const [index, result] of runtimeStops.entries()) {
-		if (result.status === "rejected") {
-			const botId = [...runtimes.keys()][index];
-			log.warn("daemon", "runtime_stop_failed", {
-				bot_id: botId,
-				category: errorCategory(result.reason),
-			});
-		}
-	}
+	await runtime
+		.stop()
+		.catch((error: unknown) => log.warn("daemon", "runtime_stop_failed", { category: errorCategory(error) }));
 	releasePidLock(config.dataDir);
 	// wait for the poller loops to actually exit; stop() aborts any in-flight long
 	// poll or backoff sleep, so this returns promptly inside the hard shutdown bound
-	await Promise.allSettled([pollerRuns]);
+	await Promise.allSettled([pollerRun]);
 	await telegramControlCoordinator.drain();
 	db.close();
 	clearTimeout(hardTimer);
@@ -259,8 +206,8 @@ async function shutdown(signal: string, exitCode = 0) {
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));
 
-log.info("daemon", "ready", { pid: process.pid, group_peer_id: config.groupPeerId, bot_count: config.bots.length });
-// A fatal poller error (revoked token) must still run the graceful shutdown so other bots'
-// in-flight turns settle and the pid file is released.
-const pollerRuns = Promise.all(pollers.map((p) => p.run()));
-await pollerRuns.catch(() => shutdown("poller_fatal", 1));
+log.info("daemon", "ready", { pid: process.pid, group_peer_id: config.groupPeerId });
+// A fatal poller error (revoked token) must still run the graceful shutdown so in-flight turns
+// settle and the pid file is released.
+const pollerRun = poller.run();
+await pollerRun.catch(() => shutdown("poller_fatal", 1));

@@ -27,35 +27,23 @@ function fixture() {
 	const root = join(base, "config");
 	mkdirSync(root);
 	writeFileSync(join(root, "persona.md"), "fixture persona");
-	writeFileSync(join(root, ".env"), "bot_a_token: fixture-a\nbot_b_token: fixture-b\n");
+	writeFileSync(join(root, ".env"), "bot_token: fixture\n");
 	writeFileSync(
 		join(root, "telegram.config.ts"),
 		`export default {
 	group_peer_id: 1234567890,
+	name: "Bot A",
+	token_env: "bot_token",
+	persona_path: "persona.md",
 	provider: "fixture",
 	model: "old",
 	reasoning_effort: "off",
+	decider: {
+		model: "openrouter/fixture-decider", // nested model must remain untouched
+	},
 	context_window: 65536,
 	media: { mode: "off" },
 	telegram_admins: [42],
-	bots: [
-		{
-			id: "A", // primary bot
-			name: "Bot A",
-			token_env: "bot_a_token",
-			persona_path: "persona.md",
-			routing_p: 0,
-		},
-		{
-			id: "B",
-			name: "Bot B",
-			token_env: "bot_b_token",
-			persona_path: "persona.md",
-			provider: 'other', // must remain untouched
-			model: 'other-model',
-			routing_p: 0,
-		},
-	],
 };\n`,
 	);
 	return { root, config: loadConfig(root, { stateDir: join(base, "state") }) };
@@ -75,10 +63,11 @@ test("external config discovery and hot writes stay independent of the installed
 		assert.equal(loaded.configDir, root);
 		assert.equal(loaded.dataDir, config.dataDir);
 		assert.equal(loaded.dbPath, join(config.dataDir, "agent.db"));
-		assert.equal(loaded.bots[0]!.personaPath, join(root, "persona.md"));
+		assert.equal(loaded.bot.personaPath, join(root, "persona.md"));
 		const original = readFileSync(defaultConfigPath(), "utf8");
-		const change = updateBotModelConfig(root, "A", { provider: "fixture", model: "new", reasoningEffort: "off" });
-		assert.equal(loadConfig().bots[0]!.model, "new");
+		const change = updateBotModelConfig(root, { provider: "fixture", model: "new", reasoningEffort: "off" });
+		assert.equal(loadConfig().bot.model, "new");
+		assert.equal(loadConfig().bot.decider?.model, "fixture-decider");
 		change.rollback();
 		assert.equal(readFileSync(defaultConfigPath(), "utf8"), original);
 	} finally {
@@ -117,7 +106,7 @@ test("mutating control commands require a human admin and never reach the provid
 			return { ok: true as const };
 		},
 	};
-	const service = new TelegramControlCommandService(db, config.bots, root, new Map([["A", runtime]]), [42]);
+	const service = new TelegramControlCommandService(db, config.bot, root, runtime, [42]);
 	const command = (messageId: number, from: Record<string, unknown>, text = "/new") =>
 		parseTelegramControlCommand(
 			{
@@ -129,8 +118,7 @@ test("mutating control commands require a human admin and never reach the provid
 					entities: [{ type: "bot_command", offset: 0, length: text.split(" ")[0]!.length }],
 				},
 			},
-			"A",
-			[{ id: "A", username: "alpha_bot" }],
+			"alpha_bot",
 		)!;
 	try {
 		assert.match((await service.handle(command(1, { id: 99 }))).text!, /权限不足/);
@@ -146,30 +134,39 @@ test("mutating control commands require a human admin and never reach the provid
 		assert.deepEqual(cancelled, ["t1"]);
 		// Every command message is excluded from provider context, whatever its outcome.
 		assert.deepEqual(consumedControlMessageIds(db, CHAT), new Set([1, 2, 3, 4, 5, 6]));
-		// Callback mutations also require ownership of a real menu sent by this bot.
-		db.prepare(
-			"INSERT INTO messages (chat_id, message_id, date, first_seen_by, is_bot) VALUES (?, 100, 1, 'B', 1)",
-		).run(CHAT);
-		service.consumeReply("B", CHAT, 100);
+		// A command addressed to another bot is not ours to answer.
+		assert.equal(
+			parseTelegramControlCommand(
+				{
+					message: {
+						message_id: 7,
+						chat: { id: CHAT },
+						from: { id: 42 },
+						text: "/new@other_bot",
+						entities: [{ type: "bot_command", offset: 0, length: 14 }],
+					},
+				},
+				"alpha_bot",
+			),
+			null,
+		);
+		// Callback mutations also require a real menu this bot sent.
+		db.prepare("INSERT INTO messages (chat_id, message_id, date, is_bot) VALUES (?, 100, 1, 1)").run(CHAT);
 		const callback = (senderId: number) =>
 			parseTelegramControlCallback(
 				{
 					callback_query: {
 						id: "fixture-query",
-						data: "set:r:0.1",
+						data: "model:r:0",
 						from: { id: senderId },
 						message: { chat: { id: CHAT }, message_id: 100, from: { is_bot: true } },
 					},
 				},
-				"A",
 				CHAT,
 			)!;
 		assert.match((await service.handle(callback(42))).callbackNotice!, /菜单已失效/);
-		db.prepare("UPDATE messages SET first_seen_by = 'A' WHERE message_id = 100").run();
+		service.consumeReply(CHAT, 100);
 		assert.match((await service.handle(callback(99))).callbackNotice!, /权限不足/);
-		assert.equal(loadConfig(root).bots[0]!.routingP, 0);
-		await service.handle(callback(42));
-		assert.equal(loadConfig(root).bots[0]!.routingP, 0.1);
 	} finally {
 		db.close();
 	}

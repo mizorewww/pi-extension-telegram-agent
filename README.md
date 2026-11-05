@@ -23,7 +23,7 @@ curl -fsSL https://github.com/mizorewww/pi-extension-telegram-agent/releases/lat
 
 - **Telegram**：supergroup ID、管理员的数字 user ID、BotFather 创建的 bot token。把 bot 加入群组，为它开启群消息读取与发言权限。
 - **模型**：Pi provider、模型、reasoning 档位，以及对应的 API key 或 OAuth 登录。已有 Pi 认证可直接用于配置。
-- **Bot**：名称、人设、插话概率、冷却时间，以及发送、搜索、脚本和工作区工具。
+- **Bot**：名称、人设、接话判断模型（可选，OpenRouter Decider）、冷却时间，以及发送、搜索、脚本和工作区工具。
 - **媒体与任务**：hybrid 视觉模型、TinyFish key、研究工作流和任务并发。
 - **运行参数**：上下文预算、请求超时、重试、保留期，以及容器资源配额。
 
@@ -31,7 +31,7 @@ curl -fsSL https://github.com/mizorewww/pi-extension-telegram-agent/releases/lat
 
 ## 它在群里做什么
 
-Pi Telegram Agent 把一个或多个带有人设的 AI 成员放进 Telegram 群。群友通过 @、回复或名称邀请 bot 回应；日常聊天按设定概率触发接话。
+Pi Telegram Agent 把一个带有人设的 AI 成员放进 Telegram 群，一次部署对应一个 bot。群友通过 @、回复或名称邀请 bot 回应；其余消息（包括其他 bot 的发言）交给一个小型判断模型决定要不要接话，它只读最近几行消息，不进入 bot 的上下文；没有配置判断模型时每条都接。
 
 | 能力 | 使用方式 |
 |---|---|
@@ -50,12 +50,10 @@ Pi 1.5.0 负责会话、持久化、队列、压缩、工具执行和任务恢�
 | 命令 | 作用 |
 |---|---|
 | `/help`、`/status` | 查看用法、当前状态与 Pi 累计用量 |
-| `/set` | 调整插话概率与冷却，并保存到配置文件 |
 | `/model` | 选择已认证的模型并立即切换 |
 | `/new`、`/compact` | 开启新会话、压缩当前上下文 |
 | `/task` | 查看和管理后台任务 |
 | `/box reset` | 清空工作区 |
-| `/fire` | 管理有额度限制的 bot 互动 |
 
 服务器上的操作入口：
 

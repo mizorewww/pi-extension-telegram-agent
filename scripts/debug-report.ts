@@ -10,16 +10,15 @@ import { buildDebugReport, parseDebugDuration } from "../src/observability/debug
 import { readStructuredLogTail } from "../src/observability/log.ts";
 
 function usage(): string {
-	return "Usage: npm run debug -- [--bot <id>] [--since <30s|15m|2h|7d>]\n";
+	return "Usage: npm run debug -- [--since <30s|15m|2h|7d>]\n";
 }
 
 export async function main(args = process.argv.slice(2), rootDir = configDirectory()): Promise<number> {
-	let values: { bot?: string; since?: string; help?: boolean };
+	let values: { since?: string; help?: boolean };
 	try {
 		({ values } = parseArgs({
 			args,
 			options: {
-				bot: { type: "string" },
 				since: { type: "string", default: "30m" },
 				help: { type: "boolean", short: "h" },
 			},
@@ -32,7 +31,6 @@ export async function main(args = process.argv.slice(2), rootDir = configDirecto
 		process.stdout.write(usage());
 		return 0;
 	}
-	const botId = values.bot;
 	const sinceMs = parseDebugDuration(values.since!);
 	if (sinceMs == null) {
 		process.stderr.write(usage());
@@ -42,16 +40,9 @@ export async function main(args = process.argv.slice(2), rootDir = configDirecto
 	let db: Database | null = null;
 	try {
 		const config = loadConfig(rootDir, { identityOnly: true });
-		const configuredIds = config.bots.map((bot) => bot.id);
-		const botIds = botId == null ? configuredIds : [botId];
-		if (botId != null && !configuredIds.includes(botId)) {
-			process.stderr.write(`Unknown bot id. Valid ids: ${configuredIds.join(", ")}\n`);
-			return 2;
-		}
 		db = new Database(config.dbPath, { readOnly: true });
 		const pid = readPid(join(config.dataDir, "daemon.pid"));
 		const report = buildDebugReport(db, {
-			botIds,
 			chatId: config.groupChatId,
 			sinceMs,
 			logs: readStructuredLogTail(join(config.dataDir, "daemon.log")),

@@ -100,12 +100,11 @@ export async function retrySqliteBusy<T>(operation: () => T): Promise<T> {
 /** Persist only the local projection; callers must never wrap this in a Telegram retry. */
 export async function persistSentMessageWithRetry(
 	db: Database,
-	botId: string,
 	raw: Record<string, unknown>,
 	transport: SentMessageTransport,
 ): Promise<CanonicalMessage> {
 	try {
-		return await retrySqliteBusy(() => insertSentMessage(db, botId, raw));
+		return await retrySqliteBusy(() => insertSentMessage(db, raw));
 	} catch (error) {
 		throw new SentMessagePersistenceError(error, raw, transport);
 	}
@@ -114,14 +113,13 @@ export async function persistSentMessageWithRetry(
 export async function sendTextAndPersist(
 	db: Database,
 	api: TextSendApi,
-	botId: string,
 	chatId: number,
 	text: string,
 	replyToMessageId?: number,
 	replyMarkup?: InlineKeyboardMarkup,
 ): Promise<{ raw: Record<string, unknown>; canonical: CanonicalMessage }> {
 	const raw = await api.sendMessage(chatId, text, replyToMessageId, replyMarkup);
-	return { raw, canonical: await persistSentMessageWithRetry(db, botId, raw, "plain") };
+	return { raw, canonical: await persistSentMessageWithRetry(db, raw, "plain") };
 }
 
 const PARSE_REJECTIONS = ["can't parse", "cannot parse", "failed to parse", "parse error"];
@@ -143,7 +141,6 @@ function isFormatRejection(error: unknown, phrases: readonly string[]): error is
 export async function sendMarkdownTextAndPersist(
 	db: Database,
 	api: MarkdownTextSendApi,
-	botId: string,
 	chatId: number,
 	markdown: string,
 	replyToMessageId?: number,
@@ -162,5 +159,5 @@ export async function sendMarkdownTextAndPersist(
 		transport = "plain_fallback";
 		raw = await api.sendMessage(chatId, formatted.text, replyToMessageId);
 	}
-	return { raw, canonical: await persistSentMessageWithRetry(db, botId, raw, transport), transport };
+	return { raw, canonical: await persistSentMessageWithRetry(db, raw, transport), transport };
 }

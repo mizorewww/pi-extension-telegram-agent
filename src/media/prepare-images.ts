@@ -27,7 +27,6 @@ export interface PrepareMediaImagesOptions {
 	cacheDir: string;
 	videoTranscoder: boolean;
 	signal?: AbortSignal;
-	botApis?: ReadonlyMap<string, MediaDownloadApi>;
 }
 const processor = createNodePhotonImages();
 const inFlight = new Map<string, Promise<PrepareMediaImagesResult>>();
@@ -35,7 +34,6 @@ const inFlight = new Map<string, Promise<PrepareMediaImagesResult>>();
 export function prepareMediaImages(
 	db: Database,
 	api: MediaDownloadApi,
-	botId: string,
 	fileUniqueId: string,
 	options: PrepareMediaImagesOptions,
 ): Promise<PrepareMediaImagesResult> {
@@ -46,7 +44,7 @@ export function prepareMediaImages(
 		if (!media || !isVisionMedia(media.kind, media.mime)) return { ok: false, outcome: "media_unavailable" };
 		const video = isVideoMedia(media.kind, media.mime);
 		if (video && !options.videoTranscoder) return { ok: false, outcome: "video_transcoder_unavailable" };
-		const local = await ensureLocalMedia(db, api, botId, fileUniqueId, options);
+		const local = await ensureLocalMedia(db, api, fileUniqueId, options);
 		if (!local.ok) return local;
 		let sources: PreparedImage[] = [local];
 		if (video) {
@@ -72,11 +70,10 @@ export function prepareMediaImages(
 export async function ensureViewImages(
 	db: Database,
 	api: MediaDownloadApi,
-	botId: string,
 	fileUniqueId: string,
 	options: PrepareMediaImagesOptions,
 ): Promise<{ ok: true; images: ImageContent[] } | { ok: false; outcome: PrepareMediaImagesFailure }> {
-	const prepared = await prepareMediaImages(db, api, botId, fileUniqueId, options);
+	const prepared = await prepareMediaImages(db, api, fileUniqueId, options);
 	return prepared.ok
 		? {
 				ok: true,

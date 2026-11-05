@@ -36,7 +36,7 @@
 - 进程管理 → `src/daemon/`
 - 工具实现（search 等）→ `src/tools/`；codemode 接入 → `src/agent/extensions/codemode.ts`，注册顺序固定在 `src/agent/runtime.ts`
 - 后台任务 → `src/tasks/`；工作区容器（sandbox）→ `src/sandbox/`；镜像 `deploy/box/Dockerfile`
-- 配置文件写回（`/set`、`/model`）→ `src/onboarding/config-core.ts`
+- 配置文件写回（`/model`）→ `src/onboarding/config-core.ts`；接话判断（decider）提示词与例子 → `src/agent/decider.ts`
 
 ## 5. 测试规则
 

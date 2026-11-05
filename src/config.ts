@@ -1,5 +1,5 @@
 // The only configuration source: trusted `telegram.config.ts` in TG_CONFIG_DIR plus `.env`
-// (`key: value`) for Telegram/TinyFish/router secrets. LLM credentials stay in Pi's auth store.
+// (`key: value`) for Telegram/TinyFish secrets. LLM credentials stay in Pi's auth store.
 // Validation collects every error and throws one ConfigError listing them all.
 
 import { readFileSync, existsSync, statSync } from "node:fs";
@@ -13,6 +13,7 @@ import type { BoxConfig } from "./sandbox/box.ts";
 import type { TasksConfig } from "./tasks/manager.ts";
 import { loadPiModelDefaults, type PiModelDefaults } from "./agent/model-settings.ts";
 import { canonicalPiModelReference, DEFAULT_AUXILIARY_VISUAL_MODEL } from "./agent/model-ref.ts";
+import { DEFAULT_DECIDER_THRESHOLD } from "./agent/decider.ts";
 
 /** Pi keeps this much room for the next response; compaction_threshold must leave it free. */
 export const MIN_COMPACTION_RESERVE = 16_384;
@@ -27,27 +28,30 @@ export type MediaMode = "off" | "hybrid";
 const text = Type.String({ pattern: "\\S" });
 const positive = Type.Number({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
 const reasoning = Type.Enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const shared = Type.Partial(
-	Type.Object({
-		provider: text,
-		model: text,
-		reasoning_effort: reasoning,
-		cache_retention: Type.Union([Type.Literal("none"), Type.Literal("short"), Type.Literal("long")]),
-		compaction_threshold: positive,
-		compaction_keep_recent: positive,
-		cooldown_ms: Type.Number({ minimum: 0 }),
-		provider_timeout_ms: Type.Number({ minimum: 1000, maximum: 3_600_000 }),
-		provider_retries: Type.Integer({ minimum: 0, maximum: 5 }),
-	}),
-);
-const botSchema = Type.Object(
+export const configSchema = Type.Object(
 	{
-		...shared.properties,
-		id: Type.String({ pattern: "^[A-Za-z0-9_-]+$" }),
+		group_peer_id: Type.Union([Type.String(), Type.Number()]),
 		name: Type.Optional(Type.String()),
 		token_env: text,
 		persona_path: text,
-		routing_p: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+		provider: Type.Optional(text),
+		model: Type.Optional(text),
+		reasoning_effort: Type.Optional(reasoning),
+		cache_retention: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("short"), Type.Literal("long")])),
+		compaction_threshold: Type.Optional(positive),
+		compaction_keep_recent: Type.Optional(positive),
+		cooldown_ms: Type.Optional(Type.Number({ minimum: 0 })),
+		provider_timeout_ms: Type.Optional(Type.Number({ minimum: 1000, maximum: 3_600_000 })),
+		provider_retries: Type.Optional(Type.Integer({ minimum: 0, maximum: 5 })),
+		decider: Type.Optional(
+			Type.Object(
+				{
+					model: Type.String({ pattern: "^[^/\\s]+/\\S+$" }),
+					threshold: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+				},
+				{ additionalProperties: false },
+			),
+		),
 		tools: Type.Optional(
 			Type.Partial(
 				Type.Object(
@@ -63,13 +67,6 @@ const botSchema = Type.Object(
 			),
 		),
 		sticker_sets: Type.Optional(Type.Array(text)),
-	},
-	{ additionalProperties: false },
-);
-export const configSchema = Type.Object(
-	{
-		...shared.properties,
-		group_peer_id: Type.Union([Type.String(), Type.Number()]),
 		context_window: Type.Optional(Type.Integer({ minimum: MIN_COMPACTION_RESERVE * 2, maximum: 10_000_000 })),
 		media: Type.Optional(
 			Type.Partial(
@@ -117,23 +114,28 @@ export const configSchema = Type.Object(
 		telegram_admins: Type.Optional(
 			Type.Array(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), { uniqueItems: true }),
 		),
-		bots: Type.Array(botSchema, { minItems: 1 }),
 	},
 	{ additionalProperties: false },
 );
 const configValidator = compile(configSchema);
-type SharedConfigInput = Static<typeof shared>;
-export type TelegramBotConfigInput = Static<typeof botSchema>;
 export type TelegramConfigInput = Static<typeof configSchema>;
 export type TelegramAdmin = number;
 
+/** A classifier model that decides whether an unaddressed message deserves a reply. */
+export interface DeciderConfig {
+	provider: string;
+	model: string;
+	threshold: number;
+}
+
 export interface BotConfig {
-	id: string;
 	name: string;
 	token: string;
 	personaPath: string;
-	routingP: number;
-	samplingCooldownMs: number;
+	/** Quiet time after a turn before unaddressed messages are judged again. */
+	cooldownMs: number;
+	/** Null: every unaddressed message gets a turn. */
+	decider: DeciderConfig | null;
 	provider: string;
 	model: string;
 	reasoningEffort: ThinkingLevel;
@@ -159,7 +161,7 @@ export interface AppConfig {
 	groupPeerId: number;
 	/** `-100<groupPeerId>`: the one chat id ingestion accepts and every send targets. */
 	groupChatId: number;
-	bots: BotConfig[];
+	bot: BotConfig;
 	tinyfishApiKey: string;
 	contextWindow: number;
 	media: { mode: MediaMode; visionModel: string; maxPerTurn: number; concurrency: number };
@@ -168,8 +170,6 @@ export interface AppConfig {
 	/** Background task workflows; null when the deployment has no tasks section. */
 	tasks: TasksConfig | null;
 	retention: RetentionConfig;
-	/** Generated and persisted by the daemon when absent. */
-	routerSecret: string | null;
 	/** Deny-by-default allowlist for mutating Telegram control commands. */
 	telegramAdmins: TelegramAdmin[];
 }
@@ -253,20 +253,13 @@ function validate(
 	const errors: string[] = [];
 	if (raw.media?.vision_model && !canonicalPiModelReference(raw.media.vision_model))
 		errors.push(`[config] invalid model reference: ${raw.media.vision_model}`);
-	const ids = new Set<string>();
-	for (const bot of raw.bots) {
-		if (ids.has(bot.id)) errors.push(`[config] duplicate bot id: ${bot.id}`);
-		ids.add(bot.id);
-		if (!identityOnly && !env[bot.token_env]) errors.push(`[config] bot ${bot.id}: missing env key ${bot.token_env}`);
-		const path = resolvePath(rootDir, bot.persona_path);
-		if (!existsSync(path) || !statSync(path).isFile())
-			errors.push(`[config] bot ${bot.id}: persona must be a readable file`);
-		if (bot.tools?.sandbox && !raw.sandbox) errors.push(`[config] bot ${bot.id}: sandbox needs sandbox configuration`);
-		if (bot.tools?.tasks && (!bot.tools.sandbox || !raw.tasks))
-			errors.push(`[config] bot ${bot.id}: tasks need sandbox and tasks configuration`);
-	}
-	if (raw.bots.reduce((sum, bot) => sum + (bot.routing_p ?? 0), 0) > 1)
-		errors.push("[config] routing probabilities must sum to <= 1");
+	if (!identityOnly && !env[raw.token_env]) errors.push(`[config] token_env: missing env key ${raw.token_env}`);
+	const persona = resolvePath(rootDir, raw.persona_path);
+	if (!existsSync(persona) || !statSync(persona).isFile())
+		errors.push("[config] persona_path: persona must be a readable file");
+	if (raw.tools?.sandbox && !raw.sandbox) errors.push("[config] tools.sandbox: needs sandbox configuration");
+	if (raw.tools?.tasks && (!raw.tools.sandbox || !raw.tasks))
+		errors.push("[config] tools.tasks: needs sandbox and tasks configuration");
 	if (raw.tasks) {
 		if (!raw.sandbox) errors.push("[config] tasks require sandbox configuration");
 		for (const [name, dir] of Object.entries(raw.tasks.workflows))
@@ -298,21 +291,17 @@ export function loadConfig(rootDir = configDirectory(), options: LoadConfigOptio
 	const errors = validate(rootDir, raw, env, identityOnly);
 	if (errors.length > 0) throw new ConfigError(errors);
 
-	const rawBots = raw.bots;
 	const str = (value?: string) => value?.trim();
-	const needsPiDefaults =
-		!identityOnly &&
-		rawBots.some((bot) => str(bot.provider ?? raw.provider) == null || str(bot.model ?? raw.model) == null);
+	const needsPiDefaults = !identityOnly && (str(raw.provider) == null || str(raw.model) == null);
 	const pi =
 		options.piModelDefaults ??
 		(needsPiDefaults ? loadPiModelDefaults(rootDir) : { provider: undefined, model: undefined });
-	const rootProvider = str(raw.provider) ?? pi.provider;
-	// A deployment-level provider switch without a model must not inherit Pi's model for another provider.
-	const rootModel = str(raw.model) ?? (str(raw.provider) && str(raw.provider) !== pi.provider ? undefined : pi.model);
-	if (needsPiDefaults && !rootProvider && !rootModel)
-		errors.push(
-			"[config] Pi default provider/model is missing; run Pi /login and select both with /model, or set them explicitly in telegram.config.ts",
-		);
+	const provider = str(raw.provider) ?? pi.provider ?? "";
+	// A provider switch without a model must not inherit Pi's model for another provider.
+	const model = str(raw.model) ?? (str(raw.provider) && str(raw.provider) !== pi.provider ? "" : (pi.model ?? ""));
+	if (!identityOnly && !provider) errors.push("[config] provider: select one in config or Pi /model");
+	if (!identityOnly && !model)
+		errors.push(`[config] provider "${provider}" has no model; select both in config or Pi /model`);
 
 	const contextWindow = raw.context_window ?? 65_536;
 	const maxThreshold = contextWindow - MIN_COMPACTION_RESERVE;
@@ -320,53 +309,45 @@ export function loadConfig(rootDir = configDirectory(), options: LoadConfigOptio
 	const mediaMode = media.mode ?? "off";
 	const groupPeerId = normalizePeerId(String(raw.group_peer_id ?? ""));
 	if (!Number.isFinite(groupPeerId)) errors.push("[config] group_peer_id: required (bare positive peer id)");
-
-	const bots: BotConfig[] = rawBots.map((bot) => {
-		const id = bot.id;
-		const setting = <T>(key: keyof SharedConfigInput, fallback: T): T => (bot[key] ?? raw[key] ?? fallback) as T;
-		const botProvider = str(bot.provider);
-		const provider = botProvider ?? rootProvider ?? "";
-		const model = str(bot.model) ?? (botProvider && botProvider !== rootProvider ? "" : (rootModel ?? ""));
-		if (!identityOnly && !provider)
-			errors.push(`[config] bot "${id}" has no provider; select one in config or Pi /model`);
-		if (!identityOnly && !model)
-			errors.push(
-				`[config] bot "${id}" selects provider "${provider}" without a model; select both in config or Pi /model`,
-			);
-		const compactionThreshold = setting("compaction_threshold", Math.floor(contextWindow / 2));
-		if (compactionThreshold > maxThreshold)
-			errors.push(
-				`[config] bot "${id}" compaction_threshold ${compactionThreshold}: effective trigger is capped at ${maxThreshold} (context_window ${contextWindow} minus ${MIN_COMPACTION_RESERVE} reserve); use a value <= ${maxThreshold}`,
-			);
-		const tools = bot.tools ?? {};
-		return {
-			id,
-			name: str(bot.name) || id,
-			token: identityOnly ? "" : (env[bot.token_env] ?? ""),
-			personaPath: resolvePath(rootDir, bot.persona_path),
-			routingP: bot.routing_p ?? 0,
-			samplingCooldownMs: setting("cooldown_ms", 2000),
-			provider,
-			model,
-			reasoningEffort: setting<ThinkingLevel>("reasoning_effort", "off"),
-			compactionThreshold,
-			compactionKeepRecent: setting("compaction_keep_recent", 20_000),
-			cacheRetention: setting<CacheRetention>("cache_retention", "short"),
-			providerTimeoutMs: setting("provider_timeout_ms", 300_000),
-			providerRetries: setting("provider_retries", 2),
-			tools: {
-				send: tools.send !== false,
-				search: tools.search === true,
-				codemode: tools.codemode === true,
-				sandbox: tools.sandbox === true,
-				tasks: tools.tasks === true,
-				viewImage: mediaMode === "hybrid",
-			},
-			stickerSets: [...(bot.sticker_sets ?? [])],
-		};
-	});
+	const compactionThreshold = raw.compaction_threshold ?? Math.floor(contextWindow / 2);
+	if (compactionThreshold > maxThreshold)
+		errors.push(
+			`[config] compaction_threshold ${compactionThreshold}: effective trigger is capped at ${maxThreshold} (context_window ${contextWindow} minus ${MIN_COMPACTION_RESERVE} reserve); use a value <= ${maxThreshold}`,
+		);
+	const tools = raw.tools ?? {};
+	const deciderSlash = raw.decider?.model.indexOf("/") ?? -1;
+	const bot: BotConfig = {
+		name: str(raw.name) || "bot",
+		token: identityOnly ? "" : (env[raw.token_env] ?? ""),
+		personaPath: resolvePath(rootDir, raw.persona_path),
+		cooldownMs: raw.cooldown_ms ?? 2000,
+		decider: raw.decider
+			? {
+					provider: raw.decider.model.slice(0, deciderSlash),
+					model: raw.decider.model.slice(deciderSlash + 1),
+					threshold: raw.decider.threshold ?? DEFAULT_DECIDER_THRESHOLD,
+				}
+			: null,
+		provider,
+		model,
+		reasoningEffort: raw.reasoning_effort ?? "off",
+		compactionThreshold,
+		compactionKeepRecent: raw.compaction_keep_recent ?? 20_000,
+		cacheRetention: raw.cache_retention ?? "short",
+		providerTimeoutMs: raw.provider_timeout_ms ?? 300_000,
+		providerRetries: raw.provider_retries ?? 2,
+		tools: {
+			send: tools.send !== false,
+			search: tools.search === true,
+			codemode: tools.codemode === true,
+			sandbox: tools.sandbox === true,
+			tasks: tools.tasks === true,
+			viewImage: mediaMode === "hybrid",
+		},
+		stickerSets: [...(raw.sticker_sets ?? [])],
+	};
 	const tinyfishApiKey = env.tiny_fish_api_key ?? "";
-	if (!identityOnly && !tinyfishApiKey && bots.some((bot) => bot.tools.search))
+	if (!identityOnly && !tinyfishApiKey && bot.tools.search)
 		errors.push('[config] tools.search: needs "tiny_fish_api_key" in .env');
 	if (errors.length > 0) throw new ConfigError(errors);
 
@@ -377,7 +358,7 @@ export function loadConfig(rootDir = configDirectory(), options: LoadConfigOptio
 		dbPath: join(dataDir, "agent.db"),
 		groupPeerId,
 		groupChatId: Number(`-100${groupPeerId}`),
-		bots,
+		bot,
 		tinyfishApiKey,
 		contextWindow,
 		media: {
@@ -392,7 +373,6 @@ export function loadConfig(rootDir = configDirectory(), options: LoadConfigOptio
 			rawUpdateDays: raw.raw_update_retention_days ?? 30,
 			messageEventDays: raw.message_event_retention_days ?? 365,
 		},
-		routerSecret: env.router_secret || null,
 		telegramAdmins: raw.telegram_admins ?? [],
 	};
 }

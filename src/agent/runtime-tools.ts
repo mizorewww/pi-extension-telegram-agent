@@ -22,7 +22,7 @@ import {
 } from "@earendil-works/pi-durable";
 import type { AppConfig, BotConfig } from "../config.ts";
 import { groupMessage } from "../db/message-events.ts";
-import { downloadSource, MEDIA_DOWNLOAD_MAX_BYTES, type MediaDownloadApi } from "../media/local-cache.ts";
+import { fileIdFor, MEDIA_DOWNLOAD_MAX_BYTES } from "../media/local-cache.ts";
 import { ensureViewImages } from "../media/prepare-images.ts";
 import type { WorkBox } from "../sandbox/box.ts";
 import { TaskManager } from "../tasks/manager.ts";
@@ -47,7 +47,6 @@ export interface BotRuntimeToolHost {
 	bot: BotConfig;
 	config: AppConfig;
 	api: BotApi;
-	botApis: ReadonlyMap<string, MediaDownloadApi>;
 	videoTranscoder: boolean;
 	box: WorkBox | null;
 	harness(): Harness;
@@ -59,7 +58,6 @@ export interface BotRuntimeToolHost {
 		context: Context,
 		outcome: "sent" | "unknown",
 	): Promise<void>;
-	onSent(raw: Record<string, unknown>): void;
 	recordEvent(kind: string, payload: unknown): void;
 	resetBox(reason: "tool"): Promise<void>;
 }
@@ -95,12 +93,10 @@ async function send(host: BotRuntimeToolHost, params: SendParams, api: ToolExecu
 	const result = await executeAgentSend(params, {
 		db: host.db,
 		api: host.api,
-		botId: host.bot.id,
 		chatId: host.config.groupChatId,
 		allowedReactions: host.allowedReactions(),
 		box: host.box,
 		triggerMessageId: await host.currentMessage(api, context),
-		onSent: (raw) => host.onSent(raw),
 		recordEvent: (kind, payload) => host.recordEvent(kind, payload),
 	});
 	if ("outcome" in result.details || result.details.sent.length) {
@@ -125,11 +121,11 @@ async function download(host: BotRuntimeToolHost, messageId: number, signal?: Ab
 		: null;
 	if (!media) throw new Error("message has no attachment");
 	if ((media.file_size ?? 0) > MEDIA_DOWNLOAD_MAX_BYTES) throw new Error("Telegram downloads are limited to 20 MB");
-	const source = downloadSource(host.db, host.api, host.bot.id, media.file_unique_id, host.botApis);
-	if (!source) throw new Error("attachment is unavailable to configured bots");
-	const file = await source.api.getFile(source.fileId, signal);
+	const fileId = fileIdFor(host.db, media.file_unique_id);
+	if (!fileId) throw new Error("attachment is unavailable to this bot");
+	const file = await host.api.getFile(fileId, signal);
 	if (!file.file_path) throw new Error("Telegram file is unavailable");
-	const bytes = await source.api.downloadFile(file.file_path, signal);
+	const bytes = await host.api.downloadFile(file.file_path, signal);
 	signal?.throwIfAborted();
 	const extension = /\.[A-Za-z0-9]{1,8}$/.exec(file.file_path)?.[0] ?? "";
 	const path = await host.box!.writeFile(`inbox/${messageId}${extension}`, bytes);
@@ -171,9 +167,8 @@ export async function buildBotRuntimeTools(
 					const row = groupMessage(host.db, host.config.groupChatId, args.message_id);
 					const media = row?.media ? (JSON.parse(row.media) as { file_unique_id?: string }) : null;
 					if (!row || !media?.file_unique_id) throw new Error("message has no image");
-					const images = await ensureViewImages(host.db, host.api, host.bot.id, media.file_unique_id, {
+					const images = await ensureViewImages(host.db, host.api, media.file_unique_id, {
 						cacheDir: join(host.config.dataDir, "media"),
-						botApis: host.botApis,
 						videoTranscoder: host.videoTranscoder,
 						signal: context.abortSignal,
 					});

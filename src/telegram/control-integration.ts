@@ -15,7 +15,7 @@ import {
 
 export interface TelegramControlCommandPort {
 	handle(command: ParsedTelegramControlCommand): Promise<TelegramControlResult>;
-	consumeReply(botId: string, chatId: number, messageId: number): void;
+	consumeReply(chatId: number, messageId: number): void;
 }
 
 export interface TelegramControlApi extends TextSendApi {
@@ -29,7 +29,7 @@ export interface TelegramControlApi extends TextSendApi {
 }
 
 export type TelegramControlDeliveryResult =
-	| { outcome: "sent"; botId: string; chatId: number; messageId: number }
+	| { outcome: "sent"; chatId: number; messageId: number }
 	| { outcome: "no_reply" | "failed"; category?: string };
 
 /** Command execution + Telegram send/canonical projection, with no uncertain remote retry. */
@@ -40,7 +40,7 @@ export class TelegramControlCoordinator {
 	dispatch(command: ParsedTelegramControlCommand): void {
 		const work = this.handle(command)
 			.catch(() => {
-				this.warn("dispatch", { bot_id: command.replyBotId, category: "local_failure" });
+				this.warn("dispatch", { category: "local_failure" });
 			})
 			.finally(() => this.pending.delete(work));
 		this.pending.add(work);
@@ -53,7 +53,7 @@ export class TelegramControlCoordinator {
 	constructor(
 		private readonly db: Database,
 		private readonly commands: TelegramControlCommandPort,
-		private readonly apis: ReadonlyMap<string, TelegramControlApi>,
+		private readonly api: TelegramControlApi,
 	) {}
 
 	private warn(operation: string, fields: Record<string, unknown>): void {
@@ -64,7 +64,7 @@ export class TelegramControlCoordinator {
 		let operation = "command";
 		try {
 			const result = await this.commands.handle(command);
-			const api = this.apis.get(result.replyBotId)!;
+			const api = this.api;
 			if (command.callbackQueryId) await this.answerCallback(command, result.callbackNotice);
 			if (result.text == null) return { outcome: "no_reply" };
 			if (command.callbackQueryId) {
@@ -76,13 +76,12 @@ export class TelegramControlCoordinator {
 					result.replyMarkup ?? { inline_keyboard: [] },
 				);
 				await retrySqliteBusy(() => persistEditedControlMessage(this.db, raw));
-				return { outcome: "sent", botId: result.replyBotId, chatId: result.chatId, messageId: command.messageId };
+				return { outcome: "sent", chatId: result.chatId, messageId: command.messageId };
 			}
 			operation = "reply";
 			const { canonical } = await sendTextAndPersist(
 				this.db,
 				api,
-				result.replyBotId,
 				result.chatId,
 				result.text,
 				result.replyToMessageId,
@@ -90,17 +89,14 @@ export class TelegramControlCoordinator {
 			);
 			// A local marker failure must not repeat the irreversible Telegram create.
 			try {
-				await retrySqliteBusy(() =>
-					this.commands.consumeReply(result.replyBotId, canonical.chat_id, canonical.message_id),
-				);
+				await retrySqliteBusy(() => this.commands.consumeReply(canonical.chat_id, canonical.message_id));
 			} catch (error) {
 				this.warn("reply_marker", {
-					bot_id: result.replyBotId,
 					message_id: canonical.message_id,
 					category: localFailureCategory(error),
 				});
 			}
-			return { outcome: "sent", botId: result.replyBotId, chatId: canonical.chat_id, messageId: canonical.message_id };
+			return { outcome: "sent", chatId: canonical.chat_id, messageId: canonical.message_id };
 		} catch (error) {
 			const category =
 				error instanceof SentMessagePersistenceError
@@ -108,7 +104,7 @@ export class TelegramControlCoordinator {
 					: operation === "reply"
 						? classifyTelegramCreateFailure(error).category
 						: "local_failure";
-			this.warn(operation, { bot_id: command.replyBotId, message_id: command.messageId, category });
+			this.warn(operation, { message_id: command.messageId, category });
 			if (operation === "command" && command.callbackQueryId)
 				await this.answerCallback(command, "操作失败，请稍后重试。");
 			return { outcome: "failed", category };
@@ -117,13 +113,9 @@ export class TelegramControlCoordinator {
 
 	private async answerCallback(command: ParsedTelegramControlCommand, notice?: string): Promise<void> {
 		try {
-			await this.apis.get(command.replyBotId)!.answerCallbackQuery(command.callbackQueryId!, notice);
+			await this.api.answerCallbackQuery(command.callbackQueryId!, notice);
 		} catch {
-			this.warn("callback_answer", {
-				bot_id: command.replyBotId,
-				message_id: command.messageId,
-				category: "request_failed",
-			});
+			this.warn("callback_answer", { message_id: command.messageId, category: "request_failed" });
 		}
 	}
 }
@@ -134,15 +126,11 @@ export interface TelegramMenuApi {
 
 export const TELEGRAM_CONTROL_MENU = CONTROL_COMMANDS.map(([command, description]) => ({ command, description }));
 
-/** Startup capability only: every bot attempts the same menu, failures never block polling. */
-export async function publishTelegramControlMenus(apis: ReadonlyMap<string, TelegramMenuApi>): Promise<void> {
-	await Promise.all(
-		[...apis].map(async ([botId, api]) => {
-			try {
-				await api.setMyCommands(TELEGRAM_CONTROL_MENU);
-			} catch {
-				log.warn("telegram_control", "menu_publish_failed", { bot_id: botId, category: "request_failed" });
-			}
-		}),
-	);
+/** Startup capability only: a failure never blocks polling. */
+export async function publishTelegramControlMenu(api: TelegramMenuApi): Promise<void> {
+	try {
+		await api.setMyCommands(TELEGRAM_CONTROL_MENU);
+	} catch {
+		log.warn("telegram_control", "menu_publish_failed", { category: "request_failed" });
+	}
 }

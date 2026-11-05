@@ -1,7 +1,7 @@
 // Cache-visible protocol: changes start a new context epoch.
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 50; // Fixed model tool schemas; code mode lists only names and return types.
+export const CACHE_SCHEMA_VERSION = 51; // One bot per deployment; a decider replaces probability routing.
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
 
 interface EnabledTools {
@@ -63,8 +63,8 @@ export const SHARED_PROTOCOL = `# 群聊协议
 
 规则：
 
-- 未被点名的概率插话可以按人设保持沉默
-- 人类明确 @你、回复你或使用你的配置名称点名时必须回应，不受概率插话的沉默或防刷屏启发式影响
+- 没被点名时，是否轮到你由系统判断；轮到了也可以按人设保持沉默
+- 人类明确 @你、回复你或使用你的配置名称点名时必须回应，不受沉默或防刷屏启发式影响
 - 群里可能还有其他 bot 或成员；不要替他们说话。系统决定哪些消息触发你，不要主动制造 bot 之间的循环对话
 `;
 

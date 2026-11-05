@@ -21,33 +21,27 @@ export function lastWeeklyBoundary(now: Date): Date {
 }
 
 export interface ResettableBox {
-	readonly botId: string;
 	/** A box with running tasks waits for the next check. */
 	busy?(): boolean | Promise<boolean>;
 	resetBox(reason: "weekly"): Promise<void>;
 }
 
-/** One check: reset each box whose last reset predates the latest boundary. */
-export async function runWeeklyBoxReset(
-	db: Database,
-	boxes: readonly ResettableBox[],
-	now = new Date(),
-): Promise<void> {
+const KEY = "box_reset_at";
+
+/** One check: reset the box when its last reset predates the latest boundary. */
+export async function runWeeklyBoxReset(db: Database, box: ResettableBox, now = new Date()): Promise<void> {
 	const boundary = lastWeeklyBoundary(now).getTime();
-	for (const box of boxes) {
-		const key = `box_reset_at:${box.botId}`;
-		const last = Number(getDaemonState(db, key) ?? "NaN");
-		if (!Number.isFinite(last)) {
-			// First sight of this box: start the weekly clock now instead of wiping it.
-			setDaemonState(db, key, String(now.getTime()));
-			continue;
-		}
-		if (last >= boundary || (await box.busy?.())) continue;
-		try {
-			await box.resetBox("weekly");
-			setDaemonState(db, key, String(now.getTime()));
-		} catch {
-			log.warn("sandbox", "weekly_reset_failed", { bot_id: box.botId });
-		}
+	const last = Number(getDaemonState(db, KEY) ?? "NaN");
+	if (!Number.isFinite(last)) {
+		// First sight of this box: start the weekly clock now instead of wiping it.
+		setDaemonState(db, KEY, String(now.getTime()));
+		return;
+	}
+	if (last >= boundary || (await box.busy?.())) return;
+	try {
+		await box.resetBox("weekly");
+		setDaemonState(db, KEY, String(now.getTime()));
+	} catch {
+		log.warn("sandbox", "weekly_reset_failed", { category: "local_failure" });
 	}
 }

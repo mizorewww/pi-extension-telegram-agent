@@ -9,7 +9,6 @@ export type MessageEventKind = "message" | "edit" | "metadata" | "media_update" 
  * is the message it concerns (a task's origin), or 0.
  */
 export interface NotePayload {
-	bot_id: string;
 	source: "task" | "job" | "system";
 	task_id?: string;
 	phase?: "progress" | "need_input" | "done" | "failed" | "cancelled" | "interrupted";
@@ -116,11 +115,6 @@ export function groupMessage(db: Database, chatId: number, messageId: number): M
 		)
 		.get(chatId, messageId) as unknown as MessageRow | undefined;
 	return row ?? null;
-}
-
-/** Notes belong to one bot; every other bot's cursor just passes over them. */
-export function eventsForBot(events: readonly MessageEvent[], botId: string): MessageEvent[] {
-	return events.filter((event) => event.kind !== "note" || (event.payload as NotePayload).bot_id === botId);
 }
 
 /** Append one note event; `key` makes the append idempotent. Returns its ingest_seq, or null. */

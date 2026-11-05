@@ -15,7 +15,7 @@ const CONFIG = {
 };
 
 test("rootless isolation, mounts and paths stay bounded", async () => {
-	const args = new WorkBox("A", CONFIG).runArgs();
+	const args = new WorkBox(CONFIG).runArgs();
 	const joined = args.join(" ");
 	for (const flag of [
 		"--user 1000:1000",
@@ -30,13 +30,13 @@ test("rootless isolation, mounts and paths stay bounded", async () => {
 	assert.ok(!joined.includes("--privileged"));
 	assert.deepEqual(
 		args.flatMap((arg, i) => (arg === "--volume" ? [args[i + 1]] : [])),
-		["tg-work-A:/work"],
+		["tg-work:/work"],
 	);
 	assert.deepEqual(
 		args.flatMap((arg, i) => (arg === "--env" ? [args[i + 1]] : [])),
 		["HOME=/work/.home"],
 	);
-	assert.ok(new WorkBox("A", { ...CONFIG, network: false }).runArgs().join(" ").includes("--network none"));
+	assert.ok(new WorkBox({ ...CONFIG, network: false }).runArgs().join(" ").includes("--network none"));
 	assert.equal(normalizeBoxPath("out/a.png"), "/work/out/a.png");
 	for (const path of ["/etc/passwd", "../etc/passwd", "/work/../etc", "/workx/a", "a\nb"])
 		assert.throws(() => normalizeBoxPath(path), BoxError);
@@ -45,7 +45,7 @@ test("rootless isolation, mounts and paths stay bounded", async () => {
 	env.openBinaryReader = async () => {
 		throw new Error("must reject escape before reading");
 	};
-	await assert.rejects(new WorkBox("A", CONFIG, undefined, env).copyOut("link", 1000), BoxError);
+	await assert.rejects(new WorkBox(CONFIG, undefined, env).copyOut("link", 1000), BoxError);
 });
 
 test("outbound file uses a no-follow handle and rejects growth beyond the limit", async () => {
@@ -69,6 +69,6 @@ test("outbound file uses a no-follow handle and rejects growth beyond the limit"
 		assert.equal(options?.noFollow, true);
 		return ok(reader);
 	};
-	await assert.rejects(new WorkBox("A", CONFIG, undefined, env).copyOut("file", 10), BoxError);
+	await assert.rejects(new WorkBox(CONFIG, undefined, env).copyOut("file", 10), BoxError);
 	assert.equal(closed, true);
 });

@@ -1,4 +1,4 @@
-// Write-through edits of telegram.config.ts for the group /set and /model commands. The file
+// Write-through edits of telegram.config.ts for the group /model command. The file
 // stays in the resolved configuration directory; validate a temporary sibling before replacing it.
 
 import { randomUUID } from "node:crypto";
@@ -28,30 +28,9 @@ function validateConfigSource(root: string, source: string): void {
 	}
 }
 
-export type BotControlConfigField = "routing_p" | "cooldown_ms";
-
-/**
- * Write one numeric bot control field through to the live config file, which stays the only
- * source of truth (the change survives restarts). The draft is validated before it replaces
- * the file.
- */
-export function updateBotConfigField(
-	rootDir: string,
-	botId: string,
-	field: BotControlConfigField,
-	value: number,
-): void {
-	const root = resolve(rootDir);
-	const { path, source } = readConfigSource(root);
-	const edited = replaceBotFieldValue(source, botId, field, value);
-	validateConfigSource(root, edited);
-	writeAtomic(path, edited, PRIVATE_MODE);
-}
-
 /** One validated file replacement for the entire model selection; caller commits its runtime next. */
 export function updateBotModelConfig(
 	rootDir: string,
-	botId: string,
 	selection: Pick<BotConfig, "provider" | "model" | "reasoningEffort">,
 ): { finalize(): void; rollback(): void } {
 	const root = resolve(rootDir);
@@ -62,49 +41,29 @@ export function updateBotModelConfig(
 		model: selection.model,
 		reasoning_effort: selection.reasoningEffort,
 	}))
-		edited = replaceBotFieldValue(edited, botId, field, value);
+		edited = replaceTopLevelValue(edited, field, value);
 	validateConfigSource(root, edited);
 	writeAtomic(path, edited, PRIVATE_MODE);
 	return { finalize() {}, rollback: () => writeAtomic(path, source, PRIVATE_MODE) };
 }
 
 /**
- * Text-edit one bot field inside its object block. Assumes the example config shape:
- * each bot is an object literal inside `bots: [...]` anchored by an `id: "X"` line, with
- * scalar fields rendered one per line.
+ * Text-edit one top-level scalar field. Assumes the example config shape: top-level fields one per
+ * line at the indent of the required `token_env:` line; nested blocks such as `decider` sit deeper.
  */
-function replaceBotFieldValue(source: string, botId: string, field: string, value: number | string): string {
-	const idLine = /^[ \t]*id:[ \t]*["']([A-Za-z0-9_-]+)["'][ \t]*,?[ \t]*(?:\/\/[^\r\n]*)?$/gm;
-	const anchors = [...source.matchAll(idLine)];
-	const anchor = anchors.filter((match) => match[1] === botId);
-	if (anchor.length !== 1)
-		throw new ConfigWriteError(`config source must contain exactly one id anchor for bot "${botId}"`);
-	const start = anchor[0]!.index!;
-	const indent = anchor[0]![0].match(/^[ \t]*/)![0];
-	const closing = new RegExp(`^[ \\t]{0,${Math.max(0, indent.length - 1)}}\\}`, "m").exec(source.slice(start));
-	if (!closing) throw new ConfigWriteError(`config source has no closing object for bot "${botId}"`);
-	const end = start + closing.index;
-	const block = source.slice(start, end);
+function replaceTopLevelValue(source: string, field: string, value: string): string {
+	const anchor = /^([ \t]*)token_env:/m.exec(source);
+	if (!anchor) throw new ConfigWriteError("config source has no top-level token_env line");
+	const indent = anchor[1]!;
+	const rendered = JSON.stringify(value);
 	const fieldPattern = new RegExp(
-		`^(${indent}${field}:[ \\t]*)(?:"(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*'|[0-9][0-9_.]*)(?=[ \\t]*[,\\r\\n])`,
+		`^(${indent}${field}:[ \\t]*)(?:"(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*')(?=[ \\t]*[,\\r\\n])`,
 		"m",
 	);
-	const rendered = JSON.stringify(value);
-	if (fieldPattern.test(block)) {
-		return (
-			source.slice(0, start) +
-			block.replace(fieldPattern, (_match, prefix: string) => prefix + rendered) +
-			source.slice(end)
-		);
-	}
-	if (new RegExp(`^${indent}${field}:`, "m").test(block))
-		throw new ConfigWriteError(`config field ${field} must be a scalar literal`);
-	// Field absent (e.g. bot-level cooldown_ms falling back to the global value):
-	// insert it right after the id line, matching its indent.
-	const lineEnd = block.indexOf("\n");
-	if (lineEnd < 0) throw new ConfigWriteError(`config source is truncated after the id anchor for bot "${botId}"`);
-	const inserted = `${block.slice(0, lineEnd + 1)}${indent}${field}: ${rendered},\n${block.slice(lineEnd + 1)}`;
-	return source.slice(0, start) + inserted + source.slice(end);
+	if (fieldPattern.test(source)) return source.replace(fieldPattern, (_match, prefix: string) => prefix + rendered);
+	if (new RegExp(`^${indent}${field}:`, "m").test(source))
+		throw new ConfigWriteError(`config field ${field} must be a string literal`);
+	return source.replace(anchor[0], `${indent}${field}: ${rendered},\n${anchor[0]}`);
 }
 
 /** Write through a same-directory temporary file so readers never see a partial file. */

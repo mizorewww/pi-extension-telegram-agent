@@ -23,8 +23,7 @@ export function applyRetention(
 			.prepare(`
 			DELETE FROM raw_updates WHERE rowid IN (
 				SELECT r.rowid FROM raw_updates r WHERE r.received_at < ?
-				AND NOT EXISTS (SELECT 1 FROM pending_telegram_dispatch p
-					WHERE p.bot_id = r.bot_id AND p.update_id = r.update_id)
+				AND NOT EXISTS (SELECT 1 FROM pending_telegram_dispatch p WHERE p.update_id = r.update_id)
 				ORDER BY r.received_at LIMIT ?
 			)
 		`)

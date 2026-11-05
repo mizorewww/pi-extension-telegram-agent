@@ -29,7 +29,7 @@ export function assignStickerShortId(db: Database, fileUniqueId: string): void {
 		fileUniqueId,
 	);
 }
-export async function ensureStickerCatalog(db: Database, api: BotApi, botId: string, sets: string[]): Promise<void> {
+export async function ensureStickerCatalog(db: Database, api: BotApi, sets: string[]): Promise<void> {
 	let total = 0;
 	for (const setName of sets) {
 		if (total >= STICKER_CATALOG_MAX) break;
@@ -37,7 +37,7 @@ export async function ensureStickerCatalog(db: Database, api: BotApi, botId: str
 		try {
 			stickers = (await api.call<{ stickers: TelegramSticker[] }>("getStickerSet", { name: setName })).stickers;
 		} catch (error) {
-			log.warn("sticker_catalog", "set_fetch_failed", { bot_id: botId, category: errorCategory(error) });
+			log.warn("sticker_catalog", "set_fetch_failed", { category: errorCategory(error) });
 			continue;
 		}
 		transaction(db, () => {
@@ -49,8 +49,7 @@ export async function ensureStickerCatalog(db: Database, api: BotApi, botId: str
 					setName,
 					sticker.emoji ?? null,
 				);
-				db.prepare("INSERT OR IGNORE INTO media_file_ids (bot_id, file_id, file_unique_id) VALUES (?, ?, ?)").run(
-					botId,
+				db.prepare("INSERT OR IGNORE INTO media_file_ids (file_id, file_unique_id) VALUES (?, ?)").run(
 					sticker.file_id,
 					sticker.file_unique_id,
 				);
@@ -59,15 +58,15 @@ export async function ensureStickerCatalog(db: Database, api: BotApi, botId: str
 			}
 		});
 	}
-	log.info("sticker_catalog", "catalog_ready", { bot_id: botId, fetched: total });
+	log.info("sticker_catalog", "catalog_ready", { fetched: total });
 }
-function catalogRows(db: Database, botId: string, sets: readonly string[]): CatalogRow[] {
+function catalogRows(db: Database, sets: readonly string[]): CatalogRow[] {
 	return db
 		.prepare(`SELECT sticker_emoji, vision, short_id FROM media m
 		WHERE kind = 'sticker' AND short_id IS NOT NULL AND sticker_set IN (SELECT value FROM json_each(?))
-		AND EXISTS (SELECT 1 FROM media_file_ids f WHERE f.bot_id = ? AND f.file_unique_id = m.file_unique_id)
+		AND EXISTS (SELECT 1 FROM media_file_ids f WHERE f.file_unique_id = m.file_unique_id)
 		ORDER BY sticker_set, rowid`)
-		.all(JSON.stringify(sets), botId) as unknown as CatalogRow[];
+		.all(JSON.stringify(sets)) as unknown as CatalogRow[];
 }
 function stickerDescription(vision: string | null): string {
 	const text = vision ? (JSON.parse(vision) as { text?: string | null }).text : null;
@@ -80,8 +79,8 @@ function stickerLine(row: CatalogRow): string {
 // A type alias, not an interface: Pi docs require JSON-compatible index signatures.
 export type StickerCatalogSnapshot = { ids: string; block: string };
 /** `ids` identifies the catalog; descriptions inside `block` are backfilled asynchronously. */
-export function stickerCatalogSnapshot(db: Database, botId: string, sets: readonly string[]): StickerCatalogSnapshot {
-	const rows = catalogRows(db, botId, sets);
+export function stickerCatalogSnapshot(db: Database, sets: readonly string[]): StickerCatalogSnapshot {
+	const rows = catalogRows(db, sets);
 	return {
 		ids: rows.map((row) => row.short_id).join(","),
 		block: rows.length ? `# Sticker 目录\n\n${rows.map(stickerLine).join("\n")}` : "",
@@ -90,7 +89,6 @@ export function stickerCatalogSnapshot(db: Database, botId: string, sets: readon
 /** A batch's note is rendered once and stays at that position for the life of the context. */
 export function batchStickerCandidates(
 	db: Database,
-	botId: string,
 	chatId: number,
 	messageIds: readonly number[],
 	catalogSets: readonly string[],
@@ -98,18 +96,16 @@ export function batchStickerCandidates(
 	if (!messageIds.length) return "";
 	const rows = db
 		.prepare(`SELECT media.rowid, media.file_unique_id, media.short_id, media.sticker_emoji, media.vision
-		FROM json_each(?3) batch JOIN messages message ON message.chat_id = ?2 AND message.message_id = CAST(batch.value AS INTEGER)
+		FROM json_each(?2) batch JOIN messages message ON message.chat_id = ?1 AND message.message_id = CAST(batch.value AS INTEGER)
 		JOIN media ON media.file_unique_id = json_extract(message.media, '$.file_unique_id')
 		WHERE message.is_bot = 0 AND json_extract(message.media, '$.kind') = 'sticker'
-		AND COALESCE(media.sticker_set, '') NOT IN (SELECT value FROM json_each(?4))
-		AND EXISTS (SELECT 1 FROM media_file_ids mapping WHERE mapping.bot_id = ?1 AND mapping.file_unique_id = media.file_unique_id)
+		AND COALESCE(media.sticker_set, '') NOT IN (SELECT value FROM json_each(?3))
+		AND EXISTS (SELECT 1 FROM media_file_ids mapping WHERE mapping.file_unique_id = media.file_unique_id)
 		ORDER BY message.date, message.message_id`)
-		.all(
-			botId,
-			chatId,
-			JSON.stringify([...new Set(messageIds)]),
-			JSON.stringify(catalogSets),
-		) as unknown as (CatalogRow & { rowid: number; file_unique_id: string })[];
+		.all(chatId, JSON.stringify([...new Set(messageIds)]), JSON.stringify(catalogSets)) as unknown as (CatalogRow & {
+		rowid: number;
+		file_unique_id: string;
+	})[];
 	const seen = new Set<string>();
 	const lines: string[] = [];
 	for (const row of rows) {

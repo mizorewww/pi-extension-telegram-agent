@@ -4,11 +4,9 @@
 PRAGMA journal_mode = WAL;
 
 CREATE TABLE IF NOT EXISTS raw_updates (
-	bot_id TEXT NOT NULL,
-	update_id INTEGER NOT NULL,
+	update_id INTEGER PRIMARY KEY,
 	received_at INTEGER NOT NULL, -- unix seconds, local receipt time
-	json TEXT NOT NULL,
-	PRIMARY KEY (bot_id, update_id)
+	json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_raw_updates_received_at ON raw_updates(received_at);
 
@@ -19,15 +17,12 @@ CREATE TABLE IF NOT EXISTS telegram_control_messages (
  PRIMARY KEY (chat_id, message_id)
 );
 
--- One unacknowledged routing/control handoff per poller, atomic with ingestion/offset.
+-- The one unacknowledged routing/control handoff, atomic with ingestion/offset.
 CREATE TABLE IF NOT EXISTS pending_telegram_dispatch (
- bot_id TEXT PRIMARY KEY,
- update_id INTEGER NOT NULL,
+ update_id INTEGER PRIMARY KEY REFERENCES raw_updates(update_id),
  kind TEXT NOT NULL CHECK (kind IN ('inserted', 'edited', 'enriched')),
  chat_id INTEGER NOT NULL,
- message_id INTEGER NOT NULL,
- route_version INTEGER NOT NULL,
- FOREIGN KEY (bot_id, update_id) REFERENCES raw_updates(bot_id, update_id)
+ message_id INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -52,7 +47,6 @@ CREATE TABLE IF NOT EXISTS messages (
 	forward_origin TEXT, -- JSON
 	edit_date INTEGER,
 	media TEXT, -- JSON: {kind: photo|sticker|..., file_unique_id, file_id, ...}
-	first_seen_by TEXT NOT NULL, -- bot id whose poller first delivered this message
 	PRIMARY KEY (chat_id, message_id)
 );
 
@@ -163,40 +157,18 @@ CREATE TABLE IF NOT EXISTS media (
 	kind TEXT NOT NULL, -- photo | sticker | animation | video | document
 	mime TEXT,
 	local_path TEXT, -- cache-relative source filename; resolved inside configured data/media
-	vision TEXT, -- JSON: {model, kind, text, at} — vision-mode description shared by all bots
+	vision TEXT, -- JSON: {model, kind, text, at} — vision-mode description
 	sticker_set TEXT,
 	sticker_emoji TEXT,
 	short_id TEXT UNIQUE -- s<N> catalog id shown to the model for sticker sending
 );
 
--- per-bot telegram file_id -> our media identity (file_id is bot-specific)
+-- The bot's telegram file_id -> our media identity (file_id is bot-specific)
 CREATE TABLE IF NOT EXISTS media_file_ids (
-	bot_id TEXT NOT NULL,
-	file_id TEXT NOT NULL,
-	file_unique_id TEXT NOT NULL,
-	PRIMARY KEY (bot_id, file_id)
+	file_id TEXT PRIMARY KEY,
+	file_unique_id TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS bot_state (
-	bot_id TEXT NOT NULL,
-	key TEXT NOT NULL,
-	value TEXT NOT NULL,
-	PRIMARY KEY (bot_id, key)
-);
-
--- Durable idempotency evidence for insert/enrichment routing windows.
-CREATE TABLE IF NOT EXISTS routing_claims (
-	chat_id INTEGER NOT NULL,
-	message_id INTEGER NOT NULL,
-	bot_id TEXT NOT NULL,
-	route_version INTEGER NOT NULL,
-	reason TEXT NOT NULL,
-	status TEXT NOT NULL,
-	created_at INTEGER NOT NULL,
-	updated_at INTEGER NOT NULL,
-	PRIMARY KEY (chat_id, message_id, bot_id, route_version)
-);
-CREATE INDEX IF NOT EXISTS idx_routing_claims_message ON routing_claims(chat_id, message_id, status);
+CREATE INDEX IF NOT EXISTS idx_media_file_ids_unique ON media_file_ids(file_unique_id);
 
 CREATE TABLE IF NOT EXISTS aliases (
 	chat_id INTEGER NOT NULL,
@@ -205,7 +177,7 @@ CREATE TABLE IF NOT EXISTS aliases (
 	PRIMARY KEY (chat_id, user_id)
 );
 
--- daemon-wide singleton state (router secret, schema version, ...)
+-- daemon-wide singleton state (poll offset, bot identity, box reset time)
 CREATE TABLE IF NOT EXISTS daemon_state (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL

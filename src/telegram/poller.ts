@@ -1,22 +1,21 @@
 import { transaction as atomic } from "../db/db.ts";
-// Long-polling loop for one bot token. Offset persisted in bot_state.
+// Long-polling loop for the bot token. Offset persisted in daemon_state.
 // Reconnects with backoff on network/API errors; honors retry_after.
 
 import type { DatabaseSync as Database } from "node:sqlite";
 import { errorCategory, log } from "../observability/log.ts";
 import { type BotApi, TelegramApiError } from "./api.ts";
 import { ingestUpdate, type IngestResult } from "./ingest.ts";
-import { getBotState, setBotState } from "../db/db.ts";
+import { getDaemonState, setDaemonState } from "../db/db.ts";
 
 const POLL_TIMEOUT_SEC = 25;
 const OFFSET_KEY = "update_offset";
 const INGEST_FAILURE_WARN_THRESHOLD = 5;
 
-export type MessageHandler = (result: IngestResult, update: unknown, botId: string) => void | Promise<void>;
-export type CallbackHandler = (update: unknown, botId: string) => Promise<void>;
+export type MessageHandler = (result: IngestResult, update: unknown) => void | Promise<void>;
+export type CallbackHandler = (update: unknown) => Promise<void>;
 
 export class Poller {
-	private botId: string;
 	private db: Database;
 	private groupChatId: number;
 	private onMessage: MessageHandler;
@@ -25,7 +24,6 @@ export class Poller {
 
 	constructor(
 		db: Database,
-		botId: string,
 		private readonly api: BotApi,
 		groupChatId: number,
 		onMessage: MessageHandler,
@@ -33,13 +31,12 @@ export class Poller {
 		private readonly onCallback?: CallbackHandler,
 	) {
 		this.db = db;
-		this.botId = botId;
 		this.groupChatId = groupChatId;
 		this.onMessage = onMessage;
 	}
 
 	private offset(): number {
-		return Number(getBotState(this.db, this.botId, OFFSET_KEY) ?? "0");
+		return Number(getDaemonState(this.db, OFFSET_KEY) ?? "0");
 	}
 
 	stop(): void {
@@ -63,7 +60,7 @@ export class Poller {
 				updates = await this.api.getUpdates(this.offset(), POLL_TIMEOUT_SEC, this.abort.signal);
 				if (!connected) {
 					connected = true;
-					log.info("telegram_poller", "connected", { bot_id: this.botId, pid: process.pid });
+					log.info("telegram_poller", "connected", { pid: process.pid });
 				}
 				backoffMs = 1000;
 			} catch (err) {
@@ -71,7 +68,7 @@ export class Poller {
 				if (this.stopped) break;
 				if (err instanceof TelegramApiError && (err.code === 401 || err.code === 404)) {
 					// auth-level failure: token invalid/revoked. Retry would never succeed — fail loudly.
-					log.error("telegram_poller", "auth_failed", { bot_id: this.botId, telegram_code: err.code, fatal: true });
+					log.error("telegram_poller", "auth_failed", { telegram_code: err.code, fatal: true });
 					throw err;
 				}
 				if (err instanceof TelegramApiError && err.retryAfter) {
@@ -79,12 +76,11 @@ export class Poller {
 					continue;
 				}
 				if (err instanceof TelegramApiError && err.code === 409) {
-					log.error("telegram_poller", "poll_conflict", { bot_id: this.botId, telegram_code: 409, retry_ms: 30_000 });
+					log.error("telegram_poller", "poll_conflict", { telegram_code: 409, retry_ms: 30_000 });
 					await this.sleep(30_000);
 					continue;
 				}
 				log.error("telegram_poller", "poll_failed", {
-					bot_id: this.botId,
 					category: errorCategory(err),
 					retry_ms: backoffMs,
 				});
@@ -102,16 +98,17 @@ export class Poller {
 					// Model selection is idempotent. A crash before offset commit replays the same
 					// selection; callbacks never become chat messages or route to an LLM.
 					if ((update as { callback_query?: unknown }).callback_query && updateId >= this.offset())
-						await this.onCallback?.(update, this.botId);
+						await this.onCallback?.(update);
 					atomic(this.db, () => {
-						const result = ingestUpdate(this.db, this.botId, update, this.groupChatId);
-						if (result.kind === "inserted" || result.kind === "edited" || result.kind === "enriched") {
+						const result = ingestUpdate(this.db, update, this.groupChatId);
+						if (result.kind === "inserted" || result.kind === "edited") {
 							this.db
-								.prepare(`INSERT INTO pending_telegram_dispatch
-                                (bot_id, update_id, kind, chat_id, message_id, route_version) VALUES (?, ?, ?, ?, ?, ?)`)
-								.run(this.botId, updateId, result.kind, result.chatId!, result.messageId!, result.routeVersion!);
+								.prepare(
+									"INSERT INTO pending_telegram_dispatch (update_id, kind, chat_id, message_id) VALUES (?, ?, ?, ?)",
+								)
+								.run(updateId, result.kind, result.chatId!, result.messageId!);
 						}
-						setBotState(this.db, this.botId, OFFSET_KEY, String(updateId + 1));
+						setDaemonState(this.db, OFFSET_KEY, String(updateId + 1));
 					});
 					ingestFailures = 0;
 					if (!(await this.deliverPending())) {
@@ -121,14 +118,12 @@ export class Poller {
 				} catch (err) {
 					ingestFailures++;
 					log.error("telegram_poller", "ingest_failed", {
-						bot_id: this.botId,
 						update_id: updateId,
 						consecutive: ingestFailures,
 						category: errorCategory(err),
 					});
 					if (ingestFailures >= INGEST_FAILURE_WARN_THRESHOLD) {
 						log.warn("telegram_poller", "ingest_replay_pending", {
-							bot_id: this.botId,
 							consecutive: ingestFailures,
 							offset: this.offset(),
 						});
@@ -149,22 +144,17 @@ export class Poller {
 	/** Acknowledge only after routing/control accepts the durable handoff. No Telegram refetch required. */
 	private async deliverPending(): Promise<boolean> {
 		const pending = this.db
-			.prepare(`SELECT p.update_id updateId, p.kind, p.chat_id chatId,
-            p.message_id messageId, p.route_version routeVersion, r.json
-            FROM pending_telegram_dispatch p JOIN raw_updates r USING (bot_id, update_id)
-            WHERE p.bot_id = ?`)
-			.get(this.botId) as unknown as (IngestResult & { updateId: number; json: string }) | null;
+			.prepare(`SELECT p.update_id updateId, p.kind, p.chat_id chatId, p.message_id messageId, r.json
+            FROM pending_telegram_dispatch p JOIN raw_updates r USING (update_id)`)
+			.get() as unknown as (IngestResult & { updateId: number; json: string }) | null;
 		if (!pending) return true;
 		try {
 			const { updateId, json, ...result } = pending;
-			await this.onMessage(result, JSON.parse(json), this.botId);
-			this.db
-				.prepare("DELETE FROM pending_telegram_dispatch WHERE bot_id = ? AND update_id = ?")
-				.run(this.botId, updateId);
+			await this.onMessage(result, JSON.parse(json));
+			this.db.prepare("DELETE FROM pending_telegram_dispatch WHERE update_id = ?").run(updateId);
 			return true;
 		} catch (error) {
 			log.error("telegram_poller", "dispatch_pending", {
-				bot_id: this.botId,
 				update_id: pending.updateId,
 				message_id: pending.messageId,
 				category: errorCategory(error),

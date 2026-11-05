@@ -1,14 +1,8 @@
-import { FIRE_BOT_TRIGGER_BUDGET } from "../agent/router.ts";
 import type { ManualCompactResult } from "../agent/runtime.ts";
 import { extractUpdateMessage } from "./normalize.ts";
 
 const MAX_REPLY_CHARS = 3500;
 const MAX_LABEL_CHARS = 64;
-
-export interface ControlBotIdentity {
-	id: string;
-	username: string;
-}
 
 export interface ControlSender {
 	id: number | null;
@@ -16,17 +10,12 @@ export interface ControlSender {
 	hasSenderChat: boolean;
 }
 
-/** Bare `/fire` toggles. */
-export type FireMode = "on" | "off" | "status" | "toggle";
-
 export type TelegramControlAction =
 	| { kind: "help" }
 	| { kind: "status" }
 	| { kind: "compact" }
 	| { kind: "new" }
 	| { kind: "model"; data?: string }
-	| { kind: "set"; data?: string }
-	| { kind: "fire"; mode: FireMode }
 	| { kind: "box_reset" }
 	| { kind: "task_status" }
 	| { kind: "task_cancel"; taskId: string }
@@ -39,8 +28,6 @@ export const CONTROL_COMMANDS = [
 	["model", "选择 Pi 可用模型（管理员）", "/model（管理员）"],
 	["compact", "压缩上下文（管理员）", "/compact（管理员）"],
 	["new", "开启新会话（管理员）", "/new（管理员）"],
-	["set", "调整插话概率与冷却（管理员）", "/set（管理员）"],
-	["fire", "其他 bot 触发开关", "/fire status · /fire [on|off]（管理员）"],
 	["task", "后台任务与用量", "/task [status] · /task cancel <tN>（管理员）"],
 	["box", "清空工作区（管理员）", "/box reset（管理员）"],
 ] as const;
@@ -51,8 +38,6 @@ export interface ParsedTelegramControlCommand {
 	chatId: number;
 	messageId: number;
 	edited: boolean;
-	receivedByBotId: string;
-	replyBotId: string;
 	sender: ControlSender;
 	action: TelegramControlAction;
 	callbackQueryId?: string;
@@ -61,7 +46,6 @@ export interface ParsedTelegramControlCommand {
 /** Callback messages never enter canonical ingestion or routing. Accept only this deployment's group. */
 export function parseTelegramControlCallback(
 	update: unknown,
-	botId: string,
 	groupChatId: number,
 ): ParsedTelegramControlCommand | null {
 	const query = (update as { callback_query?: Record<string, any> } | null)?.callback_query;
@@ -69,7 +53,7 @@ export function parseTelegramControlCallback(
 		!query ||
 		typeof query.id !== "string" ||
 		typeof query.data !== "string" ||
-		!/^(?:model|set):/.test(query.data) ||
+		!query.data.startsWith("model:") ||
 		Buffer.byteLength(query.data) > 64
 	)
 		return null;
@@ -80,15 +64,13 @@ export function parseTelegramControlCallback(
 		chatId: groupChatId,
 		messageId: message.message_id,
 		edited: false,
-		receivedByBotId: botId,
-		replyBotId: botId,
 		callbackQueryId: query.id,
 		sender: {
 			id: Number.isSafeInteger(query.from?.id) && query.from.id > 0 ? query.from.id : null,
 			isBot: query.from?.is_bot === true,
 			hasSenderChat: message.sender_chat != null && message.from?.is_bot !== true,
 		},
-		action: { kind: query.data.startsWith("set:") ? "set" : "model", data: query.data },
+		action: { kind: "model", data: query.data },
 	};
 }
 
@@ -96,11 +78,7 @@ export function parseTelegramControlCallback(
  * Parse only Telegram's offset-zero bot_command entity. Telegram entity offsets are UTF-16
  * code units, which is exactly what JavaScript slice() consumes.
  */
-export function parseTelegramControlCommand(
-	update: unknown,
-	receivedByBotId: string,
-	bots: readonly ControlBotIdentity[],
-): ParsedTelegramControlCommand | null {
+export function parseTelegramControlCommand(update: unknown, botUsername: string): ParsedTelegramControlCommand | null {
 	const payload = extractUpdateMessage(update);
 	if (!payload) return null;
 	const message = payload.message as Record<string, unknown>;
@@ -120,15 +98,8 @@ export function parseTelegramControlCommand(
 	if (!match || !COMMAND_TOKENS.has(match[1]!.toLowerCase())) return null;
 	const token = match[1]!.toLowerCase() as TelegramControlCommandToken;
 
-	const receivingBot = bots.find((bot) => bot.id === receivedByBotId);
-	if (!receivingBot) return null;
-	let replyBotId = receivingBot.id;
-	if (match[2]) {
-		const suffix = match[2].toLowerCase();
-		const target = bots.find((bot) => bot.username.toLowerCase() === suffix);
-		if (!target) return null;
-		replyBotId = target.id;
-	}
+	// `/status@other_bot` belongs to another bot in the group.
+	if (match[2] && match[2].toLowerCase() !== botUsername.toLowerCase()) return null;
 
 	const chat = message.chat as Record<string, unknown> | undefined;
 	const chatId = chat?.id;
@@ -145,8 +116,6 @@ export function parseTelegramControlCommand(
 		chatId,
 		messageId,
 		edited: payload.edited,
-		receivedByBotId,
-		replyBotId,
 		sender: {
 			id: senderId,
 			isBot: from?.is_bot === true,
@@ -158,13 +127,6 @@ export function parseTelegramControlCommand(
 
 function parseControlArguments(command: TelegramControlCommandToken, input: string): TelegramControlAction {
 	const tokens = input ? input.split(/\s+/) : [];
-	if (command === "fire") {
-		if (tokens.length === 0) return { kind: "fire", mode: "toggle" };
-		const mode = tokens[0]!.toLowerCase();
-		return tokens.length === 1 && (mode === "on" || mode === "off" || mode === "status")
-			? { kind: "fire", mode }
-			: { kind: "usage" };
-	}
 	if (command === "task") {
 		if (tokens.length === 0 || (tokens.length === 1 && tokens[0]!.toLowerCase() === "status"))
 			return { kind: "task_status" };
@@ -185,11 +147,9 @@ export function isMutation(action: TelegramControlAction): boolean {
 	return (
 		action.kind === "compact" ||
 		action.kind === "new" ||
-		action.kind === "set" ||
 		action.kind === "model" ||
 		action.kind === "box_reset" ||
-		action.kind === "task_cancel" ||
-		(action.kind === "fire" && action.mode !== "status")
+		action.kind === "task_cancel"
 	);
 }
 
@@ -221,14 +181,11 @@ export const USAGE_TEXT = ["用法：", ...CONTROL_COMMANDS.map(([, , usage]) =>
 
 export const HELP_TEXT = [
 	"Telegram Agent 控制",
-	"查看：/help、/status、/fire status、/task",
-	"管理员：/model、/compact、/new、/set、/fire [on|off]、/box reset、/task cancel",
+	"查看：/help、/status、/task",
+	"管理员：/model、/compact、/new、/box reset、/task cancel",
 	"/model 用按钮选择 Pi 可用模型，保存后立即开启新会话。",
-	"命令默认作用于接收消息的 bot；带 @bot_username 后缀时定向到对应 bot。",
 	"手动 compact 使用 Pi 当前会话模型压缩上下文并产生相应费用。",
 	"/new 丢弃当前上下文开启新会话（历史保留在 Pi 数据库），之前的群消息不再可见。",
-	"/set 用按钮调整插话概率与冷却，写回 telegram.config.ts，重启后仍然生效。",
 	"/box reset 清空 bot 的工作区（每周一 05:00 也会自动清空）。",
 	"/task 列出 bot 最近的后台任务和用量，/task cancel tN 停止一个任务。",
-	`/fire 让其他 bot 的消息按正常路由触发本 bot（默认关闭、不带参数时切换），人类发言前最多连续 ${FIRE_BOT_TRIGGER_BUDGET} 次；同一部署的 bot 发言在本地路由，部署外的 bot 只在 Telegram 实际投递时生效；重启后关闭。`,
 ].join("\n");

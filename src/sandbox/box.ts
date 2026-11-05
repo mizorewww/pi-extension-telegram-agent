@@ -63,7 +63,7 @@ export function normalizeBoxPath(path: string): string {
 	return normalized;
 }
 
-export function isolationArgs(botId: string, network: boolean): string[] {
+export function isolationArgs(network: boolean): string[] {
 	return [
 		"--user",
 		"1000:1000",
@@ -77,12 +77,11 @@ export function isolationArgs(botId: string, network: boolean): string[] {
 		"--env",
 		`HOME=${BOX_WORKDIR}/.home`,
 		"--volume",
-		`tg-work-${botId}:${BOX_WORKDIR}`,
+		`tg-work:${BOX_WORKDIR}`,
 	];
 }
 
 export class WorkBox {
-	readonly botId: string;
 	private readonly config: BoxConfig;
 	private readonly docker: DockerRunner;
 	readonly container: string;
@@ -91,12 +90,11 @@ export class WorkBox {
 	private readonly connection: Connection;
 	private lifecycle = Promise.resolve();
 	private resetting: Promise<void> | null = null;
-	constructor(botId: string, config: BoxConfig, docker: DockerRunner = runDocker, environment?: ExecutionEnv) {
-		this.botId = botId;
+	constructor(config: BoxConfig, docker: DockerRunner = runDocker, environment?: ExecutionEnv) {
 		this.config = config;
 		this.docker = docker;
-		this.container = `tg-box-${botId}`;
-		this.volume = `tg-work-${botId}`;
+		this.container = "tg-box";
+		this.volume = "tg-work";
 		this.connection = new Connection({
 			command: async () => {
 				await this.ensure();
@@ -125,9 +123,7 @@ export class WorkBox {
 			this.container,
 			"--hostname",
 			"box",
-			"--label",
-			`tg-box=${this.botId}`,
-			...isolationArgs(this.botId, this.config.network),
+			...isolationArgs(this.config.network),
 			"--tmpfs",
 			"/tmp:rw,nosuid,nodev,size=256m",
 			"--memory",
