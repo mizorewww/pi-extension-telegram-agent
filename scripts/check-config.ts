@@ -7,7 +7,6 @@ import {
 	createInstalledPiModelRuntime,
 	PiModelConfigurationError,
 } from "../src/agent/model-runtime.ts";
-import { assertPiVisionExecutorReady, createPiVisionExecutor } from "../src/media/vision.ts";
 import { createDecider } from "../src/agent/decider.ts";
 
 export async function main(args = process.argv.slice(2), configDir = configDirectory()): Promise<number> {
@@ -33,14 +32,12 @@ export async function main(args = process.argv.slice(2), configDir = configDirec
 				category = "context_window_too_small";
 				throw new Error();
 			}
-			if (bot.tools.viewImage && !runtime.getModel(bot.provider, bot.model)!.input.includes("image"))
+			if (config.media.mode === "hybrid" && !runtime.getModel(bot.provider, bot.model)!.input.includes("image"))
 				throw new PiModelConfigurationError("image_input_unsupported", bot.provider, bot.model);
 			if (bot.decider) {
 				category = "decider_unavailable";
 				createDecider(runtime, bot.decider, bot.name);
 			}
-			if (config.media.mode === "hybrid")
-				assertPiVisionExecutorReady(createPiVisionExecutor(runtime, config.media.visionModel));
 		}
 		process.stdout.write(
 			`${JSON.stringify({ ok: true, bot: config.bot.name, models_checked: values.models === true })}\n`,

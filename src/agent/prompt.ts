@@ -1,7 +1,7 @@
 // Cache-visible protocol: changes start a new context epoch.
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 51; // One bot per deployment; a decider replaces probability routing.
+export const CACHE_SCHEMA_VERSION = 52; // view_image is gone: tg_download + Pi read look at media.
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
 
 interface EnabledTools {
@@ -10,7 +10,6 @@ interface EnabledTools {
 	codemode: boolean;
 	sandbox: boolean;
 	tasks: boolean;
-	viewImage: boolean;
 }
 
 const SOURCE_REPOSITORY = "https://github.com/mizorewww/pi-extension-telegram-agent";
@@ -29,10 +28,8 @@ export function toolCapabilityDeclaration(tools: EnabledTools): string {
 		);
 	if (tools.sandbox)
 		rules.push(
-			"read、write、edit、bash 操作你的 Linux 工作区；/work 保留到每周一 05:00 自动清空。Python 临时依赖用 uv run --no-project --with 包名 python，项目用 uv add / uv run，独立 CLI 用 uvx。处理文件或生成图片后交付实际产物。",
+			"read、write、edit、bash 操作你的 Linux 工作区；/work 保留到每周一 05:00 自动清空。Python 临时依赖用 uv run --no-project --with 包名 python，项目用 uv add / uv run，独立 CLI 用 uvx。处理文件或生成图片后交付实际产物。媒体描述通常已经足够；需要核对图片细节时用 tg_download 取到 /work 再 read 看图，视频先用 ffmpeg 抽几帧，不要反复观察同一张图。",
 		);
-	if (tools.viewImage)
-		rules.push("媒体描述通常已经足够；只有需要核对细节时用 view_image 看原图或视频帧，不要反复观察同一原图。");
 	if (tools.tasks)
 		rules.push(
 			"耗时工作可交给 task 后台执行；工作流由对应目录的 AGENTS.md 描述。[task tN …] 的 ↪ #id 是发起消息，回复时引用它。任务进展只有你看得到，需要向群友公开时用 send。",

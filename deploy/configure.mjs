@@ -19,7 +19,6 @@ import {
 } from "../dist/src/config.js";
 import { loadPiModelDefaults } from "../dist/src/agent/model-settings.js";
 import { assertBotModelConfigured, createInstalledPiModelRuntime } from "../dist/src/agent/model-runtime.js";
-import { assertPiVisionExecutorReady, createPiVisionExecutor } from "../dist/src/media/vision.js";
 import { createDecider, DEFAULT_DECIDER_THRESHOLD } from "../dist/src/agent/decider.js";
 
 const directory = configDirectory(),
@@ -241,7 +240,7 @@ async function main() {
 		}
 		configuredProviders.add(id);
 	}
-	async function model(selection, fallback, vision = false) {
+	async function model(selection, fallback) {
 		print(
 			"可用服务商：" +
 				runtime
@@ -314,18 +313,16 @@ async function main() {
 			provider = runtime.getProvider(id);
 		}
 		await authenticate(id, provider);
-		const catalog = runtime.getModels(id).filter((entry) => !vision || entry.input.includes("image"));
+		const catalog = runtime.getModels(id);
 		selection.model = await choose(
 			"模型 ID",
 			catalog.map((entry) => entry.id),
 			selection.model ?? (id === fallback.provider ? fallback.model : undefined) ?? catalog[0]?.id,
 		);
 		selection.reasoning_effort = await choose(
-			vision ? "视觉请求思考强度（Pi 按模型能力处理）" : "思考强度",
-			vision
-				? ["minimal", "low", "medium", "high", "xhigh", "max"]
-				: getSupportedThinkingLevels(runtime.getModel(id, selection.model)),
-			selection.reasoning_effort ?? (vision ? "low" : "off"),
+			"思考强度",
+			getSupportedThinkingLevels(runtime.getModel(id, selection.model)),
+			selection.reasoning_effort ?? "off",
 		);
 	}
 	await model(config, pi);
@@ -394,12 +391,7 @@ async function main() {
 	config.media ??= {};
 	config.media.mode = await choose("媒体模式", ["off", "hybrid"], config.media.mode ?? "off");
 	if (config.media.mode === "hybrid") {
-		const reference = config.media.vision_model?.match(/^([^/]+)\/(.+?)(?::(off|minimal|low|medium|high|xhigh|max))?$/);
-		const vision = reference
-			? { provider: reference[1], model: reference[2], reasoning_effort: reference[3] ?? "off" }
-			: {};
-		await model(vision, config, true);
-		config.media.vision_model = vision.provider + "/" + vision.model + ":" + vision.reasoning_effort;
+		print("hybrid 模式由聊天模型为每个新媒体写一次文字描述，聊天模型需要支持图片输入。");
 		await advanced("媒体参数", config.media, properties.media.properties, { max_per_turn: 2, concurrency: 2 });
 	} else config.media = { mode: "off" };
 
@@ -490,7 +482,7 @@ async function main() {
 			category = "context_window_too_small";
 			throw new Error();
 		}
-		if (bot.tools.viewImage && !selected.input.includes("image")) {
+		if (resolved.media.mode === "hybrid" && !selected.input.includes("image")) {
 			category = "image_input_unsupported";
 			throw new Error();
 		}
@@ -498,8 +490,6 @@ async function main() {
 			category = "decider_unavailable";
 			createDecider(runtime, bot.decider, bot.name);
 		}
-		if (resolved.media.mode === "hybrid")
-			assertPiVisionExecutorReady(createPiVisionExecutor(runtime, resolved.media.visionModel));
 		category = "configuration_write_failed";
 		for (const [target, content] of files) atomic(target, content);
 		atomic(

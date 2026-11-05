@@ -1,6 +1,5 @@
 // Telegram tools are ordinary Pi Durable tools; Pi owns validation, code mode and nested-call cleanup.
 import type { Database } from "../db/db.ts";
-import { join } from "node:path";
 import type { Context } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
@@ -23,7 +22,6 @@ import {
 import type { AppConfig, BotConfig } from "../config.ts";
 import { groupMessage } from "../db/message-events.ts";
 import { fileIdFor, MEDIA_DOWNLOAD_MAX_BYTES } from "../media/local-cache.ts";
-import { ensureViewImages } from "../media/prepare-images.ts";
 import type { WorkBox } from "../sandbox/box.ts";
 import { TaskManager } from "../tasks/manager.ts";
 import type { BotApi } from "../telegram/api.ts";
@@ -31,7 +29,6 @@ import { queryMessages } from "../tools/messages.ts";
 import { runTinyFishTool } from "../tools/search.ts";
 import { telegramCodemode } from "./extensions/codemode.ts";
 import { executeAgentSend } from "./send.ts";
-import { renderMessageLine } from "./serialize.ts";
 import {
 	CODEMODE_TOOL_DEFS,
 	JOB_TOOL_DEF,
@@ -154,26 +151,6 @@ export async function buildBotRuntimeTools(
 					const result = await runTinyFishTool(host.config.tinyfishApiKey, args, {}, context.abortSignal);
 					host.recordEvent(result.event.kind, result.event.payload);
 					return { ...output(result.content), details: result.details };
-				},
-			}),
-		);
-	if (host.bot.tools.viewImage)
-		tools.push(
-			defineTool({
-				...TOOL_DEFS[2],
-				callers: ["model"],
-				replay: "safe",
-				execute: async (args, _api, context) => {
-					const row = groupMessage(host.db, host.config.groupChatId, args.message_id);
-					const media = row?.media ? (JSON.parse(row.media) as { file_unique_id?: string }) : null;
-					if (!row || !media?.file_unique_id) throw new Error("message has no image");
-					const images = await ensureViewImages(host.db, host.api, media.file_unique_id, {
-						cacheDir: join(host.config.dataDir, "media"),
-						videoTranscoder: host.videoTranscoder,
-						signal: context.abortSignal,
-					});
-					if (!images.ok) throw new Error(`view_image: ${images.outcome}`);
-					return { output: [{ type: "text", text: renderMessageLine(host.db, row) }, ...images.images] };
 				},
 			}),
 		);

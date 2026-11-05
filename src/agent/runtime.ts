@@ -671,7 +671,7 @@ export class BotRuntime {
 		if (!model) return { ok: false, code: "unknown_model" };
 		if (model.contextWindow <= 16_384) return { ok: false, code: "context_window_too_small" };
 		if (!this.models.hasConfiguredAuth(provider)) return { ok: false, code: "unauthenticated_provider" };
-		if (this.bot.tools.viewImage && !model.input.includes("image"))
+		if (this.config.media.mode === "hybrid" && !model.input.includes("image"))
 			return { ok: false, code: "image_input_unsupported" };
 		const selection = {
 			provider,

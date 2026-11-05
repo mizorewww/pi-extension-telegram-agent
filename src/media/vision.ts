@@ -4,12 +4,8 @@ import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { contentText, type AssistantMessage, type ImageContent, type TextContent } from "@earendil-works/pi-ai";
 import type { BotApi } from "../telegram/api.ts";
-import { parsePiModelReference } from "../agent/model-ref.ts";
-import {
-	classifyPiProviderFailure,
-	PiModelConfigurationError,
-	type PiProviderFailureCategory,
-} from "../agent/model-runtime.ts";
+import type { BotConfig } from "../config.ts";
+import { classifyPiProviderFailure, type PiProviderFailureCategory } from "../agent/model-runtime.ts";
 import { appendMediaUpdateEvents } from "../db/message-events.ts";
 import { log } from "../observability/log.ts";
 import { dedupeInFlight, isVideoMedia, isVisionMedia } from "./local-cache.ts";
@@ -59,10 +55,8 @@ export interface VisionDescribeInput {
 	videoSticker?: boolean;
 }
 export interface VisionExecutor {
-	readonly modelRef: string;
-	readonly provider: string;
-	readonly model: string;
-	readonly readinessFailure: "unknown_model" | "image_input_unsupported" | null;
+	/** `provider/model` that writes descriptions now; recorded with each cached one. */
+	model(): string;
 	describe(input: VisionDescribeInput): Promise<VisionDescriptionResult>;
 }
 export interface EnsureVisionOptions extends PrepareMediaImagesOptions {
@@ -85,19 +79,16 @@ function telemetry(
 		cost: message?.usage.cost.total ?? 0,
 	};
 }
+/** Describes media with the bot's current chat model, which hybrid mode requires to accept images. */
 export function createPiVisionExecutor(
 	runtime: Pick<ModelRuntime, "getModel" | "completeSimple">,
-	modelRef: string,
+	bot: Pick<BotConfig, "provider" | "model" | "reasoningEffort">,
 ): VisionExecutor {
-	const selection = parsePiModelReference(modelRef);
-	if (!selection) throw new Error("invalid media.vision_model; expected provider/model:effort");
-	const model = runtime.getModel(selection.provider, selection.model);
 	return {
-		modelRef: selection.canonical,
-		provider: selection.provider,
-		model: selection.model,
-		readinessFailure: !model ? "unknown_model" : !model.input.includes("image") ? "image_input_unsupported" : null,
+		model: () => `${bot.provider}/${bot.model}`,
 		async describe(input) {
+			const model = runtime.getModel(bot.provider, bot.model)!;
+			const effort = bot.reasoningEffort;
 			const started = performance.now();
 			const prompt =
 				input.kind === "video"
@@ -122,13 +113,13 @@ export function createPiVisionExecutor(
 			try {
 				message = await deadline((signal) =>
 					runtime.completeSimple(
-						model!,
+						model,
 						{ messages: [{ role: "user", content, timestamp: Date.now() }] },
 						{
 							cacheRetention: "none",
 							maxTokens: VISION_MAX_OUTPUT_TOKENS,
 							maxRetries: 0,
-							reasoning: selection.thinkingLevel,
+							reasoning: effort === "off" ? undefined : effort,
 							timeoutMs: VISION_TIMEOUT_MS,
 							signal,
 						},
@@ -153,10 +144,6 @@ export function createPiVisionExecutor(
 			};
 		},
 	};
-}
-export function assertPiVisionExecutorReady(executor: VisionExecutor): void {
-	if (executor.readinessFailure)
-		throw new PiModelConfigurationError(executor.readinessFailure, executor.provider, executor.model);
 }
 /** A provider that ignores its timeout still releases the shared vision slot. */
 function deadline<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -203,7 +190,7 @@ export function ensureVision(
 			if (result.text || result.telemetry.outcome === "unsupported_format") {
 				db.prepare("UPDATE media SET vision = ? WHERE file_unique_id = ?").run(
 					JSON.stringify({
-						model: executor.modelRef,
+						model: executor.model(),
 						kind,
 						text: result.text,
 						outcome: result.telemetry.outcome,

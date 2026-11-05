@@ -1,6 +1,5 @@
 // Telegram downloads and video sampling are local policy; Pi prepares native image blocks.
 import type { Database } from "../db/db.ts";
-import type { ImageContent } from "@earendil-works/pi-ai";
 import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
 import {
 	dedupeInFlight,
@@ -64,24 +63,4 @@ export function prepareMediaImages(
 		}
 		return { ok: true, kind: video ? "video" : "static", images };
 	});
-}
-
-/** Pi persists the returned images; source cache pruning never changes a previous request. */
-export async function ensureViewImages(
-	db: Database,
-	api: MediaDownloadApi,
-	fileUniqueId: string,
-	options: PrepareMediaImagesOptions,
-): Promise<{ ok: true; images: ImageContent[] } | { ok: false; outcome: PrepareMediaImagesFailure }> {
-	const prepared = await prepareMediaImages(db, api, fileUniqueId, options);
-	return prepared.ok
-		? {
-				ok: true,
-				images: prepared.images.map((image) => ({
-					type: "image",
-					data: Buffer.from(image.bytes).toString("base64"),
-					mimeType: image.mimeType,
-				})),
-			}
-		: prepared;
 }

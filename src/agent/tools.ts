@@ -53,19 +53,13 @@ export const TOOL_DEFS = [
 			{ additionalProperties: false },
 		),
 	},
-	{
-		name: "view_image",
-		description:
-			"Look at a message's actual photo/sticker or 1–3 video/GIF frames when its cached description is insufficient. Any real message #id, including archived history. Images remain in this Pi context; do not view the same image twice.",
-		parameters: Type.Object({ message_id: Type.Integer() }, { additionalProperties: false }),
-	},
 ] as const;
 
 const nullable = <T extends Parameters<typeof Type.Union>[0][number]>(value: T) => Type.Union([value, Type.Null()]);
 export const CODEMODE_TOOL_DEFS = [
 	{
 		name: "tg_messages",
-		description: `查询本群已归档消息，包括当前上下文之外的历史，排除控制命令及其回复。所有筛选条件取交集；不提供筛选时读取最近消息。返回 rows 和翻页游标；rows[].id 可用于 send.reply_to、view_image、tg_download。昵称匹配本群历史 display_name，找到发送者后查询其更名前后的历史；同名多人都会返回，先看 rows[].sender.id，再按数字 ID 缩小范围。
+		description: `查询本群已归档消息，包括当前上下文之外的历史，排除控制命令及其回复。所有筛选条件取交集；不提供筛选时读取最近消息。返回 rows 和翻页游标；rows[].id 可用于 send.reply_to、tg_download。昵称匹配本群历史 display_name，找到发送者后查询其更名前后的历史；同名多人都会返回，先看 rows[].sender.id，再按数字 ID 缩小范围。
 
 直接调用 tg_messages 的参数示例（替换为真实昵称、ID、日期）：
 - 昵称：{"sender":"小明","limit":20}。

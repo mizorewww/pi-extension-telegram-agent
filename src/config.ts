@@ -12,17 +12,13 @@ import type { ModelThinkingLevel as ThinkingLevel } from "@earendil-works/pi-ai"
 import type { BoxConfig } from "./sandbox/box.ts";
 import type { TasksConfig } from "./tasks/manager.ts";
 import { loadPiModelDefaults, type PiModelDefaults } from "./agent/model-settings.ts";
-import { canonicalPiModelReference, DEFAULT_AUXILIARY_VISUAL_MODEL } from "./agent/model-ref.ts";
 import { DEFAULT_DECIDER_THRESHOLD } from "./agent/decider.ts";
 
 /** Pi keeps this much room for the next response; compaction_threshold must leave it free. */
 export const MIN_COMPACTION_RESERVE = 16_384;
 
 type CacheRetention = "none" | "short" | "long";
-/**
- * "off": placeholders only; "hybrid": a vision model describes media as text and the main model
- * views one on demand with view_image (so it must accept image input).
- */
+/** "off": placeholders only; "hybrid": the chat model describes each new medium once as text. */
 export type MediaMode = "off" | "hybrid";
 
 const text = Type.String({ pattern: "\\S" });
@@ -73,7 +69,6 @@ export const configSchema = Type.Object(
 				Type.Object(
 					{
 						mode: Type.Union([Type.Literal("off"), Type.Literal("hybrid")]),
-						vision_model: text,
 						max_per_turn: Type.Integer({ minimum: 0, maximum: 16 }),
 						concurrency: Type.Integer({ minimum: 1, maximum: 16 }),
 					},
@@ -144,8 +139,7 @@ export interface BotConfig {
 	cacheRetention: CacheRetention;
 	providerTimeoutMs: number;
 	providerRetries: number;
-	/** viewImage is not a toggle: it follows media.mode "hybrid". */
-	tools: { send: boolean; search: boolean; codemode: boolean; sandbox: boolean; tasks: boolean; viewImage: boolean };
+	tools: { send: boolean; search: boolean; codemode: boolean; sandbox: boolean; tasks: boolean };
 	stickerSets: string[];
 }
 
@@ -164,7 +158,7 @@ export interface AppConfig {
 	bot: BotConfig;
 	tinyfishApiKey: string;
 	contextWindow: number;
-	media: { mode: MediaMode; visionModel: string; maxPerTurn: number; concurrency: number };
+	media: { mode: MediaMode; maxPerTurn: number; concurrency: number };
 	/** Work box settings; null when the deployment has no sandbox section. */
 	sandbox: BoxConfig | null;
 	/** Background task workflows; null when the deployment has no tasks section. */
@@ -251,8 +245,6 @@ function validate(
 	identityOnly: boolean,
 ): string[] {
 	const errors: string[] = [];
-	if (raw.media?.vision_model && !canonicalPiModelReference(raw.media.vision_model))
-		errors.push(`[config] invalid model reference: ${raw.media.vision_model}`);
 	if (!identityOnly && !env[raw.token_env]) errors.push(`[config] token_env: missing env key ${raw.token_env}`);
 	const persona = resolvePath(rootDir, raw.persona_path);
 	if (!existsSync(persona) || !statSync(persona).isFile())
@@ -342,7 +334,6 @@ export function loadConfig(rootDir = configDirectory(), options: LoadConfigOptio
 			codemode: tools.codemode === true,
 			sandbox: tools.sandbox === true,
 			tasks: tools.tasks === true,
-			viewImage: mediaMode === "hybrid",
 		},
 		stickerSets: [...(raw.sticker_sets ?? [])],
 	};
@@ -363,7 +354,6 @@ export function loadConfig(rootDir = configDirectory(), options: LoadConfigOptio
 		contextWindow,
 		media: {
 			mode: mediaMode,
-			visionModel: canonicalPiModelReference(media.vision_model ?? DEFAULT_AUXILIARY_VISUAL_MODEL)!,
 			maxPerTurn: media.max_per_turn ?? 2,
 			concurrency: media.concurrency ?? 2,
 		},

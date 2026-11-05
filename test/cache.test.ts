@@ -25,17 +25,17 @@ import {
 } from "../src/agent/tools.ts";
 process.env.TZ = "Asia/Singapore";
 const GOLDEN = {
-	schemaVersion: 51,
+	schemaVersion: 52,
 	systemZhTemplate: "50ffcdb70e57",
 	systemEnTemplate: "be09421b7655",
-	systemSandboxTemplate: "bae81eb0d7b1",
-	tools: "ef7452437b67",
-	codemodeTools: "da2dc067d740",
+	systemSandboxTemplate: "96efc7945c60",
+	tools: "637175a9e0f9",
+	codemodeTools: "fb4d326b244a",
 	sendWithFiles: "93313ad52eea",
 	taskTool: "8fcbd3a5b98d",
 	jobTool: "78e6689e8118",
 	nativeTools: "19524518f475",
-	fixedOfferedTools: "14ad9c46d9f8",
+	fixedOfferedTools: "0dc9716e8ad4",
 	fixedCodemodeSection: "3745e9a802d5",
 	replyRecovery: "4fc7e277e338",
 	eventSerialize: "a05c0584eb08",
@@ -48,13 +48,13 @@ function schemaDb() {
 	return db;
 }
 test("prompt and native tool protocol hashes are stable", async () => {
-	const allTools = { send: true, search: true, codemode: true, sandbox: false, tasks: false, viewImage: false };
+	const allTools = { send: true, search: true, codemode: true, sandbox: false, tasks: false };
 	const registry = createRegistry();
 	registry.install(CodingTools);
 	registry.install(telegramCodemode());
 	const full = createRegistry();
 	const { extensions } = await buildBotRuntimeTools({
-		bot: { id: "fixture", tools: { ...allTools, sandbox: true, tasks: true, viewImage: true } },
+		bot: { id: "fixture", tools: { ...allTools, sandbox: true, tasks: true } },
 		box: {},
 		config: { tasks: { workflows: { search: "/fixture" } } },
 	} as unknown as BotRuntimeToolHost);

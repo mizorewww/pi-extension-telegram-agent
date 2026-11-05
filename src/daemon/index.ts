@@ -3,7 +3,6 @@
 
 import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
-import { parsePiModelReference } from "../agent/model-ref.ts";
 import {
 	createInstalledPiModelRuntime,
 	createSharedModelRuntime,
@@ -19,7 +18,7 @@ import { getDaemonState, openDb, setDaemonState } from "../db/db.ts";
 import { applyRetention } from "../db/retention.ts";
 import { pruneMediaCache } from "../media/lifecycle.ts";
 import { inspectVideoTranscoder } from "../media/video-frames.ts";
-import { assertPiVisionExecutorReady, createPiVisionExecutor } from "../media/vision.ts";
+import { createPiVisionExecutor } from "../media/vision.ts";
 import { VisionScheduler } from "../media/vision-scheduler.ts";
 import { errorCategory, log } from "../observability/log.ts";
 import { BOX_RESET_CHECK_MS, runWeeklyBoxReset } from "../sandbox/schedule.ts";
@@ -39,7 +38,7 @@ const config = loadConfig();
 // can never race this one onto the same tokens. Released on shutdown; stale pid files are taken over.
 acquirePidLock(config.dataDir);
 const videoTranscoder = inspectVideoTranscoder();
-// Frame sampling feeds vision descriptions and view_image.
+// Frame sampling feeds video descriptions.
 const mediaNeedsFrames = config.media.mode !== "off";
 if (mediaNeedsFrames && !videoTranscoder) {
 	log.warn("media_transcoder", "tools_unavailable", {
@@ -49,29 +48,23 @@ if (mediaNeedsFrames && !videoTranscoder) {
 		blocking: false,
 	});
 }
-// loadConfig already canonicalizes model references (config.ts), so values from config always parse.
-// Hybrid mode describes media with the auxiliary vision model.
-const visualModel = config.media.mode === "hybrid" ? parsePiModelReference(config.media.visionModel)! : null;
 const { bot } = config;
 const chatModel = { provider: bot.provider, model: bot.model, thinkingLevel: bot.reasoningEffort, purpose: "bot" };
 const { sharedModelRuntime, sharedVisionExecutor, decider } = await (async () => {
 	try {
-		const runtime = await createSharedModelRuntime(
-			[chatModel, ...(visualModel ? [{ ...visualModel, purpose: "vision" }] : [])],
-			() => createInstalledPiModelRuntime({ cwd: config.configDir }),
+		const runtime = await createSharedModelRuntime([chatModel], () =>
+			createInstalledPiModelRuntime({ cwd: config.configDir }),
 		);
 		if (config.media.mode === "hybrid") {
-			// view_image attaches image blocks; a chat model without image input would silently
-			// degrade every viewed photo/sticker/video to a bare placeholder, so fail fast.
+			// Hybrid descriptions send images to the chat model; one without image input would
+			// silently degrade every photo/sticker/video to a bare placeholder, so fail fast.
 			const model = runtime.getModel(bot.provider, bot.model);
 			if (model && !model.input.includes("image"))
 				throw new PiModelConfigurationError("image_input_unsupported", bot.provider, bot.model, "bot");
 		}
-		const executor = visualModel ? createPiVisionExecutor(runtime, visualModel.canonical) : null;
-		if (executor) assertPiVisionExecutorReady(executor);
 		return {
 			sharedModelRuntime: runtime,
-			sharedVisionExecutor: executor,
+			sharedVisionExecutor: config.media.mode === "hybrid" ? createPiVisionExecutor(runtime, bot) : null,
 			decider: bot.decider ? createDecider(runtime, bot.decider, bot.name) : null,
 		};
 	} catch (error) {
@@ -79,7 +72,7 @@ const { sharedModelRuntime, sharedVisionExecutor, decider } = await (async () =>
 		throw error;
 	}
 })();
-const visionScheduler = visualModel ? new VisionScheduler(config.media.concurrency) : null;
+const visionScheduler = sharedVisionExecutor ? new VisionScheduler(config.media.concurrency) : null;
 log.info("daemon", "bot_configured", {
 	provider: bot.provider,
 	model: bot.model,
