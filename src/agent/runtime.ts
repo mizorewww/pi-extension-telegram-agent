@@ -31,7 +31,8 @@ import {
 import type { MediaDownloadApi } from "../media/local-cache.ts";
 import {
 	ensureStickerCatalog,
-	stickerCatalogPromptBlock,
+	stickerCatalogSnapshot,
+	type StickerCatalogSnapshot,
 	batchStickerCandidates,
 	projectStickerNotes,
 } from "../media/sticker-catalog.ts";
@@ -79,13 +80,15 @@ export const TelegramState = defineDoc<{
 	fingerprint: string;
 	pending: Record<string, string>;
 	taskSeen: number;
+	/** Frozen with the context so a later description backfill cannot change the system prompt. */
+	stickerCatalog: StickerCatalogSnapshot | null;
 }>({
 	kind: "telegram.state",
 	version: 1,
 	scope: "conversation",
 	history: "latest",
 	fork: "initial",
-	initial: () => ({ admittedSeq: 0, epoch: 1, fingerprint: "", pending: {}, taskSeen: 0 }),
+	initial: () => ({ admittedSeq: 0, epoch: 1, fingerprint: "", pending: {}, taskSeen: 0, stickerCatalog: null }),
 	checkpointWhen: () => false,
 });
 const MAX_INPUT_CHARS = 32_000;
@@ -117,6 +120,7 @@ export class BotRuntime {
 	private harness!: Harness;
 	private conversation!: Conversation;
 	private tasks: TaskManager | null = null;
+	private persona = "";
 	private prompt = "";
 	private toolFingerprint = "";
 	private stopping = false;
@@ -243,11 +247,8 @@ export class BotRuntime {
 				state.admittedSeq = messageEventHighWater(this.db, this.config.groupChatId);
 			}, context);
 		}
-		this.prompt = buildSystemPrompt(
-			readFileSync(this.bot.personaPath, "utf8"),
-			this.bot.tools,
-			stickerCatalogPromptBlock(this.db, this.bot.id, this.bot.stickerSets),
-		);
+		this.persona = readFileSync(this.bot.personaPath, "utf8");
+		await this.refreshPrompt(false);
 		this.toolFingerprint = sha256Short(
 			JSON.stringify(
 				registry
@@ -261,6 +262,17 @@ export class BotRuntime {
 		if (state.fingerprint && state.fingerprint !== fingerprint) await this.reset(false);
 		await this.configureModel(this.bot);
 		this.harness.resume();
+	}
+
+	/** Catalog descriptions refresh only when the context restarts anyway; otherwise a restart would reset it. */
+	private async refreshPrompt(force: boolean): Promise<void> {
+		const current = stickerCatalogSnapshot(this.db, this.bot.id, this.bot.stickerSets);
+		const catalog = await this.conversation.commit(async (tx) => {
+			const state = await tx.doc(TelegramState, this.conversation.id);
+			if (force || state.stickerCatalog?.ids !== current.ids) state.stickerCatalog = current;
+			return state.stickerCatalog!.block;
+		}, context);
+		this.prompt = buildSystemPrompt(this.persona, this.bot.tools, catalog);
 	}
 
 	private state() {
@@ -562,6 +574,7 @@ export class BotRuntime {
 			state.admittedSeq = messageEventHighWater(this.db, this.config.groupChatId);
 			return state.epoch;
 		}, context);
+		await this.refreshPrompt(true);
 		if (workspace) await this.workBox?.reset();
 		return epoch;
 	}
@@ -571,7 +584,9 @@ export class BotRuntime {
 		if (this.changing) return { ok: false, code: "busy" };
 		this.changing = true;
 		try {
-			return { ok: true, epoch: await this.reset(true) };
+			const epoch = await this.reset(true);
+			await this.configureModel(this.bot);
+			return { ok: true, epoch };
 		} catch {
 			return { ok: false, code: "failed" };
 		} finally {

@@ -77,9 +77,15 @@ function stickerLine(row: CatalogRow): string {
 	const description = [row.sticker_emoji, stickerDescription(row.vision)].filter(Boolean).join(" ");
 	return `${row.short_id}${description ? `: ${description}` : ""}`;
 }
-export function stickerCatalogPromptBlock(db: Database, botId: string, sets: readonly string[]): string {
+// A type alias, not an interface: Pi docs require JSON-compatible index signatures.
+export type StickerCatalogSnapshot = { ids: string; block: string };
+/** `ids` identifies the catalog; descriptions inside `block` are backfilled asynchronously. */
+export function stickerCatalogSnapshot(db: Database, botId: string, sets: readonly string[]): StickerCatalogSnapshot {
 	const rows = catalogRows(db, botId, sets);
-	return rows.length ? `# Sticker 目录\n\n${rows.map(stickerLine).join("\n")}` : "";
+	return {
+		ids: rows.map((row) => row.short_id).join(","),
+		block: rows.length ? `# Sticker 目录\n\n${rows.map(stickerLine).join("\n")}` : "",
+	};
 }
 /** A batch's note is rendered once and stays at that position for the life of the context. */
 export function batchStickerCandidates(
