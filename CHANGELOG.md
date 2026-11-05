@@ -1,3 +1,17 @@
+# v1.1.0
+
+这是一次不兼容升级：一次部署只运行一个 bot，配置文件改为扁平结构。
+
+- 删除多 bot 与概率路由。`bots` 数组、`routing_p`、`router_secret`、`/fire`、`/set` 全部移除；`name`、`token_env`、`persona_path`、`tools`、`sticker_sets` 移到配置顶层。
+- 新增接话判断：人类 @、回复或叫名字时必回；其余消息（包括其他 bot 的发言）由 Pi 原生分类模型判断是否接话，默认 OpenRouter `perplexity/pplx-decider-v1.2`，阈值 0.45。判断模型只读最近的消息切片，不进入 bot 上下文。未配置 `decider` 时每条消息都接话；判断失败按接话处理。提示词与 14 个通用示例在 `src/agent/decider.ts`，按 150 条人工标注的真实切片调优。
+- 删除 `view_image`：需要看清细节时，bot 用 `tg_download` 取到工作区，再用 Pi 原生 `read` 看图。hybrid 媒体描述改用当前聊天模型，删除 `media.vision_model`。
+- 删除自带的 pid 锁，单实例由 systemd 保证；opt-in e2e 脚本在 daemon 运行时拒绝启动。
+- `/status` 重新显示上下文构成（system prompt、工具声明、压缩摘要、消息与剩余空间）。
+- 首次启动自动迁移归档数据库：保留与当前 token 对应 bot 的原始更新、file_id、轮询位置和工作区清空时间，删除其他 bot 的数据与 `routing_claims`。之后更换 token 会清空旧 bot 的 file_id 与轮询位置。
+- 工作区容器与卷改名为 `tg-box`、`tg-work`，Pi 存储改为 `pi/agent.sqlite`。cache schema 升到 52，升级后开启新会话。
+
+升级步骤：停止服务；把 `telegram.config.ts` 改成扁平结构（删除 `bots`、`routing_p`、`media.vision_model`，需要时加入 `decider`）；如需接话判断，在 Pi 中为 `openrouter` 保存 API key；可将 `pi/<bot id>.sqlite` 改名为 `pi/agent.sqlite` 以保留用量记录；然后运行安装命令。旧的 `tg-box-<id>` 容器与 `tg-work-<id>` 卷可以删除。
+
 # v1.0.3
 
 - sticker 目录随会话固定：目录 sticker 的描述在两次重启之间补齐时，不再导致下次启动重置会话；目录只在 `/new`、切换模型或目录本身变化时刷新。
