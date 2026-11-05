@@ -2,7 +2,7 @@
 import { readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context, type Context } from "@earendil-works/chord/context";
-import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
+import { estimateContextTokens, estimateMessageTokens, estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
@@ -37,7 +37,7 @@ import {
 import { ensureVision, type VisionExecutor } from "../media/vision.ts";
 import type { VisionScheduler } from "../media/vision-scheduler.ts";
 import { log } from "../observability/log.ts";
-import type { RuntimeControlSnapshot } from "../observability/usage.ts";
+import type { ContextComposition, RuntimeControlSnapshot } from "../observability/usage.ts";
 import { WorkBox } from "../sandbox/box.ts";
 import type { TaskManager } from "../tasks/manager.ts";
 import { TelegramTypingLease } from "../telegram/activity.ts";
@@ -124,6 +124,9 @@ export class BotRuntime {
 	private persona = "";
 	private prompt = "";
 	private toolFingerprint = "";
+	private toolTokens = 0;
+	/** The provider's own prompt count for the latest main request; fits the local estimates. */
+	private lastPromptTokens: number | null = null;
 	private stopping = false;
 	private changing = false;
 	private completedAt = 0;
@@ -194,6 +197,7 @@ export class BotRuntime {
 						afterResponse: (message, api) => {
 							if (api.conversationId !== this.conversation.id) return;
 							if (message.stopReason === "error" || message.stopReason === "aborted") this.typing.stop();
+							else this.lastPromptTokens = message.usage.input + message.usage.cacheRead + message.usage.cacheWrite;
 							log.info("agent", "response", {
 								outcome: message.stopReason,
 								input_tokens: message.usage.input,
@@ -252,14 +256,14 @@ export class BotRuntime {
 		}
 		this.persona = readFileSync(this.bot.personaPath, "utf8");
 		await this.refreshPrompt(false);
-		this.toolFingerprint = sha256Short(
-			JSON.stringify(
-				registry
-					.snapshot()
-					.tools()
-					.map(({ tool }) => [tool.name, tool.description, tool.parameters]),
-			),
+		const toolDeclarations = JSON.stringify(
+			registry
+				.snapshot()
+				.tools()
+				.map(({ tool }) => [tool.name, tool.description, tool.parameters]),
 		);
+		this.toolFingerprint = sha256Short(toolDeclarations);
+		this.toolTokens = estimateTextTokens(toolDeclarations);
 		const fingerprint = this.contextFingerprint(this.bot);
 		const state = (await this.state())!;
 		if (state.fingerprint && state.fingerprint !== fingerprint) await this.reset(false);
@@ -602,10 +606,32 @@ export class BotRuntime {
 			reasoningEffort: this.bot.reasoningEffort,
 			contextWindow: this.contextWindow(),
 			currentContextTokens: estimateContextTokens(view.messages).tokens,
+			context: this.contextComposition(view.entries),
 			cooldownMs: this.bot.cooldownMs,
 			decider: this.bot.decider,
 			lastCompact: this.lastCompact,
 			usage: await this.harness.usage(context),
+		};
+	}
+
+	/** Local estimates per part, scaled to the provider's count when a request has reported one. */
+	private contextComposition(entries: readonly EntryRecord[]): ContextComposition {
+		const parts: ContextComposition = { system: 0, tools: this.toolTokens, summary: 0, messages: 0 };
+		for (const entry of entries)
+			for (const message of entry.model ?? []) {
+				const tokens = estimateMessageTokens(message);
+				if (message.role === "system") parts.system += tokens;
+				else if (entry.kind === "pi.compaction") parts.summary += tokens;
+				else parts.messages += tokens;
+			}
+		const estimated = parts.system + parts.tools + parts.summary + parts.messages;
+		if (!this.lastPromptTokens || !estimated) return parts;
+		const scale = this.lastPromptTokens / estimated;
+		return {
+			system: Math.round(parts.system * scale),
+			tools: Math.round(parts.tools * scale),
+			summary: Math.round(parts.summary * scale),
+			messages: Math.round(parts.messages * scale),
 		};
 	}
 
