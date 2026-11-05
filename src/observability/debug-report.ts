@@ -10,7 +10,6 @@ export function buildDebugReport(
 		sinceMs: number;
 		now?: number;
 		logs?: readonly LogRecord[];
-		daemon?: { pid: number | null; alive: boolean };
 	},
 ) {
 	const now = input.now ?? Date.now();
@@ -19,7 +18,6 @@ export function buildDebugReport(
 		schema: 4,
 		generated_at: new Date(now).toISOString(),
 		window_ms: input.sinceMs,
-		daemon: input.daemon ?? null,
 		archive: { chat_id: input.chatId, high_water: messageEventHighWater(db, input.chatId) },
 		poll_offset: Number(getDaemonState(db, "update_offset") ?? "0"),
 		pending_dispatch: db.prepare("SELECT update_id, message_id, kind FROM pending_telegram_dispatch").get() ?? null,

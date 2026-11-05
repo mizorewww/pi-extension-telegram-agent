@@ -31,12 +31,9 @@ import {
 import { publishTelegramControlMenu, TelegramControlCoordinator } from "../telegram/control-integration.ts";
 import type { IngestResult } from "../telegram/ingest.ts";
 import { Poller } from "../telegram/poller.ts";
-import { acquirePidLock, releasePidLock } from "./pid.ts";
 
+// systemd is the only supervisor and keeps a single copy of this process.
 const config = loadConfig();
-// Exclusive pid lock before any slow init (getMe / model runtime / sessions), so a second copy
-// can never race this one onto the same tokens. Released on shutdown; stale pid files are taken over.
-acquirePidLock(config.dataDir);
 const videoTranscoder = inspectVideoTranscoder();
 // Frame sampling feeds video descriptions.
 const mediaNeedsFrames = config.media.mode !== "off";
@@ -50,28 +47,18 @@ if (mediaNeedsFrames && !videoTranscoder) {
 }
 const { bot } = config;
 const chatModel = { provider: bot.provider, model: bot.model, thinkingLevel: bot.reasoningEffort, purpose: "bot" };
-const { sharedModelRuntime, sharedVisionExecutor, decider } = await (async () => {
-	try {
-		const runtime = await createSharedModelRuntime([chatModel], () =>
-			createInstalledPiModelRuntime({ cwd: config.configDir }),
-		);
-		if (config.media.mode === "hybrid") {
-			// Hybrid descriptions send images to the chat model; one without image input would
-			// silently degrade every photo/sticker/video to a bare placeholder, so fail fast.
-			const model = runtime.getModel(bot.provider, bot.model);
-			if (model && !model.input.includes("image"))
-				throw new PiModelConfigurationError("image_input_unsupported", bot.provider, bot.model, "bot");
-		}
-		return {
-			sharedModelRuntime: runtime,
-			sharedVisionExecutor: config.media.mode === "hybrid" ? createPiVisionExecutor(runtime, bot) : null,
-			decider: bot.decider ? createDecider(runtime, bot.decider, bot.name) : null,
-		};
-	} catch (error) {
-		releasePidLock(config.dataDir);
-		throw error;
-	}
-})();
+const sharedModelRuntime = await createSharedModelRuntime([chatModel], () =>
+	createInstalledPiModelRuntime({ cwd: config.configDir }),
+);
+if (config.media.mode === "hybrid") {
+	// Hybrid descriptions send images to the chat model; one without image input would
+	// silently degrade every photo/sticker/video to a bare placeholder, so fail fast.
+	const model = sharedModelRuntime.getModel(bot.provider, bot.model);
+	if (model && !model.input.includes("image"))
+		throw new PiModelConfigurationError("image_input_unsupported", bot.provider, bot.model, "bot");
+}
+const sharedVisionExecutor = config.media.mode === "hybrid" ? createPiVisionExecutor(sharedModelRuntime, bot) : null;
+const decider = bot.decider ? createDecider(sharedModelRuntime, bot.decider, bot.name) : null;
 const visionScheduler = sharedVisionExecutor ? new VisionScheduler(config.media.concurrency) : null;
 log.info("daemon", "bot_configured", {
 	provider: bot.provider,
@@ -187,7 +174,6 @@ async function shutdown(signal: string, exitCode = 0) {
 	await runtime
 		.stop()
 		.catch((error: unknown) => log.warn("daemon", "runtime_stop_failed", { category: errorCategory(error) }));
-	releasePidLock(config.dataDir);
 	// wait for the poller loops to actually exit; stop() aborts any in-flight long
 	// poll or backoff sleep, so this returns promptly inside the hard shutdown bound
 	await Promise.allSettled([pollerRun]);
@@ -200,7 +186,6 @@ process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));
 
 log.info("daemon", "ready", { pid: process.pid, group_peer_id: config.groupPeerId });
-// A fatal poller error (revoked token) must still run the graceful shutdown so in-flight turns
-// settle and the pid file is released.
+// A fatal poller error (revoked token) must still run the graceful shutdown so in-flight turns settle.
 const pollerRun = poller.run();
 await pollerRun.catch(() => shutdown("poller_fatal", 1));

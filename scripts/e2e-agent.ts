@@ -1,9 +1,9 @@
 // Opt-in real provider + Telegram send against an existing human message. Stop the daemon first.
 import { parseArgs } from "node:util";
+import { spawnSync } from "node:child_process";
 import { loadConfig } from "../src/config.ts";
 import { openDb } from "../src/db/db.ts";
 import { groupMessage } from "../src/db/message-events.ts";
-import { acquirePidLock, releasePidLock } from "../src/daemon/pid.ts";
 import { BotApi } from "../src/telegram/api.ts";
 import { inspectVideoTranscoder } from "../src/media/video-frames.ts";
 import { BotRuntime } from "../src/agent/runtime.ts";
@@ -14,7 +14,9 @@ const { values } = parseArgs({ options: { message: { type: "string" } } });
 const { bot } = config;
 const messageId = Number(values.message);
 if (!Number.isSafeInteger(messageId) || messageId <= 0) throw new Error("usage: --message <existing human message id>");
-acquirePidLock(config.dataDir);
+// systemd is the only supervisor; a live daemon shares Pi storage and the bot token.
+if (spawnSync("systemctl", ["is-active", "--quiet", "telegram-agent"]).status === 0)
+	throw new Error("stop telegram-agent first: it shares Pi storage and the bot token");
 const api = new BotApi(bot.token);
 const me = await api.getMe();
 const db = openDb(config.dbPath, me.id);
@@ -59,6 +61,5 @@ try {
 		await runtime?.stop();
 	} finally {
 		db.close();
-		releasePidLock(config.dataDir);
 	}
 }

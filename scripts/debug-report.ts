@@ -5,7 +5,6 @@ import { parseArgs } from "node:util";
 
 import { join } from "node:path";
 import { configDirectory, loadConfig } from "../src/config.ts";
-import { readPid, pidAlive } from "../src/daemon/pid.ts";
 import { buildDebugReport, parseDebugDuration } from "../src/observability/debug-report.ts";
 import { readStructuredLogTail } from "../src/observability/log.ts";
 
@@ -41,12 +40,10 @@ export async function main(args = process.argv.slice(2), rootDir = configDirecto
 	try {
 		const config = loadConfig(rootDir, { identityOnly: true });
 		db = new Database(config.dbPath, { readOnly: true });
-		const pid = readPid(join(config.dataDir, "daemon.pid"));
 		const report = buildDebugReport(db, {
 			chatId: config.groupChatId,
 			sinceMs,
 			logs: readStructuredLogTail(join(config.dataDir, "daemon.log")),
-			daemon: { pid, alive: pid != null && pidAlive(pid) },
 		});
 		process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 		return 0;

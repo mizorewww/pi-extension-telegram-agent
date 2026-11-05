@@ -1,7 +1,7 @@
 // Opt-in native compaction of the real bot context. Stop the daemon first; this calls the provider.
+import { spawnSync } from "node:child_process";
 import { loadConfig } from "../src/config.ts";
 import { openDb } from "../src/db/db.ts";
-import { acquirePidLock, releasePidLock } from "../src/daemon/pid.ts";
 import { BotApi } from "../src/telegram/api.ts";
 import { inspectVideoTranscoder } from "../src/media/video-frames.ts";
 import { BotRuntime } from "../src/agent/runtime.ts";
@@ -9,7 +9,9 @@ import { createInstalledPiModelRuntime, createSharedModelRuntime } from "../src/
 
 const config = loadConfig();
 const { bot } = config;
-acquirePidLock(config.dataDir);
+// systemd is the only supervisor; a live daemon shares Pi storage and the bot token.
+if (spawnSync("systemctl", ["is-active", "--quiet", "telegram-agent"]).status === 0)
+	throw new Error("stop telegram-agent first: it shares Pi storage and the bot token");
 const api = new BotApi(bot.token);
 const db = openDb(config.dbPath, (await api.getMe()).id);
 let runtime: BotRuntime | undefined;
@@ -34,6 +36,5 @@ try {
 		await runtime?.stop();
 	} finally {
 		db.close();
-		releasePidLock(config.dataDir);
 	}
 }
