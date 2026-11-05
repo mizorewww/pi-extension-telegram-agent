@@ -66,6 +66,7 @@ export const CODEMODE_TOOL_DEFS = [
 - 用户名：{"sender":"@Alice"}；用户 ID：{"sender":123456789}；群内别名：{"sender":"u12"}。字符串 "123" 是昵称，不是 ID。
 - 时间与关键词：{"sender":"小明","since":"2026-11-04T00:00:00+08:00","until":"2026-11-05T00:00:00+08:00","text_contains":"部署","order":"asc"}。since 含边界，until 不含；关键词是正文/说明文字的字面子串，不是语义搜索。
 - 查询一条消息及其回复：先 {"ids":[18452]}，再 {"reply_to":18452,"order":"asc"}；reply_to 只查直接回复。
+- 看不懂群里的梗或说法：先 {"text_contains":"梗里的词","order":"asc","limit":20} 找到它最早出现的地方，再用那条的 id 查回复、或按 after_id 往后翻，弄清来龙去脉再接话。
 - 查图片：{"sender":"@alice","has_media":"photo","limit":20}。
 - 向过去翻页：先 {"sender":"小明","limit":20}；假设返回 next_before_id=18452，下一页用 {"sender":"小明","limit":20,"before_id":18452}。实际必须使用返回游标并保留筛选。升序同理：假设 next_after_id=18500，则 {"sender":"小明","order":"asc","limit":20,"after_id":18500}。游标为 null 就停止。relevance 无翻页游标，应缩小筛选或提高 limit。
 

@@ -1,7 +1,7 @@
 // Cache-visible protocol: changes start a new context epoch.
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 52; // view_image is gone: tg_download + Pi read look at media.
+export const CACHE_SCHEMA_VERSION = 53; // tg_messages shows how to trace an unfamiliar in-group meme.
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
 
 interface EnabledTools {

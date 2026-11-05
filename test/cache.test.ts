@@ -25,17 +25,17 @@ import {
 } from "../src/agent/tools.ts";
 process.env.TZ = "Asia/Singapore";
 const GOLDEN = {
-	schemaVersion: 52,
+	schemaVersion: 53,
 	systemZhTemplate: "50ffcdb70e57",
 	systemEnTemplate: "be09421b7655",
 	systemSandboxTemplate: "96efc7945c60",
 	tools: "637175a9e0f9",
-	codemodeTools: "fb4d326b244a",
+	codemodeTools: "99718d49e271",
 	sendWithFiles: "93313ad52eea",
 	taskTool: "8fcbd3a5b98d",
 	jobTool: "78e6689e8118",
 	nativeTools: "19524518f475",
-	fixedOfferedTools: "0dc9716e8ad4",
+	fixedOfferedTools: "fe52cdb3226b",
 	fixedCodemodeSection: "3745e9a802d5",
 	replyRecovery: "4fc7e277e338",
 	eventSerialize: "a05c0584eb08",
