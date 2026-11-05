@@ -121,7 +121,7 @@ workspace=$(as_service "$node" --input-type=module - "$release/dist/src/config.j
 import { pathToFileURL } from 'node:url';
 const { loadConfig } = await import(pathToFileURL(process.argv[2]));
 const config = loadConfig();
-console.log([config.bots.some(bot => bot.tools.sandbox), config.sandbox?.dockerHost ?? '', config.sandbox?.image ?? ''].join('\n'));
+console.log([config.bot.tools.sandbox, config.sandbox?.dockerHost ?? '', config.sandbox?.image ?? ''].join('\n'));
 JS
 )
 mapfile -t workspace_options <<< "$workspace"
@@ -202,8 +202,8 @@ try {
  const records=readFileSync(process.argv[2], 'utf8').trim().split('\n').flatMap(line=>{try{return [JSON.parse(line)];}catch{return [];}})
    .filter(r=>r.fields?.pid===Number(process.argv[3])&&Date.parse(r.ts)>=Number(process.argv[4])*1000);
  const ready=records.find(r=>r.component==='daemon'&&r.event==='ready');
- const connected=new Set(records.filter(r=>r.component==='telegram_poller'&&r.event==='connected').map(r=>r.fields.bot_id));
- process.exit(ready&&connected.size===ready.fields.bot_count?0:1);
+ const connected=records.some(r=>r.component==='telegram_poller'&&r.event==='connected');
+ process.exit(ready&&connected?0:1);
 } catch { process.exit(1); }
 JS
   then
