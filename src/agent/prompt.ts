@@ -1,7 +1,7 @@
 // Cache-visible protocol: changes start a new context epoch.
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 53; // tg_messages shows how to trace an unfamiliar in-group meme.
+export const CACHE_SCHEMA_VERSION = 54; // send.rich publishes Telegram Rich Markdown for long-form and math.
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
 
 interface EnabledTools {

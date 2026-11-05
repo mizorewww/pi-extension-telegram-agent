@@ -19,7 +19,11 @@ export interface MarkdownTextSendApi extends TextSendApi {
 	sendMessageWithHtml(chatId: number, html: string, replyToMessageId?: number): Promise<Record<string, unknown>>;
 }
 
-export type SentMessageTransport = "plain" | "formatted" | "plain_fallback" | "sticker" | "file";
+export interface RichTextSendApi {
+	sendRichMessage(chatId: number, markdown: string, replyToMessageId?: number): Promise<Record<string, unknown>>;
+}
+
+export type SentMessageTransport = "plain" | "formatted" | "plain_fallback" | "rich" | "sticker" | "file";
 
 export class SentMessagePersistenceError extends Error {
 	constructor(
@@ -160,4 +164,16 @@ export async function sendMarkdownTextAndPersist(
 		raw = await api.sendMessage(chatId, formatted.text, replyToMessageId);
 	}
 	return { raw, canonical: await persistSentMessageWithRetry(db, raw, transport), transport };
+}
+
+/** Rich Markdown has no local grammar or fallback: a parse rejection goes back to the model. */
+export async function sendRichMarkdownAndPersist(
+	db: Database,
+	api: RichTextSendApi,
+	chatId: number,
+	markdown: string,
+	replyToMessageId?: number,
+): Promise<{ raw: Record<string, unknown>; canonical: CanonicalMessage }> {
+	const raw = await api.sendRichMessage(chatId, markdown, replyToMessageId);
+	return { raw, canonical: await persistSentMessageWithRetry(db, raw, "rich") };
 }

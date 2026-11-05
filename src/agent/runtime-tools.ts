@@ -72,7 +72,7 @@ const output = (text: string) => ({ output: [{ type: "text" as const, text }] })
 const structured = (value: JsonValue) => ({ ...output(JSON.stringify(value)), structuredOutput: value });
 
 async function send(host: BotRuntimeToolHost, params: SendParams, api: ToolExecutionApi, context: Context) {
-	if (params.message || params.sticker || params.files?.length) {
+	if (params.message || params.rich || params.sticker || params.files?.length) {
 		await api.commit(async (tx) => {
 			const run = (await tx.doc(LiveDoc, api.conversationId)).run?.first ?? api.taskId;
 			const count = await tx.doc(SendCount, api.conversationId);

@@ -20,6 +20,7 @@ import {
 	localFailureCategory,
 	persistSentMessageWithRetry,
 	sendMarkdownTextAndPersist,
+	sendRichMarkdownAndPersist,
 	SentMessagePersistenceError,
 } from "../telegram/send.ts";
 
@@ -94,8 +95,9 @@ function preflight(
 		});
 		throw new Error(message);
 	};
-	if (!params.message && !params.sticker && !params.reaction && !params.files?.length)
-		reject("empty_payload", "send requires at least one of message, sticker, files or reaction");
+	if (!params.message && !params.rich && !params.sticker && !params.reaction && !params.files?.length)
+		reject("empty_payload", "send requires at least one of message, rich, sticker, files or reaction");
+	if (params.message && params.rich) reject("message_and_rich", "use either message or rich, not both");
 	if (params.reaction != null && params.reply_to == null)
 		reject("reaction_without_target", "reaction requires reply_to: the reaction lands on the replied message");
 	if (params.reaction != null && !isReactionEmoji(params.reaction, context.allowedReactions)) {
@@ -147,6 +149,7 @@ export async function executeAgentSend(requested: SendParams, context: AgentSend
 	}
 	log.info("agent_send", "started", {
 		has_message: Boolean(params.message),
+		has_rich: Boolean(params.rich),
 		has_sticker: Boolean(params.sticker),
 		has_reaction: params.reaction != null,
 		has_reply: params.reply_to != null,
@@ -232,6 +235,15 @@ export async function executeAgentSend(requested: SendParams, context: AgentSend
 				error.cause,
 				error.transport === "formatted" ? "markdown_sent" : "plain_fallback",
 			);
+		}
+	}
+	if (params.rich) {
+		try {
+			const { raw } = await sendRichMarkdownAndPersist(context.db, context.api, chatId, params.rich, params.reply_to);
+			await committed("message", raw, null, "rich_sent");
+		} catch (error) {
+			if (!(error instanceof SentMessagePersistenceError)) return await createFailed("message", error);
+			await committed("message", error.raw, error.cause, "rich_sent");
 		}
 	}
 	// Files follow the text; only the first created message carries the reply.

@@ -28,6 +28,29 @@ export const TOOL_DEFS = [
 					description: "自然 Markdown；支持粗体、斜体、删除线、代码、公共 HTTP(S) 链接、列表、表格、引用。不用 HTML。",
 				}),
 			),
+			rich: Type.Optional(
+				Type.String({
+					maxLength: 32768,
+					description: String.raw`Telegram 富文本消息（Rich Markdown），与 message 二选一。只在写长文（分节讲解、报告、教程、对比）或数学推导时用；聊天、短回答、一两段话一律用 message，富文本在群聊里很占屏。
+语法接近 GitHub Markdown，另支持：# 标题、表格（单元格只能行内格式）、- [ ] 任务列表、--- 分隔线、脚注 [^1]、==高亮==、||剧透||、<sup>上标</sup> <sub>下标</sub>、<details><summary>折叠标题</summary>内容</details>；公式是 LaTeX 原文，行内 $...$，独立成行 $$...$$。不要用按钮或媒体。
+例（数学推导）：
+## 等差数列求和
+设 $S_n = 1 + 2 + \cdots + n$，倒序再写一遍相加：
+$$2S_n = \underbrace{(n+1) + \cdots + (n+1)}_{n\ \text{项}}$$
+所以 $S_n = \frac{n(n+1)}{2}$，例如 $S_{100} = 5050$。
+例（长文）：
+# Rust 与 Go 怎么选
+## 结论
+CPU 密集、要零成本抽象选 **Rust**；网络服务、要快速交付选 **Go**。
+| 维度 | Rust | Go |
+|:--|:--|:--|
+| 内存管理 | 所有权，无 GC | GC |
+| 上手难度 | 高 | 低 |
+<details><summary>展开：并发模型</summary>
+Go 靠 goroutine + channel；Rust 靠 Send/Sync 在编译期排除数据竞争。
+</details>`,
+				}),
+			),
 			sticker: Type.Optional(Type.String({ description: "目录或〔系统附注〕中的 sticker short_id，不得编造。" })),
 			reply_to: Type.Optional(
 				Type.Integer({ description: "回应的本群真实消息 #id；上下文、引用或 tg_messages 查到的都可以。" }),
