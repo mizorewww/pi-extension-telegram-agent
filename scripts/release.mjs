@@ -26,7 +26,7 @@ try {
 	for (const path of [
 		"package.json", "package-lock.json", "LICENSE", "README.md", "CHANGELOG.md", "deploy",
 		"telegram.config.example.ts", ".env.example", "personas/template.en.md", "personas/template.zh.md",
-		"dist/src", ...["check-config", "debug-report", "smoke-pi", "e2e-agent", "e2e-compaction", "bot-selection"].map(name => `dist/scripts/${name}.js`),
+		"dist/src", ...["check-config", "debug-report", "smoke-pi", "e2e-agent", "e2e-compaction"].map(name => `dist/scripts/${name}.js`),
 	]) {
 		mkdirSync(dirname(join(stage, path)), { recursive: true });
 		cpSync(join(root, path), join(stage, path), { recursive: true });
