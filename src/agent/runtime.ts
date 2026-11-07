@@ -96,6 +96,7 @@ const MAX_PENDING = 64;
 /** Per decider field; the decider reads only recent lines, never the bot's context. */
 const DECIDER_SLICE_CHARS = 6_000;
 const TRUNCATED = "\n[truncated]";
+const total = (parts: ContextComposition) => parts.system + parts.tools + parts.summary + parts.messages;
 const bounded = (text: string, limit: number) =>
 	text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - TRUNCATED.length))}${TRUNCATED}`.slice(0, limit);
 const messageText = (message: { content: string | readonly { type: string; text?: string }[] }) =>
@@ -125,8 +126,9 @@ export class BotRuntime {
 	private prompt = "";
 	private toolFingerprint = "";
 	private toolTokens = 0;
-	/** The provider's own prompt count for the latest main request; fits the local estimates. */
-	private lastPromptTokens: number | null = null;
+	/** Provider prompt tokens per locally estimated token, measured on the latest main request. */
+	private tokenScale: number | null = null;
+	private requestEstimate = 0;
 	private stopping = false;
 	private changing = false;
 	private completedAt = 0;
@@ -190,14 +192,16 @@ export class BotRuntime {
 							if (api.conversationId !== this.conversation.id) return;
 							this.typing.start();
 							await this.admitTaskReplies(ctx);
-							return {
-								messages: projectStickerNotes(request.messages, (await this.conversation.context(ctx)).entries),
-							};
+							const { entries } = await this.conversation.context(ctx);
+							this.requestEstimate = total(this.estimateComposition(entries));
+							return { messages: projectStickerNotes(request.messages, entries) };
 						},
 						afterResponse: (message, api) => {
 							if (api.conversationId !== this.conversation.id) return;
 							if (message.stopReason === "error" || message.stopReason === "aborted") this.typing.stop();
-							else this.lastPromptTokens = message.usage.input + message.usage.cacheRead + message.usage.cacheWrite;
+							else if (this.requestEstimate)
+								this.tokenScale =
+									(message.usage.input + message.usage.cacheRead + message.usage.cacheWrite) / this.requestEstimate;
 							log.info("agent", "response", {
 								outcome: message.stopReason,
 								input_tokens: message.usage.input,
@@ -614,8 +618,19 @@ export class BotRuntime {
 		};
 	}
 
-	/** Local estimates per part, scaled to the provider's count when a request has reported one. */
+	/** Local estimates per part, calibrated by the provider's count once a request has reported one. */
 	private contextComposition(entries: readonly EntryRecord[]): ContextComposition {
+		const parts = this.estimateComposition(entries);
+		const scale = this.tokenScale ?? 1;
+		return {
+			system: Math.round(parts.system * scale),
+			tools: Math.round(parts.tools * scale),
+			summary: Math.round(parts.summary * scale),
+			messages: Math.round(parts.messages * scale),
+		};
+	}
+
+	private estimateComposition(entries: readonly EntryRecord[]): ContextComposition {
 		const parts: ContextComposition = { system: 0, tools: this.toolTokens, summary: 0, messages: 0 };
 		for (const entry of entries)
 			for (const message of entry.model ?? []) {
@@ -624,15 +639,7 @@ export class BotRuntime {
 				else if (entry.kind === "pi.compaction") parts.summary += tokens;
 				else parts.messages += tokens;
 			}
-		const estimated = parts.system + parts.tools + parts.summary + parts.messages;
-		if (!this.lastPromptTokens || !estimated) return parts;
-		const scale = this.lastPromptTokens / estimated;
-		return {
-			system: Math.round(parts.system * scale),
-			tools: Math.round(parts.tools * scale),
-			summary: Math.round(parts.summary * scale),
-			messages: Math.round(parts.messages * scale),
-		};
+		return parts;
 	}
 
 	async compactForControl(): Promise<ManualCompactResult> {
@@ -659,6 +666,7 @@ export class BotRuntime {
 		await this.tasks?.clear();
 		this.typing.stop();
 		await this.conversation.reset(undefined, context);
+		this.tokenScale = null; // the next model may tokenize differently
 		const epoch = await this.conversation.commit(async (tx) => {
 			const state = await tx.doc(TelegramState, this.conversation.id);
 			state.epoch++;
