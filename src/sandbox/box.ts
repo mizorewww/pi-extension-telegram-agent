@@ -87,7 +87,6 @@ export class WorkBox {
 	readonly container: string;
 	readonly volume: string;
 	readonly env: ExecutionEnv;
-	private readonly connection: Connection;
 	private lifecycle = Promise.resolve();
 	private resetting: Promise<void> | null = null;
 	constructor(config: BoxConfig, docker: DockerRunner = runDocker, environment?: ExecutionEnv) {
@@ -95,7 +94,7 @@ export class WorkBox {
 		this.docker = docker;
 		this.container = "tg-box";
 		this.volume = "tg-work";
-		this.connection = new Connection({
+		const connection = new Connection({
 			command: async () => {
 				await this.ensure();
 				return [
@@ -109,8 +108,7 @@ export class WorkBox {
 				];
 			},
 		});
-		this.env =
-			environment ?? new RemoteExecutionEnv({ connection: this.connection, id: this.volume, cwd: BOX_WORKDIR });
+		this.env = environment ?? new RemoteExecutionEnv({ connection, id: this.volume, cwd: BOX_WORKDIR });
 	}
 	private call(args: readonly string[]) {
 		return this.docker(args, { dockerHost: this.config.dockerHost, timeoutMs: 60_000 });
@@ -161,7 +159,8 @@ export class WorkBox {
 	}
 	interrupt(): Promise<void> {
 		return this.exclusive(async () => {
-			this.connection.close();
+			// Killing the container ends `docker exec`; the connection is then lost and the next request restarts it.
+			// close() would be terminal: every later request fails with "Connection closed".
 			await this.call(["kill", this.container]);
 		});
 	}
@@ -172,7 +171,6 @@ export class WorkBox {
 		return this.resetting;
 	}
 	private async remove(): Promise<void> {
-		this.connection.close();
 		if ((await this.call(["rm", "--force", this.container])).code !== 0) {
 			const exists = await this.call(["inspect", this.container]);
 			if (exists.code === 0) throw new BoxError("box removal failed");
