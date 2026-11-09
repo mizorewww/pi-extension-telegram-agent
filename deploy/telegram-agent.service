@@ -18,7 +18,7 @@ Environment=PI_CODING_AGENT_DIR=/var/lib/pi-telegram-agent/pi-agent
 Environment=PATH=/opt/pi-telegram-agent/node/bin:/usr/local/bin:/usr/bin:/bin
 Environment=TZ=Asia/Singapore
 ExecStartPre=/opt/pi-telegram-agent/node/bin/node /opt/pi-telegram-agent/current/deploy/rotate-log.mjs
-ExecStart=/opt/pi-telegram-agent/node/bin/node /opt/pi-telegram-agent/current/dist/src/daemon/index.js
+ExecStart=/opt/pi-telegram-agent/node/bin/node --disable-sigusr1 /opt/pi-telegram-agent/current/dist/src/daemon/index.js
 StandardOutput=append:/var/lib/pi-telegram-agent/daemon.log
 StandardError=append:/var/lib/pi-telegram-agent/daemon.log
 UMask=0077
