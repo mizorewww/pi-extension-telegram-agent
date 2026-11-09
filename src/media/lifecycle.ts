@@ -14,7 +14,8 @@ export function pruneMediaCache(db: Database, mediaDir: string, now = Date.now()
 	const rows = db
 		.prepare(`SELECT file_unique_id AS id, local_path AS path FROM media
 		WHERE local_path IS NOT NULL AND NOT EXISTS (
-			SELECT 1 FROM messages WHERE CAST(json_extract(messages.media, '$.file_unique_id') AS TEXT) = media.file_unique_id AND date > ?
+			SELECT 1 FROM messages WHERE messages.media IS NOT NULL -- lets the partial idx_messages_media_identity apply
+			AND CAST(json_extract(messages.media, '$.file_unique_id') AS TEXT) = media.file_unique_id AND date > ?
 		) ORDER BY rowid LIMIT ?`)
 		.all(Math.floor(now / 1000) - 7 * 86400, MEDIA_PRUNE_BATCH_LIMIT) as { id: string; path: string }[];
 	const result: MediaPruneResult = { scanned: rows.length, deleted: 0, stale: 0, failed: 0 };
