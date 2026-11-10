@@ -1,7 +1,7 @@
 {
 	"name": "pi-telegram-agent",
 	"private": true,
-	"version": "1.1.7",
+	"version": "1.1.8",
 	"type": "module",
 	"description": "Configurable Telegram group companions powered by Pi SDK",
 	"scripts": {
