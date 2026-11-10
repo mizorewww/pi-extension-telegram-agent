@@ -25,12 +25,14 @@ import { fileIdFor, MEDIA_DOWNLOAD_MAX_BYTES } from "../media/local-cache.ts";
 import type { WorkBox } from "../sandbox/box.ts";
 import { TaskManager } from "../tasks/manager.ts";
 import type { BotApi } from "../telegram/api.ts";
-import { queryMessages } from "../tools/messages.ts";
+import { queryMessages, semanticMessages } from "../tools/messages.ts";
+import type { SemanticIndex } from "../tools/semantic.ts";
 import { runTinyFishTool } from "../tools/search.ts";
 import { telegramCodemode } from "./extensions/codemode.ts";
 import { executeAgentSend } from "./send.ts";
 import {
 	CODEMODE_TOOL_DEFS,
+	messagesToolWithSemantic,
 	JOB_TOOL_DEF,
 	MAX_SENDS_PER_TURN,
 	sendToolWithFiles,
@@ -46,6 +48,8 @@ export interface BotRuntimeToolHost {
 	api: BotApi;
 	videoTranscoder: boolean;
 	box: WorkBox | null;
+	/** Present when tools.semantic is on; tg_messages then offers semantic recall. */
+	semantic?: SemanticIndex;
 	harness(): Harness;
 	conversation(): Conversation;
 	allowedReactions(): ReadonlySet<string> | null;
@@ -154,16 +158,36 @@ export async function buildBotRuntimeTools(
 				},
 			}),
 		);
-	if (host.bot.tools.codemode)
+	if (host.bot.tools.codemode) {
+		const semantic = host.semantic;
 		tools.push(
-			defineTool({
-				...CODEMODE_TOOL_DEFS[0],
-				callers: ["model", "tools"],
-				replay: "safe",
-				execute: async (args) =>
-					structured(queryMessages(host.db, host.config.groupChatId, args) as unknown as JsonValue),
-			}),
+			semantic
+				? defineTool({
+						...messagesToolWithSemantic(),
+						callers: ["model", "tools"],
+						replay: "safe",
+						execute: async (args, _api, context) =>
+							structured(
+								(args.semantic === undefined
+									? queryMessages(host.db, host.config.groupChatId, args)
+									: await semanticMessages(
+											host.db,
+											host.config.groupChatId,
+											semantic,
+											{ ...args, semantic: args.semantic },
+											context.abortSignal,
+										)) as unknown as JsonValue,
+							),
+					})
+				: defineTool({
+						...CODEMODE_TOOL_DEFS[0],
+						callers: ["model", "tools"],
+						replay: "safe",
+						execute: async (args) =>
+							structured(queryMessages(host.db, host.config.groupChatId, args) as unknown as JsonValue),
+					}),
 		);
+	}
 	if (host.box)
 		tools.push(
 			defineTool({

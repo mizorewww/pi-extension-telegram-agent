@@ -9,9 +9,9 @@ import type { DatabaseSync as Database } from "node:sqlite";
 /** The trigram index only matches needles of at least three characters. */
 const INDEX_MIN_CHARS = 3;
 
-import type { Static } from "typebox";
-import type { CODEMODE_TOOL_DEFS } from "../agent/tools.ts";
-export type MessageQuery = Static<(typeof CODEMODE_TOOL_DEFS)[0]["parameters"]>;
+import type { MessagesParams } from "../agent/tools.ts";
+import type { SemanticIndex } from "./semantic.ts";
+export type MessageQuery = MessagesParams;
 
 export interface MessageDto {
 	id: number;
@@ -30,7 +30,19 @@ export interface MessageQueryResult {
 	rows: MessageDto[];
 	next_before_id: number | null;
 	next_after_id: number | null;
+	matches?: SemanticMatchDto[];
 }
+
+export interface SemanticMatchDto {
+	first_id: number;
+	last_id: number;
+	score: number;
+	/** False when the window did not fit in `limit`; fetch it with after_id/before_id. */
+	in_rows: boolean;
+}
+
+/** Ranked windows reported per semantic call, whether or not their rows fit. */
+const SEMANTIC_MATCHES = 10;
 
 export class MessageQueryError extends Error {}
 
@@ -68,7 +80,14 @@ interface Row {
 	vision: string | null;
 }
 
-export function queryMessages(db: Database, chatId: number, query: MessageQuery): MessageQueryResult {
+interface Filters {
+	where: string[];
+	args: (string | number)[];
+	/** FTS5 phrase for text_contains of indexable length; bound before `args`. */
+	indexed: string | null;
+}
+
+function filters(chatId: number, query: MessageQuery): Filters {
 	const where = ["m.chat_id = ?", "c.message_id IS NULL"];
 	const args: (string | number)[] = [chatId];
 	if (query.ids !== undefined) {
@@ -137,6 +156,21 @@ export function queryMessages(db: Database, chatId: number, query: MessageQuery)
 			args.push(pattern, pattern);
 		}
 	}
+	return { where, args, indexed };
+}
+
+const SELECT_ROWS = `SELECT m.message_id, m.date, m.edit_date, m.sender_id, m.display_name, m.username, a.alias, m.is_bot,
+	        m.text, m.caption, m.reply_to_message_id, m.quote, m.forward_origin,
+	        json_extract(m.media, '$.kind') AS media_kind, json_extract(m.media, '$.file_name') AS media_file_name,
+	        json_extract(m.media, '$.file_size') AS media_file_size, md.vision
+	 FROM messages m`;
+const JOIN_ROW_DETAILS = `LEFT JOIN telegram_control_messages c ON c.chat_id = m.chat_id AND c.message_id = m.message_id
+	 LEFT JOIN aliases a ON a.chat_id = m.chat_id AND a.user_id = m.sender_id
+	 LEFT JOIN media md ON m.media IS NOT NULL
+	      AND md.file_unique_id = CAST(json_extract(m.media, '$.file_unique_id') AS TEXT)`;
+
+export function queryMessages(db: Database, chatId: number, query: MessageQuery): MessageQueryResult {
+	const { where, args, indexed } = filters(chatId, query);
 	const order = query.order ?? "desc";
 	if (order === "relevance" && indexed == null)
 		throw new MessageQueryError("order relevance needs text_contains of at least 3 characters");
@@ -144,16 +178,9 @@ export function queryMessages(db: Database, chatId: number, query: MessageQuery)
 
 	const rows = db
 		.prepare(
-			`SELECT m.message_id, m.date, m.edit_date, m.sender_id, m.display_name, m.username, a.alias, m.is_bot,
-			        m.text, m.caption, m.reply_to_message_id, m.quote, m.forward_origin,
-			        json_extract(m.media, '$.kind') AS media_kind, json_extract(m.media, '$.file_name') AS media_file_name,
-			        json_extract(m.media, '$.file_size') AS media_file_size, md.vision
-			 FROM messages m
+			`${SELECT_ROWS}
 			 ${indexed ? "JOIN messages_fts f ON f.rowid = m.rowid AND messages_fts MATCH ?" : ""}
-			 LEFT JOIN telegram_control_messages c ON c.chat_id = m.chat_id AND c.message_id = m.message_id
-			 LEFT JOIN aliases a ON a.chat_id = m.chat_id AND a.user_id = m.sender_id
-			 LEFT JOIN media md ON m.media IS NOT NULL
-			      AND md.file_unique_id = CAST(json_extract(m.media, '$.file_unique_id') AS TEXT)
+			 ${JOIN_ROW_DETAILS}
 			 WHERE ${where.join(" AND ")}
 			 ORDER BY ${order === "relevance" ? "f.rank" : `m.message_id ${order === "desc" ? "DESC" : "ASC"}`}
 			 LIMIT ?`,
@@ -168,6 +195,72 @@ export function queryMessages(db: Database, chatId: number, query: MessageQuery)
 		next_before_id: more && order === "desc" ? last : null,
 		next_after_id: more && order === "asc" ? last : null,
 	};
+}
+
+const SEMANTIC_ONLY = new Set(["semantic", "limit"]);
+
+/**
+ * Whole conversation windows ranked by meaning. Other filters keep only windows that contain at
+ * least one matching message; rows are every non-control message of the kept windows.
+ */
+export async function semanticMessages(
+	db: Database,
+	chatId: number,
+	index: SemanticIndex,
+	query: MessageQuery & { semantic: string },
+	signal?: AbortSignal,
+): Promise<MessageQueryResult> {
+	if (query.order !== undefined)
+		throw new MessageQueryError("semantic: order is not supported; results are ranked by meaning");
+	const limit = query.limit ?? 100;
+	let candidate: ((firstId: number, lastId: number) => boolean) | null = null;
+	if (Object.entries(query).some(([key, value]) => value !== undefined && !SEMANTIC_ONLY.has(key))) {
+		const { where, args, indexed } = filters(chatId, query);
+		const ids = (
+			db
+				.prepare(
+					`SELECT m.message_id FROM messages m
+					 ${indexed ? "JOIN messages_fts f ON f.rowid = m.rowid AND messages_fts MATCH ?" : ""}
+					 ${JOIN_ROW_DETAILS}
+					 WHERE ${where.join(" AND ")} ORDER BY m.message_id`,
+				)
+				.all(...(indexed ? [indexed] : []), ...args) as { message_id: number }[]
+		).map(({ message_id }) => message_id);
+		candidate = (first, last) => {
+			// First matching id >= first; the window qualifies when it is also <= last.
+			let lo = 0;
+			let hi = ids.length;
+			while (lo < hi) {
+				const mid = (lo + hi) >> 1;
+				if (ids[mid]! < first) lo = mid + 1;
+				else hi = mid;
+			}
+			return lo < ids.length && ids[lo]! <= last;
+		};
+	}
+	const ranked = await index.search(query.semantic, SEMANTIC_MATCHES, candidate, signal);
+	const select = db.prepare(
+		`${SELECT_ROWS}
+		 ${JOIN_ROW_DETAILS}
+		 WHERE m.chat_id = ? AND c.message_id IS NULL AND m.message_id BETWEEN ? AND ?
+		 ORDER BY m.message_id`,
+	);
+	const rows: MessageDto[] = [];
+	const matches: SemanticMatchDto[] = [];
+	for (const match of ranked) {
+		let page = select.all(chatId, match.firstId, match.lastId) as unknown as Row[];
+		// The best window is always returned (truncated if needed); later ones only when they fit whole.
+		if (rows.length === 0) page = page.slice(0, limit);
+		const fits = rows.length + page.length <= limit;
+		if (fits) rows.push(...page.map(toDto));
+		matches.push({
+			first_id: match.firstId,
+			last_id: match.lastId,
+			score: Math.round(match.score * 1000) / 1000,
+			in_rows: fits,
+		});
+	}
+	return { rows, next_before_id: null, next_after_id: null, matches };
 }
 
 function toDto(row: Row): MessageDto {

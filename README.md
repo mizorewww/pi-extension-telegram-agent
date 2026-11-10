@@ -24,7 +24,7 @@ curl -fsSL https://github.com/mizorewww/pi-extension-telegram-agent/releases/lat
 - **Telegram**：supergroup ID、管理员的数字 user ID、BotFather 创建的 bot token。把 bot 加入群组，为它开启群消息读取与发言权限。
 - **模型**：Pi provider、模型、reasoning 档位，以及对应的 API key 或 OAuth 登录。已有 Pi 认证可直接用于配置。
 - **Bot**：名称、人设、接话判断模型（可选，OpenRouter Decider）、冷却时间，以及发送、搜索、脚本和工作区工具。
-- **媒体与任务**：hybrid 媒体描述、TinyFish key、研究工作流和任务并发。
+- **媒体与任务**：hybrid 媒体描述、TinyFish key、Gemini key（语义搜索）、研究工作流和任务并发。
 - **运行参数**：上下文预算、请求超时、重试、保留期，以及容器资源配额。
 
 每个配置步骤提供当前值与默认值。最终审阅会展示将要保存的设置，凭据采用隐藏输入与脱敏显示。
@@ -37,7 +37,7 @@ Pi Telegram Agent 把一个带有人设的 AI 成员放进 Telegram 群，一次
 |---|---|
 | 群聊表达 | 文字、贴纸、reaction，以及生成的图片和文件 |
 | 看图与视频 | hybrid 由聊天模型为每个媒体缓存一次描述；需要细节时 bot 用 `tg_download` 取到工作区，再用 Pi 原生 `read` 看图 |
-| 搜索与历史 | TinyFish 检索公开资料，`tg_messages` 查询群内归档 |
+| 搜索与历史 | TinyFish 检索公开资料，`tg_messages` 查询群内归档；开启 `semantic` 后可按意思找回历史对话 |
 | 编程工作区 | Pi 原生 `read`、`write`、`edit`、`bash` 在隔离容器中处理文件与数据 |
 | 后台研究 | `task` 运行工作流，`job` 执行脚本，结果回到发起对话 |
 

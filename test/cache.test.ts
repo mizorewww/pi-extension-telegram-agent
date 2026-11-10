@@ -18,6 +18,7 @@ import { buildSystemPrompt, sha256Short, CACHE_SCHEMA_VERSION, REPLY_RECOVERY_PR
 import {
 	CODEMODE_TOOL_DEFS,
 	JOB_TOOL_DEF,
+	messagesToolWithSemantic,
 	sendToolWithFiles,
 	taskToolDefinition,
 	TOOL_DEFS,
@@ -25,13 +26,14 @@ import {
 } from "../src/agent/tools.ts";
 process.env.TZ = "Asia/Singapore";
 const GOLDEN = {
-	schemaVersion: 55,
+	schemaVersion: 56,
 	systemZhTemplate: "50ffcdb70e57",
 	systemEnTemplate: "be09421b7655",
 	systemSandboxTemplate: "96efc7945c60",
 	tools: "307b029162a6",
 	codemodeTools: "99718d49e271",
 	sendWithFiles: "58ccd07cfbd9",
+	semanticMessages: "dd849b937fde",
 	taskTool: "8fcbd3a5b98d",
 	jobTool: "78e6689e8118",
 	nativeTools: "19524518f475",
@@ -91,6 +93,7 @@ test("prompt and native tool protocol hashes are stable", async () => {
 		tools: toolProtocolHash(TOOL_DEFS),
 		codemodeTools: toolProtocolHash(CODEMODE_TOOL_DEFS),
 		sendWithFiles: toolProtocolHash([sendToolWithFiles()]),
+		semanticMessages: toolProtocolHash([messagesToolWithSemantic()]),
 		taskTool: toolProtocolHash([taskToolDefinition(["search"])]),
 		jobTool: toolProtocolHash([JOB_TOOL_DEF]),
 		nativeTools: toolProtocolHash(

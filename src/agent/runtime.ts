@@ -36,6 +36,7 @@ import {
 } from "../media/sticker-catalog.ts";
 import { ensureVision, type VisionExecutor } from "../media/vision.ts";
 import type { VisionScheduler } from "../media/vision-scheduler.ts";
+import type { SemanticIndex } from "../tools/semantic.ts";
 import { log } from "../observability/log.ts";
 import type { ContextComposition, RuntimeControlSnapshot } from "../observability/usage.ts";
 import { WorkBox } from "../sandbox/box.ts";
@@ -152,6 +153,7 @@ export class BotRuntime {
 			videoTranscoder: boolean;
 			visionExecutor?: VisionExecutor;
 			visionScheduler?: VisionScheduler;
+			semantic?: SemanticIndex;
 		},
 	) {
 		this.workBox = bot.tools.sandbox && config.sandbox ? new WorkBox(config.sandbox) : null;

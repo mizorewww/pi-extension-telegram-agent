@@ -230,6 +230,49 @@ export function sendToolWithFiles() {
 	};
 }
 
+/** tg_messages plus semantic recall over indexed conversation windows (tools.semantic). */
+export function messagesToolWithSemantic() {
+	const base = CODEMODE_TOOL_DEFS[0];
+	return {
+		...base,
+		description: `${base.description}
+
+semantic 按意思找对话：用一句自然语言描述要找的内容，返回最相关的几段完整对话（rows 按相关度分段、段内按时间）；matches 列出最多 10 段的 first_id、last_id、score，in_rows=false 的段因 limit 放不下没有返回。适合只记得大概、换了说法、跨语言的回忆；记得原词、人名、品牌、型号、梗的原文时用 text_contains 更准。最近约半小时的对话还没进索引，它们本来就在上下文里。
+- 找话题：{"semantic":"有人讲过怎么自己做一套表情贴纸包","limit":40}
+- 回忆事件：{"semantic":"上次出去玩结果碰上大雨","limit":40}
+- 求推荐：{"semantic":"比较几款无线耳机的降噪效果和价格","limit":40}
+- 技术讨论：{"semantic":"路由器自己拨号以后电视盒子没信号怎么设置","limit":40}
+- 某人的经历或观点：{"semantic":"对暂停学业一年的打算","sender":"小明","limit":40}，只保留小明参与过的对话。
+- 限定时间：{"semantic":"注册云服务器一直失败","since":"2026-10-01T00:00:00+08:00","limit":40}
+- 英文描述也能找中文对话：{"semantic":"someone got liquidated on a high-leverage position","limit":40}
+- 语义缩小、关键词锁定：{"semantic":"注册失败后怎么解决的","text_contains":"某产品名","limit":40}
+- 展开上下文：某段 first_id=18400、last_id=18420，往后看 {"after_id":18420,"order":"asc","limit":40}，看起因 {"before_id":18400,"limit":20}；in_rows=false 的段用 {"after_id":first_id-1,"order":"asc","limit":40} 读出来。
+写法：写成一句完整的描述或问句（“有人讲过…”“比较…”），比两三个关键词准；一次只查一个意思，多个意思拆开查。
+score 只用于同一次结果内部排序，不同查询之间不可比，也没有“低于多少就没有”的阈值：不相关的段可能和相关的一样高分。必须读 rows 判断是否对题；内容对不上就当没找到，换个描述再查或改用 text_contains，不要把擦边的对话当答案，也不要据此断言群里从没聊过。
+不擅长：解释梗的含义（用梗原文 text_contains 查）、稀有专名、型号、链接、比喻用法、一句话带过的小细节。
+semantic 可与 sender、since、until、before_id、after_id、has_media、text_contains、reply_to、ids 组合（只保留含有符合条件消息的对话段），不能与 order 同用，没有翻页游标；limit 是返回消息总数上限，一段约 20 条，最相关的一段总会返回。`,
+		parameters: Type.Object(
+			{
+				...base.parameters.properties,
+				semantic: Type.Optional(
+					Type.String({
+						minLength: 1,
+						maxLength: 500,
+						description: "自然语言描述要找的内容，按语义相关度返回对话段；不是关键词匹配。",
+					}),
+				),
+			},
+			{ additionalProperties: false },
+		),
+		structuredOutputSchema: Type.Object({
+			...base.structuredOutputSchema.properties,
+			matches: Type.Optional(
+				Type.Array(Type.Object({ first_id: Type.Integer(), last_id: Type.Integer(), score: Type.Number() })),
+			),
+		}),
+	};
+}
+
 export function taskToolDefinition(workflows: readonly string[]) {
 	return {
 		name: "task",
@@ -257,6 +300,7 @@ export function taskToolDefinition(workflows: readonly string[]) {
 
 export type SendParams = Static<ReturnType<typeof sendToolWithFiles>["parameters"]>;
 export type SendFile = NonNullable<SendParams["files"]>[number];
+export type MessagesParams = Static<ReturnType<typeof messagesToolWithSemantic>["parameters"]>;
 export type SearchParams = Static<(typeof TOOL_DEFS)[1]["parameters"]>;
 export interface ProviderToolProtocol {
 	name: string;

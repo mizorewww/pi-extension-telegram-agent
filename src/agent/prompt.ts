@@ -1,7 +1,7 @@
 // Cache-visible protocol: changes start a new context epoch.
 import { createHash } from "node:crypto";
 
-export const CACHE_SCHEMA_VERSION = 55; // send.rich asks for complete articles in one message.
+export const CACHE_SCHEMA_VERSION = 56; // tg_messages gains semantic recall (tools.semantic).
 export const SYSTEM_NOTE_LABEL = "〔系统附注〕";
 
 interface EnabledTools {

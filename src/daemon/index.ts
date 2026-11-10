@@ -87,6 +87,7 @@ const runtime = new BotRuntime(db, bot, config, sharedModelRuntime, {
 	decider,
 	...(sharedVisionExecutor ? { visionExecutor: sharedVisionExecutor } : {}),
 	...(visionScheduler ? { visionScheduler } : {}),
+	...(semantic ? { semantic } : {}),
 	videoTranscoder,
 });
 await runtime.init();
