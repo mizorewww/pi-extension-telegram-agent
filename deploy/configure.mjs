@@ -49,6 +49,7 @@ const labels = {
 	message_event_retention_days: "消息事件保留（天）",
 	send: "允许发送消息",
 	search: "启用 TinyFish 搜索",
+	semantic: "启用群历史语义搜索（Gemini embedding，需要 Code Mode）",
 	codemode: "启用 Pi Code Mode",
 	sandbox: "启用沙箱文件/终端工具",
 	tasks: "启用 Pi 后台任务",
@@ -366,13 +367,16 @@ async function main() {
 	await fields(config.tools, properties.tools.properties, {
 		send: true,
 		search: false,
+		semantic: false,
 		codemode: false,
 		sandbox: false,
 		tasks: false,
 	});
 	if (config.tools.tasks) config.tools.sandbox = true;
+	if (config.tools.semantic) config.tools.codemode = true;
 	await fields(config, properties, { sticker_sets: [] });
 	if (config.tools.search) await secret("tiny_fish_api_key", "TinyFish API key");
+	if (config.tools.semantic) await secret("gemini_api_key", "Gemini API key");
 	print("没被点名的消息：配置接话判断模型时由它决定是否接话，否则每条都接。");
 	if (await yes("使用接话判断模型（OpenRouter Decider）？", Boolean(config.decider))) {
 		const decider = config.decider ?? { model: "openrouter/perplexity/pplx-decider-v1.2" };

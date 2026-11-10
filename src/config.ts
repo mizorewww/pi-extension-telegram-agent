@@ -1,5 +1,5 @@
 // The only configuration source: trusted `telegram.config.ts` in TG_CONFIG_DIR plus `.env`
-// (`key: value`) for Telegram/TinyFish secrets. LLM credentials stay in Pi's auth store.
+// (`key: value`) for Telegram/TinyFish/Gemini secrets. LLM credentials stay in Pi's auth store.
 // Validation collects every error and throws one ConfigError listing them all.
 
 import { readFileSync, existsSync, statSync } from "node:fs";
@@ -54,6 +54,7 @@ export const configSchema = Type.Object(
 					{
 						send: Type.Boolean(),
 						search: Type.Boolean(),
+						semantic: Type.Boolean(),
 						codemode: Type.Boolean(),
 						sandbox: Type.Boolean(),
 						tasks: Type.Boolean(),
@@ -139,7 +140,7 @@ export interface BotConfig {
 	cacheRetention: CacheRetention;
 	providerTimeoutMs: number;
 	providerRetries: number;
-	tools: { send: boolean; search: boolean; codemode: boolean; sandbox: boolean; tasks: boolean };
+	tools: { send: boolean; search: boolean; semantic: boolean; codemode: boolean; sandbox: boolean; tasks: boolean };
 	stickerSets: string[];
 }
 
@@ -157,6 +158,7 @@ export interface AppConfig {
 	groupChatId: number;
 	bot: BotConfig;
 	tinyfishApiKey: string;
+	geminiApiKey: string;
 	contextWindow: number;
 	media: { mode: MediaMode; maxPerTurn: number; concurrency: number };
 	/** Work box settings; null when the deployment has no sandbox section. */
@@ -331,6 +333,7 @@ export function loadConfig(rootDir = configDirectory(), options: LoadConfigOptio
 		tools: {
 			send: tools.send !== false,
 			search: tools.search === true,
+			semantic: tools.semantic === true,
 			codemode: tools.codemode === true,
 			sandbox: tools.sandbox === true,
 			tasks: tools.tasks === true,
@@ -340,6 +343,11 @@ export function loadConfig(rootDir = configDirectory(), options: LoadConfigOptio
 	const tinyfishApiKey = env.tiny_fish_api_key ?? "";
 	if (!identityOnly && !tinyfishApiKey && bot.tools.search)
 		errors.push('[config] tools.search: needs "tiny_fish_api_key" in .env');
+	const geminiApiKey = env.gemini_api_key ?? "";
+	if (!identityOnly && !geminiApiKey && bot.tools.semantic)
+		errors.push('[config] tools.semantic: needs "gemini_api_key" in .env');
+	if (bot.tools.semantic && !bot.tools.codemode)
+		errors.push("[config] tools.semantic: needs tools.codemode (tg_messages)");
 	if (errors.length > 0) throw new ConfigError(errors);
 
 	const dataDir = resolve(options.stateDir ?? stateDirectory());
@@ -351,6 +359,7 @@ export function loadConfig(rootDir = configDirectory(), options: LoadConfigOptio
 		groupChatId: Number(`-100${groupPeerId}`),
 		bot,
 		tinyfishApiKey,
+		geminiApiKey,
 		contextWindow,
 		media: {
 			mode: mediaMode,

@@ -78,6 +78,7 @@ export default {
 	tools: {
 		send: true,
 		search: false, // needs tiny_fish_api_key in .env
+		semantic: false, // tg_messages semantic recall; needs codemode and gemini_api_key in .env
 		codemode: false, // Pi-native JavaScript scripts that can call the other tools; off by default
 		sandbox: false, // native Pi file/shell tools in a Linux work box (needs sandbox section)
 		tasks: false, // native Pi background tasks using the work box (needs sandbox and tasks)

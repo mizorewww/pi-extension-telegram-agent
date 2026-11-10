@@ -22,6 +22,7 @@ import { createPiVisionExecutor } from "../media/vision.ts";
 import { VisionScheduler } from "../media/vision-scheduler.ts";
 import { errorCategory, log } from "../observability/log.ts";
 import { BOX_RESET_CHECK_MS, runWeeklyBoxReset } from "../sandbox/schedule.ts";
+import { SemanticIndex } from "../tools/semantic.ts";
 import { BotApi } from "../telegram/api.ts";
 import {
 	parseTelegramControlCallback,
@@ -80,6 +81,7 @@ setDaemonState(db, "bot_username", me.username);
 const identity = { userId: me.id, username: me.username, name: bot.name };
 log.info("daemon", "bot_identity_ready", { telegram_user_id: me.id, username: me.username });
 const mediaDir = join(config.dataDir, "media");
+const semantic = bot.tools.semantic ? new SemanticIndex(db, config.groupChatId, config.geminiApiKey) : null;
 const runtime = new BotRuntime(db, bot, config, sharedModelRuntime, {
 	api,
 	decider,
@@ -88,6 +90,7 @@ const runtime = new BotRuntime(db, bot, config, sharedModelRuntime, {
 	videoTranscoder,
 });
 await runtime.init();
+semantic?.start();
 async function runRetentionMaintenance(): Promise<void> {
 	const through = await runtime.admittedThrough();
 	const now = Date.now();
@@ -171,6 +174,7 @@ async function shutdown(signal: string, exitCode = 0) {
 	poller.stop();
 	clearInterval(retentionTimer);
 	clearInterval(boxResetTimer);
+	await semantic?.stop();
 	await runtime
 		.stop()
 		.catch((error: unknown) => log.warn("daemon", "runtime_stop_failed", { category: errorCategory(error) }));

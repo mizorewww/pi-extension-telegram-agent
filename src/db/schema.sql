@@ -198,3 +198,14 @@ CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE OF text, caption O
 	INSERT INTO messages_fts (messages_fts, rowid, text, caption) VALUES ('delete', old.rowid, old.text, old.caption);
 	INSERT INTO messages_fts (rowid, text, caption) VALUES (new.rowid, new.text, new.caption);
 END;
+
+-- Semantic index for tg_messages: one embedding per closed conversation window (consecutive
+-- messages split at long silences; see src/tools/semantic.ts). Messages are never deleted.
+CREATE TABLE IF NOT EXISTS message_chunks (
+	chat_id INTEGER NOT NULL,
+	first_id INTEGER NOT NULL,
+	last_id INTEGER NOT NULL,
+	model TEXT NOT NULL,
+	embedding BLOB NOT NULL, -- float32 little-endian, unit length
+	PRIMARY KEY (chat_id, first_id)
+);
