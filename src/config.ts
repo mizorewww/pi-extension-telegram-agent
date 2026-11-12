@@ -12,7 +12,7 @@ import type { ModelThinkingLevel as ThinkingLevel } from "@earendil-works/pi-ai"
 import type { BoxConfig } from "./sandbox/box.ts";
 import type { TasksConfig } from "./tasks/manager.ts";
 import { loadPiModelDefaults, type PiModelDefaults } from "./agent/model-settings.ts";
-import { DEFAULT_DECIDER_THRESHOLD } from "./agent/decider.ts";
+import { DEFAULT_DECIDER_THRESHOLD, GEMINI_DECIDER_PROVIDER } from "./agent/decider.ts";
 
 /** Pi keeps this much room for the next response; compaction_threshold must leave it free. */
 export const MIN_COMPACTION_RESERVE = 16_384;
@@ -355,6 +355,8 @@ export function loadConfig(rootDir = configDirectory(), options: LoadConfigOptio
 	const geminiApiKey = env.gemini_api_key ?? "";
 	if (!identityOnly && !geminiApiKey && bot.tools.semantic)
 		errors.push('[config] tools.semantic: needs "gemini_api_key" in .env');
+	if (!identityOnly && !geminiApiKey && bot.decider?.provider === GEMINI_DECIDER_PROVIDER)
+		errors.push('[config] decider: google models need "gemini_api_key" in .env');
 	if (bot.tools.semantic && !bot.tools.codemode)
 		errors.push("[config] tools.semantic: needs tools.codemode (tg_messages)");
 	if (errors.length > 0) throw new ConfigError(errors);

@@ -36,7 +36,7 @@ export async function main(args = process.argv.slice(2), configDir = configDirec
 				throw new PiModelConfigurationError("image_input_unsupported", bot.provider, bot.model);
 			if (bot.decider) {
 				category = "decider_unavailable";
-				createDecider(runtime, bot.decider, bot.name);
+				createDecider(runtime, bot.decider, bot.name, config.geminiApiKey);
 			}
 		}
 		process.stdout.write(

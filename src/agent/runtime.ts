@@ -34,6 +34,7 @@ import {
 	batchStickerCandidates,
 	projectStickerNotes,
 } from "../media/sticker-catalog.ts";
+import { prepareMediaImages } from "../media/prepare-images.ts";
 import { ensureVision, type VisionExecutor } from "../media/vision.ts";
 import type { VisionScheduler } from "../media/vision-scheduler.ts";
 import type { SemanticIndex } from "../tools/semantic.ts";
@@ -48,7 +49,7 @@ import { guardModels } from "./provider-guard.ts";
 import { buildBotRuntimeTools } from "./runtime-tools.ts";
 import { serializeMessageEvents, serializeMessageSegments, type MessageRow } from "./serialize.ts";
 import type { RoutingTrigger, TriggerResult, TriggerSource } from "./router.ts";
-import type { Decider } from "./decider.ts";
+import type { Decider, DeciderMedia, DeciderSlice } from "./decider.ts";
 
 export type ModelControlSelection = Pick<BotConfig, "provider" | "model" | "reasoningEffort">;
 export type ModelControlResult =
@@ -96,6 +97,9 @@ const MAX_MESSAGE_CHARS = 4_000;
 const MAX_PENDING = 64;
 /** Per decider field; the decider reads only recent lines, never the bot's context. */
 const DECIDER_SLICE_CHARS = 6_000;
+/** Newest media of the recent lines a multimodal decider sees, and how long it may wait for them. */
+const DECIDER_MAX_MEDIA = 4;
+const DECIDER_MEDIA_WAIT_MS = 3_000;
 const TRUNCATED = "\n[truncated]";
 const total = (parts: ContextComposition) => parts.system + parts.tools + parts.summary + parts.messages;
 const bounded = (text: string, limit: number) =>
@@ -372,7 +376,7 @@ export class BotRuntime {
 		this.deciding = true;
 		let probability: number | null;
 		try {
-			probability = await this.deps.decider(await this.deciderSlice());
+			probability = await this.deps.decider.decide(await this.deciderSlice(this.deps.decider.seesImages));
 		} finally {
 			this.deciding = false;
 		}
@@ -384,20 +388,55 @@ export class BotRuntime {
 		return "declined";
 	}
 
-	/** The unadmitted lines, after a few admitted ones for context. */
-	private async deciderSlice(): Promise<{ earlier: string; recent: string }> {
+	/** The unadmitted lines, after a few admitted ones for context; images of recent media on request. */
+	private async deciderSlice(withMedia: boolean): Promise<DeciderSlice> {
 		const admitted = (await this.state())!.admittedSeq;
 		const high = messageEventHighWater(this.db, this.config.groupChatId);
+		const events = (from: number, through: number, limit: number) =>
+			listRecentMessageEvents(this.db, this.config.groupChatId, from, through, limit).filter(
+				(event) => event.kind === "message" && !this.isControl(event.messageId),
+			);
 		// The newest lines matter most, so an oversized slice keeps its tail.
-		const render = (from: number, through: number, limit: number) =>
-			serializeMessageEvents(
-				this.db,
-				listRecentMessageEvents(this.db, this.config.groupChatId, from, through, limit).filter(
-					(event) => event.kind === "message" && !this.isControl(event.messageId),
-				),
-				MAX_MESSAGE_CHARS,
-			).slice(-DECIDER_SLICE_CHARS);
-		return { earlier: render(0, admitted, 6), recent: render(admitted, high, 40) };
+		const render = (list: MessageEvent[]) =>
+			serializeMessageEvents(this.db, list, MAX_MESSAGE_CHARS).slice(-DECIDER_SLICE_CHARS);
+		const recent = events(admitted, high, 40);
+		return {
+			earlier: render(events(0, admitted, 6)),
+			recent: render(recent),
+			media: withMedia ? await this.deciderMedia(recent) : [],
+		};
+	}
+
+	/** Images the decider can use within a short wait; media that is not ready stays a text placeholder. */
+	private async deciderMedia(events: MessageEvent[]): Promise<DeciderMedia[]> {
+		const wanted = events
+			.flatMap((event) => {
+				const media = (event.payload as MessageRow).media;
+				if (!media) return [];
+				const parsed = JSON.parse(media) as { kind?: string; file_unique_id?: unknown };
+				return parsed.file_unique_id
+					? [{ messageId: event.messageId, kind: parsed.kind ?? "media", id: String(parsed.file_unique_id) }]
+					: [];
+			})
+			.slice(-DECIDER_MAX_MEDIA);
+		if (wanted.length === 0) return [];
+		const signal = AbortSignal.timeout(DECIDER_MEDIA_WAIT_MS);
+		const options = {
+			cacheDir: join(this.config.dataDir, "media"),
+			videoTranscoder: this.deps.videoTranscoder,
+			signal,
+		};
+		const late = new Promise<null>((resolve) => signal.addEventListener("abort", () => resolve(null), { once: true }));
+		const settled = await Promise.all(
+			wanted.map((item) =>
+				Promise.race([prepareMediaImages(this.db, this.deps.api, item.id, options).catch(() => null), late]),
+			),
+		);
+		return wanted.flatMap((item, index) => {
+			const prepared = settled[index];
+			if (!prepared?.ok) return [];
+			return [{ messageId: item.messageId, kind: item.kind, images: prepared.images }];
+		});
 	}
 
 	async trigger(source: TriggerSource, trigger: RoutingTrigger): Promise<TriggerResult> {

@@ -59,7 +59,7 @@ if (config.media.mode === "hybrid") {
 		throw new PiModelConfigurationError("image_input_unsupported", bot.provider, bot.model, "bot");
 }
 const sharedVisionExecutor = config.media.mode === "hybrid" ? createPiVisionExecutor(sharedModelRuntime, bot) : null;
-const decider = bot.decider ? createDecider(sharedModelRuntime, bot.decider, bot.name) : null;
+const decider = bot.decider ? createDecider(sharedModelRuntime, bot.decider, bot.name, config.geminiApiKey) : null;
 const visionScheduler = sharedVisionExecutor ? new VisionScheduler(config.media.concurrency) : null;
 log.info("daemon", "bot_configured", {
 	provider: bot.provider,

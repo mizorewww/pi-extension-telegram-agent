@@ -19,7 +19,7 @@ import {
 } from "../dist/src/config.js";
 import { loadPiModelDefaults } from "../dist/src/agent/model-settings.js";
 import { assertBotModelConfigured, createInstalledPiModelRuntime } from "../dist/src/agent/model-runtime.js";
-import { createDecider, DEFAULT_DECIDER_THRESHOLD } from "../dist/src/agent/decider.js";
+import { createDecider, DEFAULT_DECIDER_THRESHOLD, GEMINI_DECIDER_PROVIDER } from "../dist/src/agent/decider.js";
 
 const directory = configDirectory(),
 	configPath = join(directory, "telegram.config.ts");
@@ -175,6 +175,7 @@ async function main() {
 	const env = parseEnvFile(join(directory, ".env")),
 		needed = {};
 	const secret = async (key, label) => {
+		if (needed[key]) return;
 		needed[key] = await ask(
 			label,
 			env[key] ?? process.env[key] ?? "",
@@ -378,11 +379,12 @@ async function main() {
 	if (config.tools.search) await secret("tiny_fish_api_key", "TinyFish API key");
 	if (config.tools.semantic) await secret("gemini_api_key", "Gemini API key");
 	print("没被点名的消息：配置接话判断模型时由它决定是否接话，否则每条都接。");
-	if (await yes("使用接话判断模型（OpenRouter Decider）？", Boolean(config.decider))) {
-		const decider = config.decider ?? { model: "openrouter/perplexity/pplx-decider-v1.2" };
+	if (await yes("使用接话判断模型（Gemini Decisions 或 Pi classifier）？", Boolean(config.decider))) {
+		const decider = config.decider ?? { model: `${GEMINI_DECIDER_PROVIDER}/gemini-decision-1` };
 		decider.model = await ask("判断模型（provider/model）", decider.model, properties.decider.properties.model);
 		const providerId = decider.model.slice(0, decider.model.indexOf("/"));
-		await authenticate(providerId, runtime.getProvider(providerId));
+		if (providerId === GEMINI_DECIDER_PROVIDER) await secret("gemini_api_key", "Gemini API key");
+		else await authenticate(providerId, runtime.getProvider(providerId));
 		decider.threshold = await ask(
 			"接话阈值（0–1，越高越安静）",
 			decider.threshold ?? DEFAULT_DECIDER_THRESHOLD,
@@ -492,7 +494,7 @@ async function main() {
 		}
 		if (bot.decider) {
 			category = "decider_unavailable";
-			createDecider(runtime, bot.decider, bot.name);
+			createDecider(runtime, bot.decider, bot.name, resolved.geminiApiKey);
 		}
 		category = "configuration_write_failed";
 		for (const [target, content] of files) atomic(target, content);

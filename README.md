@@ -23,7 +23,7 @@ curl -fsSL https://github.com/mizorewww/pi-extension-telegram-agent/releases/lat
 
 - **Telegram**：supergroup ID、管理员的数字 user ID、BotFather 创建的 bot token。把 bot 加入群组，为它开启群消息读取与发言权限。
 - **模型**：Pi provider、模型、reasoning 档位，以及对应的 API key 或 OAuth 登录。已有 Pi 认证可直接用于配置。
-- **Bot**：名称、人设、接话判断模型（可选，OpenRouter Decider）、冷却时间，以及发送、搜索、脚本和工作区工具。
+- **Bot**：名称、人设、接话判断模型（可选，默认 Gemini Decisions，也可用 Pi classifier）、冷却时间，以及发送、搜索、脚本和工作区工具。
 - **媒体与任务**：hybrid 媒体描述、TinyFish key、Gemini key（语义搜索）、研究工作流和任务并发。
 - **运行参数**：上下文预算、请求超时、重试、保留期，以及容器资源配额。
 
@@ -32,6 +32,8 @@ curl -fsSL https://github.com/mizorewww/pi-extension-telegram-agent/releases/lat
 ## 它在群里做什么
 
 Pi Telegram Agent 把一个带有人设的 AI 成员放进 Telegram 群，一次部署对应一个 bot。群友通过 @、回复或名称邀请 bot 回应；其余消息（包括其他 bot 的发言）交给一个小型判断模型决定要不要接话，它只读最近几行消息，不进入 bot 的上下文；没有配置判断模型时每条都接。
+
+判断模型默认用 `google/gemini-decision-1`（Gemini Decisions API，用 `.env` 的 `gemini_api_key`），它还会看最近几条消息里的图片、sticker 和视频截帧；也可以换成任一 Pi classifier，例如 `openrouter/perplexity/pplx-decider-v1.2`。标注好的判断示例属于部署数据，不进代码库：把 markdown 文件放进配置目录，用 `decider.examples_path` 指向它，仓库已在 `.gitignore` 忽略 `decider-examples*.md`。[示例 gist](https://gist.github.com/mizorewww/1dc8c6d7f2e5e563e79ed910c009bae9) 里有一套为 pplx-decider 调过的示例；在真实群聊上实测，Gemini 不带示例效果最好。
 
 | 能力 | 使用方式 |
 |---|---|
