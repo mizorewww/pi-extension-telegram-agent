@@ -149,6 +149,9 @@ vite.config.ts.timestamp-*
 telegram.config.ts
 bots.config.json
 
+# Decider examples are deployment data (labelled slices in the group's voice), never code.
+decider-examples*.md
+
 # Local persona prompts are private by default. Only explicit public templates are tracked.
 personas/*.md
 !personas/README.md

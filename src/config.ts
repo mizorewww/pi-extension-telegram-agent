@@ -44,6 +44,7 @@ export const configSchema = Type.Object(
 				{
 					model: Type.String({ pattern: "^[^/\\s]+/\\S+$" }),
 					threshold: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+					examples_path: Type.Optional(text),
 				},
 				{ additionalProperties: false },
 			),
@@ -122,6 +123,8 @@ export interface DeciderConfig {
 	provider: string;
 	model: string;
 	threshold: number;
+	/** Deployment-specific labelled examples (markdown), appended to the decider instructions. */
+	examplesPath: string | null;
 }
 
 export interface BotConfig {
@@ -251,6 +254,11 @@ function validate(
 	const persona = resolvePath(rootDir, raw.persona_path);
 	if (!existsSync(persona) || !statSync(persona).isFile())
 		errors.push("[config] persona_path: persona must be a readable file");
+	if (raw.decider?.examples_path) {
+		const examples = resolvePath(rootDir, raw.decider.examples_path);
+		if (!existsSync(examples) || !statSync(examples).isFile())
+			errors.push("[config] decider.examples_path: must be a readable file");
+	}
 	if (raw.tools?.sandbox && !raw.sandbox) errors.push("[config] tools.sandbox: needs sandbox configuration");
 	if (raw.tools?.tasks && (!raw.tools.sandbox || !raw.tasks))
 		errors.push("[config] tools.tasks: needs sandbox and tasks configuration");
@@ -320,6 +328,7 @@ export function loadConfig(rootDir = configDirectory(), options: LoadConfigOptio
 					provider: raw.decider.model.slice(0, deciderSlash),
 					model: raw.decider.model.slice(deciderSlash + 1),
 					threshold: raw.decider.threshold ?? DEFAULT_DECIDER_THRESHOLD,
+					examplesPath: raw.decider.examples_path ? resolvePath(rootDir, raw.decider.examples_path) : null,
 				}
 			: null,
 		provider,
