@@ -1,3 +1,10 @@
+# v1.1.9
+
+- 接话判断可以用 Gemini Decisions API：`decider.model` 写 `google/gemini-decision-1`，用 `.env` 的 `gemini_api_key`（Pi 还没有 Gemini classifier，所以直接调用）。它会看最近几条消息里最新的 4 个图片、sticker 或视频截帧，3 秒内没准备好的媒体仍按文字占位。配置向导的默认判断模型改为它。
+  - 在 400 条真实群聊切片上（看过图片后重新标注），gemini-decision-1 看图、不带示例时 ROC-AUC 0.874，pplx-decider-v1.2 为 0.847；同样约 30% 接话率下 F1 0.58 对 0.56。差异不显著，PR-AUC 仍是 pplx 高（0.68 对 0.56）。
+  - 接话阈值默认值从 0.15 改为 0.18：两种模型在 0.18 都接约 30% 的旁听消息。显式配置了 `decider.threshold` 的部署不受影响。
+- 判断示例移出代码：`decider.examples_path` 指向配置目录里的 markdown 文件，原样附在判断说明后；`decider-examples*.md` 已加入 `.gitignore`。原来代码里的 14 个示例（为 pplx-decider 调过）放在 [gist](https://gist.github.com/mizorewww/1dc8c6d7f2e5e563e79ed910c009bae9)。**继续用 pplx-decider 的部署请下载它并配置 `examples_path`，否则升级后判断不带示例。** Gemini 实测不带示例最好。
+
 # v1.1.8
 
 - 新增群历史语义搜索：开启 `tools.semantic`（需要 Code Mode，并在 `.env` 写入 `gemini_api_key`）后，`tg_messages` 多一个 `semantic` 参数，用一句话描述要找的内容，就能找回换了说法、只记得大概或跨语言的历史对话，返回原文对话段。

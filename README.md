@@ -67,7 +67,7 @@ sudo telegram-agent logs
 sudo telegram-agent debug --since 30m
 ```
 
-再次执行安装命令即可升级。已有配置会进入向导供你审阅；自动化部署可使用 `sudo bash /tmp/pi-telegram-agent-install.sh v1.1.8 --non-interactive`，由预检验证现有配置。
+再次执行安装命令即可升级。已有配置会进入向导供你审阅；自动化部署可使用 `sudo bash /tmp/pi-telegram-agent-install.sh v1.1.9 --non-interactive`，由预检验证现有配置。
 
 | 内容 | 位置与所有者 |
 |---|---|
