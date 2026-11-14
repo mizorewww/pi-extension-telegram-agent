@@ -46,6 +46,7 @@ import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
 import { DEFAULT_IMAGE_LIMITS } from "@earendil-works/pi-durable/tools";
 import { packagedDaemon } from "@earendil-works/pi-env";
 globalThis.fetch = async () => { throw new Error("Release smoke must stay offline"); };
+await import("./dist/src/net/http.js");
 await import("./dist/src/agent/runtime.js");
 const sandbox = new CodemodeSandbox({ timeoutMs: 10000 });
 try { const result = await sandbox.execute("return 6 * 7"); assert.equal(result.ok, true); assert.equal(result.value, 42); }
