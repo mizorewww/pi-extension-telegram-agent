@@ -29,10 +29,12 @@ import type { BotApi } from "../telegram/api.ts";
 import { queryMessages, semanticMessages } from "../tools/messages.ts";
 import type { SemanticIndex } from "../tools/semantic.ts";
 import { runTinyFishTool } from "../tools/search.ts";
+import { addCron, describeCrons, removeCron } from "./cron.ts";
 import { telegramCodemode } from "./extensions/codemode.ts";
 import { executeAgentSend } from "./send.ts";
 import {
 	CODEMODE_TOOL_DEFS,
+	CRON_TOOL_DEF,
 	messagesToolWithSemantic,
 	JOB_TOOL_DEF,
 	MAX_SENDS_PER_TURN,
@@ -135,6 +137,21 @@ export async function buildBotRuntimeTools(
 				executionMode: "sequential",
 				replay: "unsafe",
 				execute: (args, api, context) => send(host, args, api, context),
+			}),
+			defineTool({
+				...CRON_TOOL_DEF,
+				callers: ["model", "tools"],
+				executionMode: "sequential",
+				replay: "unsafe",
+				execute: async (args) => {
+					if (args.remove)
+						return output(removeCron(host.db, args.remove) ? `removed ${args.remove}` : "unknown cron id");
+					if (args.schedule || args.prompt) {
+						if (!args.schedule || !args.prompt) throw new Error("add needs both schedule and prompt");
+						return output(addCron(host.db, args.schedule, args.prompt));
+					}
+					return output(describeCrons(host.db) || "no cron jobs");
+				},
 			}),
 		);
 	if (host.bot.tools.search)

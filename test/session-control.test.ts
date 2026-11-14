@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { configDirectory, defaultConfigPath, loadConfig, stateDirectory } from "../src/config.ts";
 import { updateBotModelConfig } from "../src/onboarding/config-core.ts";
+import { addCron, describeCrons, parseSchedule, removeCron, tickCrons } from "../src/agent/cron.ts";
 import { openDb } from "../src/db/db.ts";
 import {
 	consumedControlMessageIds,
@@ -131,9 +132,10 @@ test("mutating control commands require a human admin and never reach the provid
 		assert.match((await service.handle(command(5, { id: 99 }, "/task cancel t1"))).text!, /权限不足/);
 		assert.deepEqual(cancelled, []);
 		assert.match((await service.handle(command(6, { id: 42 }, "/task cancel t1"))).text!, /已取消 t1/);
-		assert.deepEqual(cancelled, ["t1"]);
+		assert.match((await service.handle(command(8, { id: 42 }, "/task cancel c2"))).text!, /已取消 c2/);
+		assert.deepEqual(cancelled, ["t1", "c2"]);
 		// Every command message is excluded from provider context, whatever its outcome.
-		assert.deepEqual(consumedControlMessageIds(db, CHAT), new Set([1, 2, 3, 4, 5, 6]));
+		assert.deepEqual(consumedControlMessageIds(db, CHAT), new Set([1, 2, 3, 4, 5, 6, 8]));
 		// A command addressed to another bot is not ours to answer.
 		assert.equal(
 			parseTelegramControlCommand(
@@ -167,6 +169,20 @@ test("mutating control commands require a human admin and never reach the provid
 		assert.match((await service.handle(callback(42))).callbackNotice!, /菜单已失效/);
 		service.consumeReply(CHAT, 100);
 		assert.match((await service.handle(callback(99))).callbackNotice!, /权限不足/);
+		const now = Date.parse("2026-11-14T08:30:00Z");
+		assert.deepEqual(parseSchedule("15m", now), { next: now + 15 * 60_000, once: true });
+		assert.deepEqual(parseSchedule("0 9 * * *", now), {
+			next: Date.parse("2026-11-14T09:00:00Z"),
+			once: false,
+		});
+		assert.match(addCron(db, "30m", "check oven"), /^c1 scheduled/);
+		assert.match(describeCrons(db), /^c1 \[once -> /);
+		let fired = 0;
+		tickCrons(db, () => Boolean(++fired), Date.now() + 31 * 60_000);
+		assert.equal(fired, 1);
+		assert.equal(describeCrons(db), "");
+		assert.match(addCron(db, "0 9 * * *", "morning news"), /^c2 scheduled/);
+		assert.equal(removeCron(db, "c2"), true);
 	} finally {
 		db.close();
 	}

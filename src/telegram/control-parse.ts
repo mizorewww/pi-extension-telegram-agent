@@ -28,7 +28,7 @@ export const CONTROL_COMMANDS = [
 	["model", "选择 Pi 可用模型（管理员）", "/model（管理员）"],
 	["compact", "压缩上下文（管理员）", "/compact（管理员）"],
 	["new", "开启新会话（管理员）", "/new（管理员）"],
-	["task", "后台任务与用量", "/task [status] · /task cancel <tN>（管理员）"],
+	["task", "后台任务与定时任务", "/task [status] · /task cancel <tN|cN>（管理员）"],
 	["box", "清空工作区（管理员）", "/box reset（管理员）"],
 ] as const;
 export type TelegramControlCommandToken = (typeof CONTROL_COMMANDS)[number][0];
@@ -130,7 +130,7 @@ function parseControlArguments(command: TelegramControlCommandToken, input: stri
 	if (command === "task") {
 		if (tokens.length === 0 || (tokens.length === 1 && tokens[0]!.toLowerCase() === "status"))
 			return { kind: "task_status" };
-		return tokens.length === 2 && tokens[0]!.toLowerCase() === "cancel" && /^t\d+$/.test(tokens[1]!)
+		return tokens.length === 2 && tokens[0]!.toLowerCase() === "cancel" && /^[tc]\d+$/.test(tokens[1]!)
 			? { kind: "task_cancel", taskId: tokens[1]! }
 			: { kind: "usage" };
 	}
@@ -187,5 +187,5 @@ export const HELP_TEXT = [
 	"手动 compact 使用 Pi 当前会话模型压缩上下文并产生相应费用。",
 	"/new 丢弃当前上下文开启新会话（历史保留在 Pi 数据库），之前的群消息不再可见。",
 	"/box reset 清空 bot 的工作区（每周一 05:00 也会自动清空）。",
-	"/task 列出 bot 最近的后台任务和用量，/task cancel tN 停止一个任务。",
+	"/task 列出后台任务与定时任务，/task cancel tN|cN 取消任务或定时。",
 ].join("\n");

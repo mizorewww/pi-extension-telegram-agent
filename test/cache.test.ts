@@ -17,6 +17,7 @@ import { serializeMessageEvents, type MessageRow } from "../src/agent/serialize.
 import { buildSystemPrompt, sha256Short, CACHE_SCHEMA_VERSION, REPLY_RECOVERY_PROMPT } from "../src/agent/prompt.ts";
 import {
 	CODEMODE_TOOL_DEFS,
+	CRON_TOOL_DEF,
 	JOB_TOOL_DEF,
 	messagesToolWithSemantic,
 	sendToolWithFiles,
@@ -26,7 +27,7 @@ import {
 } from "../src/agent/tools.ts";
 process.env.TZ = "Asia/Singapore";
 const GOLDEN = {
-	schemaVersion: 57,
+	schemaVersion: 58,
 	systemZhTemplate: "50ffcdb70e57",
 	systemEnTemplate: "be09421b7655",
 	systemSandboxTemplate: "96efc7945c60",
@@ -34,11 +35,12 @@ const GOLDEN = {
 	codemodeTools: "1c81904886d7",
 	sendWithFiles: "86842ebf2fdb",
 	semanticMessages: "9f6683bc3ff0",
+	cronTool: "ff11c12a1a4e",
 	taskTool: "95b11f2e76f5",
 	jobTool: "fa836a87d7f2",
 	nativeTools: "19524518f475",
-	fixedOfferedTools: "fddee061183f",
-	fixedCodemodeSection: "3745e9a802d5",
+	fixedOfferedTools: "6debf298f680",
+	fixedCodemodeSection: "c00d71c8c0f1",
 	replyRecovery: "4fc7e277e338",
 	eventSerialize: "a05c0584eb08",
 	boundedBatchSerialize: "0311b765bbce",
@@ -94,6 +96,7 @@ test("prompt and native tool protocol hashes are stable", async () => {
 		codemodeTools: toolProtocolHash(CODEMODE_TOOL_DEFS),
 		sendWithFiles: toolProtocolHash([sendToolWithFiles()]),
 		semanticMessages: toolProtocolHash([messagesToolWithSemantic()]),
+		cronTool: toolProtocolHash([CRON_TOOL_DEF]),
 		taskTool: toolProtocolHash([taskToolDefinition(["search"])]),
 		jobTool: toolProtocolHash([JOB_TOOL_DEF]),
 		nativeTools: toolProtocolHash(

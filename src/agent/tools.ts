@@ -178,6 +178,19 @@ export const CODEMODE_TOOL_DEFS = [
 	},
 ] as const;
 
+export const CRON_TOOL_DEF = {
+	name: "cron",
+	description:
+		"管理本群定时提醒与周期任务（重启与 /new 后保留）。无参数列出当前项；传 remove 删除对应 cN；传 schedule 与 prompt 新增（schedule 支持相对时长如 15m/2h/1d、带时区 ISO 时间、或本机时区 5 段 cron 分 时 日 月 周）。到点以 [系统] [cron cN] 唤醒你执行 prompt，需公开发言时调用 send。",
+	parameters: obj({
+		schedule: opt(str({ minLength: 2, maxLength: 64, description: "如 15m、2026-11-15T09:00:00+08:00 或 0 9 * * *" })),
+		prompt: opt(
+			str({ minLength: 1, maxLength: 2000, description: "到点唤醒你时执行的自包含指令，提醒某人时写明 #id" }),
+		),
+		remove: opt(str({ description: "删除指定定时任务 ID，如 c1" })),
+	}),
+};
+
 export const JOB_TOOL_DEF = {
 	name: "job",
 	description:

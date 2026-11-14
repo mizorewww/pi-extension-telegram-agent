@@ -45,6 +45,7 @@ import { WorkBox } from "../sandbox/box.ts";
 import type { TaskManager } from "../tasks/manager.ts";
 import { TelegramTypingLease } from "../telegram/activity.ts";
 import { type BotApi, groupReactionAllowlist } from "../telegram/api.ts";
+import { describeCrons, removeCron, tickCrons, type CronJob } from "./cron.ts";
 import { buildSystemPrompt, CACHE_SCHEMA_VERSION, REPLY_RECOVERY_PROMPT, sha256Short } from "./prompt.ts";
 import { guardModels } from "./provider-guard.ts";
 import { buildBotRuntimeTools } from "./runtime-tools.ts";
@@ -135,6 +136,7 @@ export class BotRuntime {
 	private ambientPending: RoutingTrigger | null = null;
 	private deciding = false;
 	private cooldownTimer: ReturnType<typeof setTimeout> | null = null;
+	private cronTimer: ReturnType<typeof setInterval> | null = null;
 	private lastCompact: RuntimeControlSnapshot["lastCompact"] = null;
 	private reactions: ReadonlySet<string> | null = null;
 	private readonly typing: TelegramTypingLease;
@@ -272,6 +274,12 @@ export class BotRuntime {
 		if (state.fingerprint && state.fingerprint !== fingerprint) await this.reset(false);
 		await this.configureModel(this.bot);
 		this.harness.resume();
+		if (this.bot.tools.send) {
+			const tick = () => tickCrons(this.db, (job) => this.fireCron(job));
+			tick();
+			this.cronTimer = setInterval(tick, 15_000);
+			this.cronTimer.unref();
+		}
 	}
 
 	/** Catalog descriptions refresh only when the context restarts anyway; otherwise a restart would reset it. */
@@ -773,10 +781,28 @@ export class BotRuntime {
 		}
 	}
 
+	private fireCron(job: CronJob): boolean {
+		if (this.stopping || this.changing) return false;
+		void this.conversation
+			.submit(
+				{
+					type: "input",
+					requestId: `cron:${job.id}:${job.next}`,
+					whenBusy: "followUp",
+					content: `[系统] [cron ${job.id} · ${job.schedule}] ${job.prompt}`,
+				},
+				context,
+			)
+			.catch(() => log.warn("cron", "fire_failed", { category: "local_failure" }));
+		return true;
+	}
 	async taskStatusForControl(): Promise<string | null> {
-		return this.tasks?.describe() ?? null;
+		const crons = this.bot.tools.send ? describeCrons(this.db) : "";
+		const parts = [await this.tasks?.describe(), crons].filter(Boolean);
+		return parts.length ? parts.join("\n") : this.bot.tools.send ? "no tasks or cron jobs" : null;
 	}
 	async cancelTaskForControl(id: string): Promise<{ ok: true } | { ok: false; code: "unavailable" | "unknown_task" }> {
+		if (id.startsWith("c")) return removeCron(this.db, id) ? { ok: true } : { ok: false, code: "unknown_task" };
 		return this.tasks && (await this.tasks.cancel(id))
 			? { ok: true }
 			: { ok: false, code: this.tasks ? "unknown_task" : "unavailable" };
@@ -814,6 +840,7 @@ export class BotRuntime {
 	async stop(): Promise<void> {
 		this.stopping = true;
 		this.typing.stop();
+		if (this.cronTimer) clearInterval(this.cronTimer);
 		if (this.cooldownTimer) clearTimeout(this.cooldownTimer);
 		try {
 			await this.harness?.close(context);
