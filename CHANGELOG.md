@@ -1,3 +1,7 @@
+# v1.1.11
+
+- 删除自建缓存保温器、自定义 HTTP 连接池包装、未使用的视觉/搜索遥测回调管道、控制命令冗余协调层与已过期的 v1.0 多 bot 数据库迁移代码，移除 `undici` 顶层依赖，较 v1.1.9 净删约 250 行代码。
+
 # v1.1.10
 
 - 升级 Pi 各包到 1.5.2，统一迁移配置与工具声明到 `@earendil-works/pi-schema`，移除 `typebox`、`@earendil-works/pi-tui`、`@earendil-works/pi-agent-core` 顶层依赖。cache schema 升到 57，升级后开启新会话。
