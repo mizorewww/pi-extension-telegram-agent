@@ -13,6 +13,7 @@ import {
 	defineExtension,
 	GenerationTask,
 	hook,
+	InboxDoc,
 	LiveDoc,
 	type Conversation,
 	type EntryRecord,
@@ -47,13 +48,7 @@ import { type BotApi, groupReactionAllowlist } from "../telegram/api.ts";
 import { buildSystemPrompt, CACHE_SCHEMA_VERSION, REPLY_RECOVERY_PROMPT, sha256Short } from "./prompt.ts";
 import { guardModels } from "./provider-guard.ts";
 import { buildBotRuntimeTools } from "./runtime-tools.ts";
-import {
-	boundedText,
-	serializeMessageEvents,
-	serializeMessageSegments,
-	TRUNCATED,
-	type MessageRow,
-} from "./serialize.ts";
+import { boundedText, serializeMessageEvents, serializeMessageSegments, type MessageRow } from "./serialize.ts";
 import type { RoutingTrigger, TriggerResult, TriggerSource } from "./router.ts";
 import type { Decider, DeciderMedia, DeciderSlice } from "./decider.ts";
 
@@ -182,7 +177,7 @@ export class BotRuntime {
 			conversation: () => this.conversation,
 			allowedReactions: () => this.reactions,
 			currentMessage: (_api, ctx) => this.currentMessage(ctx),
-			recordSend: (_api, ctx) => this.recordSend(ctx),
+			recordSend: (ctx) => this.recordSend(ctx),
 			recordEvent: (kind) => log.info("agent", kind),
 			resetBox: (reason) => this.resetBox(reason),
 		});
@@ -248,7 +243,7 @@ export class BotRuntime {
 						keepRecentTokens: Math.min(this.bot.compactionKeepRecent, Math.floor((this.contextWindow() - 16_384) / 2)),
 						backgroundTokens: 0,
 					},
-					afterFailedRun: "keep",
+					afterFailedRun: "continue",
 					steeringMode: "all",
 					followUpMode: "all",
 				}),
@@ -605,14 +600,18 @@ export class BotRuntime {
 	}
 
 	private async recordSend(ctx: Context): Promise<void> {
-		const visible = (await this.conversation.context(ctx)).messages
-			.filter((message) => message.role === "user")
-			.map((message) => contentText(message.content));
 		await this.conversation.commit(async (tx) => {
 			const state = await tx.doc(TelegramState, this.conversation.id);
-			for (const [id, text] of Object.entries(state.pending)) {
-				const seenText = text.endsWith(TRUNCATED) ? text.slice(0, -TRUNCATED.length) : text;
-				if (visible.some((message) => message.includes(seenText))) delete state.pending[id];
+			const inbox = await tx.doc(InboxDoc, this.conversation.id);
+			const queued = new Set(
+				inbox.items.flatMap((item) => {
+					if (item.mode === "write") return [];
+					const id = (item.entry?.data as { messageId?: number } | undefined)?.messageId;
+					return id == null ? [] : [String(id)];
+				}),
+			);
+			for (const id of Object.keys(state.pending)) {
+				if (!queued.has(id)) delete state.pending[id];
 			}
 		}, ctx);
 	}

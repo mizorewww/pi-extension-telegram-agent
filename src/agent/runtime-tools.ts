@@ -2,7 +2,7 @@
 import type { Database } from "../db/db.ts";
 import type { Context } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord/json";
-import { createCodingTools } from "@earendil-works/pi-durable/tools";
+import { createBashTool, createCodingTools } from "@earendil-works/pi-durable/tools";
 import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
 import {
 	defineDoc,
@@ -11,10 +11,10 @@ import {
 	hook,
 	LiveDoc,
 	ToolTask,
+	wrapTool,
 	type Conversation,
 	type Extension,
 	type Harness,
-	type HookApi,
 	type ToolExecutionApi,
 	type ToolRegistration,
 	type ToolTaskCheckpoint,
@@ -54,11 +54,7 @@ export interface BotRuntimeToolHost {
 	conversation(): Conversation;
 	allowedReactions(): ReadonlySet<string> | null;
 	currentMessage(api: ToolExecutionApi, context: Context): Promise<number | null>;
-	recordSend(
-		api: Pick<HookApi, "taskId" | "conversationId">,
-		context: Context,
-		outcome: "sent" | "unknown",
-	): Promise<void>;
+	recordSend(context: Context): Promise<void>;
 	recordEvent(kind: string, payload: unknown): void;
 	resetBox(reason: "tool"): Promise<void>;
 }
@@ -103,11 +99,7 @@ async function send(host: BotRuntimeToolHost, params: SendParams, api: ToolExecu
 	if ("outcome" in result.details || result.details.sent.length) {
 		// A failed local receipt cannot make a committed/unknown Telegram create retryable.
 		try {
-			await host.recordSend(
-				api,
-				context,
-				"outcome" in result.details && result.details.outcome === "unknown" ? "unknown" : "sent",
-			);
+			await host.recordSend(context);
 		} catch {
 			host.recordEvent("send_receipt_failed", { category: "local_failure" });
 		}
@@ -263,16 +255,20 @@ export async function buildBotRuntimeTools(
 		defineExtension({
 			name: "telegram-tools",
 			tools,
+			wraps: [
+				wrapTool(createBashTool(), (bash) => ({
+					...bash,
+					execute: (args, api, context) =>
+						bash.execute(
+							{ ...args, timeout: Math.min(600, typeof args.timeout === "number" ? args.timeout : 60) },
+							api,
+							context,
+						),
+				})),
+			],
 			hooks: [
 				hook(ToolTask, {
 					beforeTool: async (call, api, context) => {
-						if (call.name === "bash")
-							return {
-								arguments: {
-									...call.arguments,
-									timeout: Math.min(600, typeof call.arguments.timeout === "number" ? call.arguments.timeout : 60),
-								},
-							};
 						if (call.name !== "send") return;
 						const live = await host.harness().snapshot(LiveDoc, api.conversationId, context);
 						const count = await host.harness().snapshot(SendCount, api.conversationId, context);
@@ -296,7 +292,7 @@ export async function buildBotRuntimeTools(
 							state.run = run;
 							state.blocked = true;
 						}, context);
-						await host.recordSend(api, context, "unknown");
+						await host.recordSend(context);
 						return interrupted
 							? {
 									output: [{ type: "text", text: "no_retry" }],

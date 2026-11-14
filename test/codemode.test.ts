@@ -86,3 +86,32 @@ test("nested send does not prematurely terminate its code mode script", { timeou
 	assert.match(result.text, /both sent/);
 	assert.equal(result.requests, 2);
 });
+
+test("concurrent code mode scripts queue instead of failing worker limit", { timeout: 30_000 }, async () => {
+	const models = createModels();
+	const faux = fauxProvider({ tokensPerSecond: 100_000 });
+	models.setProvider(faux.provider);
+	faux.setResponses([
+		fauxAssistantMessage(
+			Array.from({ length: 6 }, (_, i) => fauxToolCall("codemode", { code: `return ${i + 1}` })),
+			{ stopReason: "toolUse" },
+		),
+		fauxAssistantMessage("done"),
+	]);
+	const registry = createRegistry();
+	registry.install(telegramCodemode());
+	const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+	try {
+		const root = await harness.root(BACKGROUND_CONTEXT, {
+			agent: { model: { provider: faux.provider.id, modelId: faux.models[0].id } },
+		});
+		await (await root.submit({ type: "input", content: "go" }, BACKGROUND_CONTEXT)).wait(BACKGROUND_CONTEXT);
+		const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(
+			(message) => message.role === "toolResult" && message.toolName === "codemode",
+		);
+		assert.equal(results.length, 6);
+		assert.ok(results.every((message) => message.role === "toolResult" && !message.isError));
+	} finally {
+		await harness.close(BACKGROUND_CONTEXT);
+	}
+});

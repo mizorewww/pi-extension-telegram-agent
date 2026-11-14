@@ -2,17 +2,20 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
-import type { Message } from "@earendil-works/pi-ai";
+import { contentText } from "@earendil-works/pi-ai";
 import {
 	AssistantEntry,
 	configure,
+	type Conversation,
+	type ConversationHandle,
+	type ConversationId,
 	defineDoc,
 	defineExtension,
 	defineTask,
 	defineTool,
-	type Conversation,
-	type ConversationId,
 	type Harness,
+	type SettledSubmissionRecord,
+	type Submission,
 	type TaskId,
 	type ToolExecutionApi,
 	ToolTask,
@@ -34,6 +37,7 @@ type TaskInfo = {
 	kind: "task" | "job";
 	phase: Phase;
 	reporter: TaskId;
+	deadline?: TaskId;
 	lastProgress: number;
 };
 const Tasks = defineDoc<{ items: Record<string, TaskInfo> }>({
@@ -63,12 +67,9 @@ const Admission = defineDoc<{ result: string | null }>({
 	checkpointWhen: () => false,
 });
 const terminal = (phase: Phase) => phase === "done" || phase === "failed" || phase === "cancelled";
-const textOf = (message?: Message) =>
-	typeof message?.content === "string"
-		? message.content
-		: (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
 const finished = { status: "terminal", outcome: { status: "completed", result: null } } as const;
 const aborted = { status: "terminal", outcome: { status: "aborted" } } as const;
+
 const Anchor = defineTask<null, { phase: "done" }, null>({
 	name: "telegram.task-anchor",
 	version: 1,
@@ -76,6 +77,39 @@ const Anchor = defineTask<null, { phase: "done" }, null>({
 	phases: { done: (_task, runtime, context) => runtime.commit(() => finished, context) },
 	abort: (_task, runtime, context) => runtime.commit(() => aborted, context),
 });
+
+function pause(runtime: { setTimer(callback: () => void, delayMs: number): () => void }, ms: number, context: Context) {
+	return new Promise<void>((resolve, reject) => {
+		const signal = context.abortSignal;
+		if (signal?.aborted) return reject(signal.reason);
+		const onAbort = () => {
+			disarm();
+			reject(signal?.reason);
+		};
+		const disarm = runtime.setTimer(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+async function settledOrWithdrawn(
+	submission: Submission,
+	subagent: ConversationHandle,
+	waitPause: () => Promise<void>,
+	context: Context,
+): Promise<SettledSubmissionRecord | undefined> {
+	const settled = submission.wait(context);
+	for (;;) {
+		const idle = subagent.waitForIdle(context).then(() => true);
+		if (!(await Promise.race([settled.then(() => false), idle]))) return settled;
+		if ((await submission.status(context)).status !== "queued") return settled;
+		await waitPause();
+		if ((await submission.status(context)).status !== "queued") return settled;
+		if ((await submission.abort(context)) === "aborted") return undefined;
+	}
+}
 
 function reportInput(id: string, row: TaskInfo, phase: Phase | "progress", text: string, requestId: string) {
 	return {
@@ -99,8 +133,8 @@ const Reporter = defineTask<
 	initial: () => ({ phase: "deliver" }),
 	phases: {
 		deliver: async (task, runtime, context) => {
-			const row = (await runtime.snapshot(Tasks, runtime.conversationId, context))!.items[task.input.id]!;
-			if (terminal(row.phase)) return runtime.commit(() => finished, context);
+			const row = (await runtime.snapshot(Tasks, runtime.conversationId, context))?.items[task.input.id];
+			if (!row || terminal(row.phase)) return runtime.commit(() => finished, context);
 			if (row.kind === "job") {
 				const agent = await runtime.agent(context);
 				const model = runtime.models.getModel(agent.model!.provider, agent.model!.modelId)!;
@@ -142,25 +176,30 @@ const Reporter = defineTask<
 				{ type: "input", content: task.input.content, requestId: `task-input:${task.id}`, whenBusy: "steer" },
 				context,
 			);
-			const result = await submission.wait(context);
+			const result = await settledOrWithdrawn(submission, child, () => pause(runtime, 1_000, context), context);
 			await runtime.commit(async (tx) => {
-				const current = (await tx.doc(Tasks, runtime.conversationId)).items[task.input.id]!;
-				if (current.phase !== "running" || current.reporter !== task.id) return finished;
+				const current = (await tx.doc(Tasks, runtime.conversationId)).items[task.input.id];
+				if (!current || current.phase !== "running" || current.reporter !== task.id) return finished;
 				const answer =
-					result.status === "done" && result.type === "input"
+					result?.status === "done" && result.type === "input"
 						? await tx.entry(AssistantEntry, result.answer)
 						: undefined;
-				const text = answer ? textOf(answer.model?.[0]) : result.status === "unanswered" ? result.reason : "No result";
+				const text = answer?.model?.[0]
+					? contentText(answer.model[0].content)
+					: result?.status === "unanswered"
+						? result.reason
+						: "No result";
 				return { status: "running", checkpoint: { phase: "report", text, status: answer ? "done" : "failed" } };
 			}, context);
 		},
 		wait: async (task, runtime, context) => {
 			const result = await runtime.waitForTask(task.state.checkpoint.execution, context);
 			const receipt = result.state.outcome.status === "completed" ? result.state.outcome.result : undefined;
-			const row = (await runtime.snapshot(Tasks, runtime.conversationId, context))!.items[task.input.id]!;
+			const row = (await runtime.snapshot(Tasks, runtime.conversationId, context))?.items[task.input.id];
+			if (!row) return runtime.commit(() => finished, context);
 			const entry =
 				receipt?.kind === "model"
-					? (await runtime.context(row.child, context)).entries.find((entry) => entry.id === receipt.entryId)
+					? (await runtime.context(row.child, context)).entries.find((item) => item.id === receipt.entryId)
 					: undefined;
 			const message = entry?.model?.[0];
 			await runtime.commit(
@@ -168,7 +207,7 @@ const Reporter = defineTask<
 					status: "running",
 					checkpoint: {
 						phase: "report",
-						text: textOf(message) || "Script interrupted",
+						text: (message ? contentText(message.content) : "") || "Script interrupted",
 						status: message?.role === "toolResult" && !message.isError ? "done" : "failed",
 					},
 				}),
@@ -178,8 +217,8 @@ const Reporter = defineTask<
 		report: async (task, runtime, context) => {
 			const main = (await runtime.conversation(runtime.conversationId, context))!;
 			await runtime.commit(async (tx) => {
-				const row = (await tx.doc(Tasks, runtime.conversationId)).items[task.input.id]!;
-				if (terminal(row.phase) || row.reporter !== task.id) return finished;
+				const row = (await tx.doc(Tasks, runtime.conversationId)).items[task.input.id];
+				if (!row || terminal(row.phase) || row.reporter !== task.id) return finished;
 				const result = task.state.checkpoint;
 				await main.submit(tx, reportInput(task.input.id, row, result.status, result.text, `task-result:${task.id}`));
 				row.phase = result.status;
@@ -197,21 +236,23 @@ const Deadline = defineTask<{ id: string; at: number }, { phase: "sleep" } | { p
 	phases: {
 		sleep: (task, runtime, context) => runtime.sleepUntil(task.input.at, { phase: "expire" }, context),
 		expire: async (task, runtime, context) => {
-			const row = (await runtime.snapshot(Tasks, runtime.conversationId, context))!.items[task.input.id];
-			if (row) {
+			const row = (await runtime.snapshot(Tasks, runtime.conversationId, context))?.items[task.input.id];
+			if (row && !terminal(row.phase)) {
 				const main = (await runtime.conversation(runtime.conversationId, context))!;
+				let expired = false;
 				await runtime.commit(async (tx) => {
-					const current = (await tx.doc(Tasks, runtime.conversationId)).items[task.input.id]!;
-					if (!terminal(current.phase)) {
+					const current = (await tx.doc(Tasks, runtime.conversationId)).items[task.input.id];
+					if (current && !terminal(current.phase)) {
 						await main.submit(
 							tx,
 							reportInput(task.input.id, current, "failed", "Task deadline exceeded", `task-deadline:${task.input.id}`),
 						);
 						current.phase = "failed";
+						expired = true;
 					}
 					return undefined;
 				}, context);
-				await (await runtime.conversation(row.child, context))!.abort(context);
+				if (expired) await (await runtime.conversation(row.child, context))?.abort(context);
 			}
 			await runtime.commit(() => finished, context);
 		},
@@ -235,8 +276,8 @@ const reportTool = defineTool({
 		if (!child?.parent) throw new Error("report is only available inside a task");
 		const parent = (await api.conversation(child.parent, context))!;
 		await api.commit(async (tx) => {
-			const row = (await tx.doc(Tasks, child.parent!)).items[child.id]!;
-			if (terminal(row.phase) || (args.kind === "progress" && api.now() - row.lastProgress < 300_000)) return;
+			const row = (await tx.doc(Tasks, child.parent!)).items[child.id];
+			if (!row || terminal(row.phase) || (args.kind === "progress" && api.now() - row.lastProgress < 300_000)) return;
 			await parent.submit(tx, reportInput(child.id, row, args.kind, args.text, `task-report:${api.taskId}`));
 			row.phase = args.kind === "progress" ? "running" : args.kind;
 			row.lastProgress = api.now();
@@ -283,9 +324,16 @@ export class TaskManager {
 		return lines.join("\n") || "no tasks yet";
 	}
 	async clear(): Promise<void> {
+		const existing = Object.values(await this.rows());
 		await this.conversation().commit(async (tx) => {
 			(await tx.doc(Tasks, this.conversation().id)).items = {};
 		}, BACKGROUND_CONTEXT);
+		for (const row of existing) {
+			if (terminal(row.phase)) continue;
+			await this.harness().abortTask(row.reporter, BACKGROUND_CONTEXT);
+			if (row.deadline) await this.harness().abortTask(row.deadline, BACKGROUND_CONTEXT);
+			await (await this.harness().conversation(row.child, BACKGROUND_CONTEXT))?.abort(BACKGROUND_CONTEXT);
+		}
 	}
 
 	async start(
@@ -336,7 +384,8 @@ export class TaskManager {
 			const meta = await tx.doc(Child, child.id);
 			meta.parent = api.conversationId;
 			meta.id = id;
-			const deadline = api.now() + (kind === "job" ? 3_600_000 : this.config!.timeoutMs);
+			const deadlineAt = api.now() + (kind === "job" ? 3_600_000 : this.config!.timeoutMs);
+			const deadline = await tx.createTask(Deadline, { id, at: deadlineAt }, background);
 			state.items[id] = {
 				child: child.id,
 				origin,
@@ -344,22 +393,21 @@ export class TaskManager {
 				kind,
 				phase: "running",
 				reporter: await tx.createTask(Reporter, { id, content }, background),
+				deadline,
 				lastProgress: 0,
 			};
-			await tx.createTask(Deadline, { id, at: deadline }, background);
 			admission.result = id;
 			return id;
 		}, context);
 	}
 	async message(id: string, content: string, api: ToolExecutionApi, context: Context): Promise<void> {
-		const maxTurns = (await api.agent(context)).maxTurns ?? null;
 		await api.commit(async (tx) => {
 			const admission = await tx.doc(Admission, api.taskId);
 			if (admission.result) return;
 			const row = (await tx.doc(Tasks, api.conversationId)).items[id];
 			if (!row || row.kind !== "task" || terminal(row.phase)) throw new Error("no active task with this id");
 			row.phase = "running";
-			await configure(tx, row.child, { maxTurns });
+			await configure(tx, row.child, { maxTurns: null });
 			row.reporter = await tx.createTask(
 				Reporter,
 				{ id, content },
@@ -369,18 +417,22 @@ export class TaskManager {
 		}, context);
 	}
 	async cancel(id: string): Promise<boolean> {
-		const row = (await this.rows())[id];
-		if (!row || terminal(row.phase)) return false;
+		let target: { child: ConversationId; reporter: TaskId; deadline?: TaskId } | null = null;
 		await this.conversation().commit(async (tx) => {
-			const current = (await tx.doc(Tasks, this.conversation().id)).items[id]!;
+			const current = (await tx.doc(Tasks, this.conversation().id)).items[id];
+			if (!current || terminal(current.phase)) return;
 			await this.conversation().submit(
 				tx,
 				reportInput(id, current, "cancelled", "Cancelled by request", `task-cancel:${id}`),
 			);
 			current.phase = "cancelled";
-			await tx.createTask(Deadline, { id, at: 0 }, { ownership: { kind: "conversation" }, background: true });
+			target = { child: current.child, reporter: current.reporter, deadline: current.deadline };
 		}, BACKGROUND_CONTEXT);
-		await (await this.harness().conversation(row.child, BACKGROUND_CONTEXT))!.abort(BACKGROUND_CONTEXT);
+		if (!target) return false;
+		const { child, reporter, deadline } = target as { child: ConversationId; reporter: TaskId; deadline?: TaskId };
+		await this.harness().abortTask(reporter, BACKGROUND_CONTEXT);
+		if (deadline) await this.harness().abortTask(deadline, BACKGROUND_CONTEXT);
+		await (await this.harness().conversation(child, BACKGROUND_CONTEXT))?.abort(BACKGROUND_CONTEXT);
 		return true;
 	}
 }
