@@ -1,3 +1,10 @@
+# v1.1.10
+
+- 升级 Pi 各包到 1.5.2，统一迁移配置与工具声明到 `@earendil-works/pi-schema`，移除 `typebox`、`@earendil-works/pi-tui`、`@earendil-works/pi-agent-core` 顶层依赖。cache schema 升到 57，升级后开启新会话。
+- 接入 Pi 同款 `undici` HTTP/1.1 全局连接池（避免 Node 内置 HTTP/2 会话假死），并使用 `@earendil-works/pi-ai` 原生经济学策略为声明缓存周期的模型自动做提示缓存保温。
+- 修复待回应追踪（`TelegramState.pending` 改按 `InboxDoc` 水位清理，压缩后不再误留并触发重复恢复）、失败轮次后的队列推进（`afterFailedRun: "continue"` 与子任务队列回收）、Code Mode 并发排队、任务取消竞态及 `.env` 向导合并保存。
+- 归档 SQLite 统一开启 `busy_timeout` 与 `synchronous = NORMAL`，移除手写锁重试；补齐外链 IPv6 转换段拦截，复用 Pi 原生文本与 token 估算工具。
+
 # v1.1.9
 
 - 接话判断可以用 Gemini Decisions API：`decider.model` 写 `google/gemini-decision-1`，用 `.env` 的 `gemini_api_key`（Pi 还没有 Gemini classifier，所以直接调用）。它会看最近几条消息里最新的 4 个图片、sticker 或视频截帧，3 秒内没准备好的媒体仍按文字占位。配置向导的默认判断模型改为它。
