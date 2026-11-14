@@ -11,11 +11,14 @@ import type { ReplySnapshot } from "../telegram/normalize.ts";
 
 export const TELEGRAM_SERIALIZER_VERSION = 8;
 
-const TRUNCATED = "\n[truncated]";
-const bounded = (text: string, limit: number) =>
-	text.length <= limit
-		? text
-		: `${text.slice(0, Math.max(0, limit - TRUNCATED.length))}${TRUNCATED}`.slice(0, Math.max(0, limit));
+export const TRUNCATED = "\n[truncated]";
+export function boundedText(text: string, limit: number): string {
+	if (limit <= 0) return "";
+	if (text.length <= limit) return text;
+	if (limit <= TRUNCATED.length) return text.slice(0, limit);
+	return `${text.slice(0, limit - TRUNCATED.length)}${TRUNCATED}`;
+}
+const bounded = boundedText;
 
 const TASK_PHASE_LABEL: Record<NonNullable<NotePayload["phase"]>, string> = {
 	progress: "进展",

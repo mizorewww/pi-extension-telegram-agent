@@ -57,10 +57,17 @@ function isBlockedIpv6(words: number[]): boolean {
 	if (allZero || loopback) return true;
 	if ((words[0] & 0xfe00) === 0xfc00 || (words[0] & 0xffc0) === 0xfe80 || (words[0] & 0xffc0) === 0xfec0) return true;
 	if ((words[0] & 0xff00) === 0xff00) return true;
-	if (words[0] === 0x2001 && words[1] === 0x0db8) return true;
+	if (words[0] === 0x2001 && (words[1] === 0x0db8 || words[1] === 0x0000 || (words[1] === 0x0002 && words[2] === 0)))
+		return true;
+	if (words[0] === 0x0064 && words[1] === 0xff9b && (words[2] === 1 || words.slice(2, 6).every((w) => w === 0)))
+		return true;
+	if (words[0] === 0x2002) return isBlockedIpv4([words[1]! >> 8, words[1]! & 0xff, words[2]! >> 8, words[2]! & 0xff]);
 
-	const mapped = words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff;
-	if (mapped) return isBlockedIpv4([words[6]! >> 8, words[6]! & 0xff, words[7]! >> 8, words[7]! & 0xff]);
+	const embeddedIpv4 =
+		words.slice(0, 6).every((word) => word === 0) ||
+		(words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff) ||
+		(words.slice(0, 4).every((word) => word === 0) && words[4] === 0xffff && words[5] === 0);
+	if (embeddedIpv4) return isBlockedIpv4([words[6]! >> 8, words[6]! & 0xff, words[7]! >> 8, words[7]! & 0xff]);
 	return false;
 }
 

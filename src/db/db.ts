@@ -22,9 +22,9 @@ const SCHEMA_PATH = join(import.meta.dirname, "schema.sql");
 
 /** `botUserId` is the configured bot's Telegram id; a v1.0 multi-bot archive keeps only its rows. */
 export function openDb(dbPath: string, botUserId?: number): Database {
-	mkdirSync(dirname(dbPath), { recursive: true });
-	const db = new Database(dbPath);
-	db.exec("PRAGMA journal_mode = WAL;");
+	if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
+	const db = new Database(dbPath, { timeout: 5_000 });
+	db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA wal_autocheckpoint = 1000;");
 	if (hasColumn(db, "raw_updates", "bot_id")) {
 		if (botUserId == null) throw new Error("database holds the multi-bot archive; start the daemon once to migrate it");
 		migrateToSingleBot(db, botUserId);

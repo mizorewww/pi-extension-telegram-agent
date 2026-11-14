@@ -7,7 +7,6 @@ import { persistEditedControlMessage } from "./ingest.ts";
 import {
 	classifyTelegramCreateFailure,
 	localFailureCategory,
-	retrySqliteBusy,
 	sendTextAndPersist,
 	SentMessagePersistenceError,
 	type TextSendApi,
@@ -75,7 +74,7 @@ export class TelegramControlCoordinator {
 					result.text,
 					result.replyMarkup ?? { inline_keyboard: [] },
 				);
-				await retrySqliteBusy(() => persistEditedControlMessage(this.db, raw));
+				persistEditedControlMessage(this.db, raw);
 				return { outcome: "sent", chatId: result.chatId, messageId: command.messageId };
 			}
 			operation = "reply";
@@ -89,7 +88,7 @@ export class TelegramControlCoordinator {
 			);
 			// A local marker failure must not repeat the irreversible Telegram create.
 			try {
-				await retrySqliteBusy(() => this.commands.consumeReply(canonical.chat_id, canonical.message_id));
+				this.commands.consumeReply(canonical.chat_id, canonical.message_id);
 			} catch (error) {
 				this.warn("reply_marker", {
 					message_id: canonical.message_id,

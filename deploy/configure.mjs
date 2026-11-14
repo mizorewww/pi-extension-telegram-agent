@@ -500,7 +500,7 @@ async function main() {
 		for (const [target, content] of files) atomic(target, content);
 		atomic(
 			join(directory, ".env"),
-			Object.entries(needed)
+			Object.entries({ ...env, ...needed })
 				.map(([key, value]) => key + ": " + value + "\n")
 				.join(""),
 		);

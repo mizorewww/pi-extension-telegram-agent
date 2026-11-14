@@ -3,7 +3,7 @@ import { readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context, type Context } from "@earendil-works/chord/context";
 import { estimateContextTokens, estimateMessageTokens, estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
-import { clampThinkingLevel } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, contentText } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
 	Harness,
@@ -47,7 +47,13 @@ import { type BotApi, groupReactionAllowlist } from "../telegram/api.ts";
 import { buildSystemPrompt, CACHE_SCHEMA_VERSION, REPLY_RECOVERY_PROMPT, sha256Short } from "./prompt.ts";
 import { guardModels } from "./provider-guard.ts";
 import { buildBotRuntimeTools } from "./runtime-tools.ts";
-import { serializeMessageEvents, serializeMessageSegments, type MessageRow } from "./serialize.ts";
+import {
+	boundedText,
+	serializeMessageEvents,
+	serializeMessageSegments,
+	TRUNCATED,
+	type MessageRow,
+} from "./serialize.ts";
 import type { RoutingTrigger, TriggerResult, TriggerSource } from "./router.ts";
 import type { Decider, DeciderMedia, DeciderSlice } from "./decider.ts";
 
@@ -100,14 +106,7 @@ const DECIDER_SLICE_CHARS = 6_000;
 /** Newest media of the recent lines a multimodal decider sees, and how long it may wait for them. */
 const DECIDER_MAX_MEDIA = 4;
 const DECIDER_MEDIA_WAIT_MS = 3_000;
-const TRUNCATED = "\n[truncated]";
 const total = (parts: ContextComposition) => parts.system + parts.tools + parts.summary + parts.messages;
-const bounded = (text: string, limit: number) =>
-	text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - TRUNCATED.length))}${TRUNCATED}`.slice(0, limit);
-const messageText = (message: { content: string | readonly { type: string; text?: string }[] }) =>
-	typeof message.content === "string"
-		? message.content
-		: message.content.flatMap((part) => (part.type === "text" ? [part.text ?? ""] : [])).join("\n");
 function pendingInput(pending: Record<string, string>, budget: number) {
 	let text = "";
 	const required: number[] = [];
@@ -499,7 +498,7 @@ export class BotRuntime {
 			const segments = serializeMessageSegments(this.db, selected, MAX_MESSAGE_CHARS);
 			if (currentIsPending) state.pending[String(trigger.messageId)] = segments.at(-1)!.text;
 			const content = [segments.map((segment) => segment.text).join("\n"), owed].filter(Boolean).join("\n\n");
-			const stickerNote = bounded(
+			const stickerNote = boundedText(
 				batchStickerCandidates(
 					this.db,
 					this.config.groupChatId,
@@ -599,11 +598,8 @@ export class BotRuntime {
 				const data = metadata(entry);
 				if (!data?.messageId || data.phase === "progress") continue;
 				const message = entry.model?.[0];
-				const text =
-					typeof message?.content === "string"
-						? message.content
-						: (message?.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n") ?? "");
-				state.pending[String(data.messageId)] = bounded(text, MAX_MESSAGE_CHARS);
+				const text = message ? contentText(message.content) : "";
+				state.pending[String(data.messageId)] = boundedText(text, MAX_MESSAGE_CHARS);
 			}
 		}, ctx);
 	}
@@ -611,7 +607,7 @@ export class BotRuntime {
 	private async recordSend(ctx: Context): Promise<void> {
 		const visible = (await this.conversation.context(ctx)).messages
 			.filter((message) => message.role === "user")
-			.map(messageText);
+			.map((message) => contentText(message.content));
 		await this.conversation.commit(async (tx) => {
 			const state = await tx.doc(TelegramState, this.conversation.id);
 			for (const [id, text] of Object.entries(state.pending)) {
@@ -632,7 +628,7 @@ export class BotRuntime {
 				.some(
 					(entry) =>
 						entry.kind === "pi.user" &&
-						entry.model?.some((message) => messageText(message).startsWith(REPLY_RECOVERY_PROMPT)),
+						entry.model?.some((message) => contentText(message.content).startsWith(REPLY_RECOVERY_PROMPT)),
 				)
 		)
 			return;

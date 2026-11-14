@@ -39,7 +39,7 @@ export async function main(args = process.argv.slice(2), rootDir = configDirecto
 	let db: Database | null = null;
 	try {
 		const config = loadConfig(rootDir, { identityOnly: true });
-		db = new Database(config.dbPath, { readOnly: true });
+		db = new Database(config.dbPath, { readOnly: true, timeout: 5_000 });
 		const report = buildDebugReport(db, {
 			chatId: config.groupChatId,
 			sinceMs,

@@ -22,7 +22,11 @@ test("search accepts only public HTTP(S) targets and never fetches the rest", as
 		"http://169.254.169.254/latest/meta-data/",
 		"http://192.168.1.1/",
 		"http://[::1]/",
+		"http://[::127.0.0.1]/",
 		"http://[::ffff:127.0.0.1]/",
+		"http://[::ffff:0:127.0.0.1]/",
+		"http://[64:ff9b::169.254.169.254]/",
+		"http://[2002:7f00:0001::1]/",
 		"http://[fe80::1]/",
 	]) {
 		assert.equal((await runTinyFishTool("key", { url }, { fetchPage })).content, "search failed: invalid_url");

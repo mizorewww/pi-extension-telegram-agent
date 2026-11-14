@@ -18,7 +18,7 @@ import {
 import {
 	classifyTelegramCreateFailure,
 	localFailureCategory,
-	persistSentMessageWithRetry,
+	persistSentMessage,
 	sendMarkdownTextAndPersist,
 	sendRichMarkdownAndPersist,
 	SentMessagePersistenceError,
@@ -260,7 +260,7 @@ export async function executeAgentSend(requested: SendParams, context: AgentSend
 		}
 		for (const raw of raws) {
 			try {
-				await persistSentMessageWithRetry(context.db, raw, "file");
+				persistSentMessage(context.db, raw, "file");
 				await committed("file", raw, null, "file_sent");
 			} catch (error) {
 				await committed("file", raw, (error as SentMessagePersistenceError).cause, "file_sent");
@@ -275,7 +275,7 @@ export async function executeAgentSend(requested: SendParams, context: AgentSend
 			return await createFailed("sticker", error);
 		}
 		try {
-			await persistSentMessageWithRetry(context.db, raw, "sticker");
+			persistSentMessage(context.db, raw, "sticker");
 			await committed("sticker", raw, null);
 		} catch (error) {
 			await committed("sticker", raw, (error as SentMessagePersistenceError).cause);

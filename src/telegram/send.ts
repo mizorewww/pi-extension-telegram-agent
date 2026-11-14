@@ -36,9 +36,6 @@ export class SentMessagePersistenceError extends Error {
 	}
 }
 
-const SQLITE_BUSY_RETRY_DELAYS_MS = [25, 100, 250] as const;
-
-/** SQLite reports BUSY/LOCKED synchronously; these retries never repeat Telegram I/O. */
 function isSqliteBusy(error: unknown): boolean {
 	const value = error as { code?: unknown; errno?: unknown; message?: unknown } | null;
 	const code = typeof value?.code === "string" ? value.code.toUpperCase() : "";
@@ -88,27 +85,14 @@ export function classifyTelegramCreateFailure(error: unknown): TelegramCreateFai
 	return { outcome: "unknown", category: "network_error" };
 }
 
-export async function retrySqliteBusy<T>(operation: () => T): Promise<T> {
-	let attempt = 0;
-	while (true) {
-		try {
-			return operation();
-		} catch (error) {
-			const delay = SQLITE_BUSY_RETRY_DELAYS_MS[attempt++];
-			if (!isSqliteBusy(error) || delay == null) throw error;
-			await new Promise<void>((resolve) => setTimeout(resolve, delay));
-		}
-	}
-}
-
 /** Persist only the local projection; callers must never wrap this in a Telegram retry. */
-export async function persistSentMessageWithRetry(
+export function persistSentMessage(
 	db: Database,
 	raw: Record<string, unknown>,
 	transport: SentMessageTransport,
-): Promise<CanonicalMessage> {
+): CanonicalMessage {
 	try {
-		return await retrySqliteBusy(() => insertSentMessage(db, raw));
+		return insertSentMessage(db, raw);
 	} catch (error) {
 		throw new SentMessagePersistenceError(error, raw, transport);
 	}
@@ -123,7 +107,7 @@ export async function sendTextAndPersist(
 	replyMarkup?: InlineKeyboardMarkup,
 ): Promise<{ raw: Record<string, unknown>; canonical: CanonicalMessage }> {
 	const raw = await api.sendMessage(chatId, text, replyToMessageId, replyMarkup);
-	return { raw, canonical: await persistSentMessageWithRetry(db, raw, "plain") };
+	return { raw, canonical: persistSentMessage(db, raw, "plain") };
 }
 
 const PARSE_REJECTIONS = ["can't parse", "cannot parse", "failed to parse", "parse error"];
@@ -163,7 +147,7 @@ export async function sendMarkdownTextAndPersist(
 		transport = "plain_fallback";
 		raw = await api.sendMessage(chatId, formatted.text, replyToMessageId);
 	}
-	return { raw, canonical: await persistSentMessageWithRetry(db, raw, transport), transport };
+	return { raw, canonical: persistSentMessage(db, raw, transport), transport };
 }
 
 /** Rich Markdown has no local grammar or fallback: a parse rejection goes back to the model. */
@@ -175,5 +159,5 @@ export async function sendRichMarkdownAndPersist(
 	replyToMessageId?: number,
 ): Promise<{ raw: Record<string, unknown>; canonical: CanonicalMessage }> {
 	const raw = await api.sendRichMessage(chatId, markdown, replyToMessageId);
-	return { raw, canonical: await persistSentMessageWithRetry(db, raw, "rich") };
+	return { raw, canonical: persistSentMessage(db, raw, "rich") };
 }
