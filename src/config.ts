@@ -6,8 +6,20 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, resolve, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { createJiti } from "jiti";
-import { Type, type Static } from "typebox";
-import { compile } from "@earendil-works/pi-schema";
+import {
+	arr,
+	bool,
+	compile,
+	int,
+	num,
+	obj,
+	oneOf,
+	opt,
+	type Static,
+	str,
+	union,
+	unsafe,
+} from "@earendil-works/pi-schema";
 import type { ModelThinkingLevel as ThinkingLevel } from "@earendil-works/pi-ai";
 import type { BoxConfig } from "./sandbox/box.ts";
 import type { TasksConfig } from "./tasks/manager.ts";
@@ -21,99 +33,76 @@ type CacheRetention = "none" | "short" | "long";
 /** "off": placeholders only; "hybrid": the chat model describes each new medium once as text. */
 export type MediaMode = "off" | "hybrid";
 
-const text = Type.String({ pattern: "\\S" });
-const positive = Type.Number({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
-const reasoning = Type.Enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-export const configSchema = Type.Object(
-	{
-		group_peer_id: Type.Union([Type.String(), Type.Number()]),
-		name: Type.Optional(Type.String()),
-		token_env: text,
-		persona_path: text,
-		provider: Type.Optional(text),
-		model: Type.Optional(text),
-		reasoning_effort: Type.Optional(reasoning),
-		cache_retention: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("short"), Type.Literal("long")])),
-		compaction_threshold: Type.Optional(positive),
-		compaction_keep_recent: Type.Optional(positive),
-		cooldown_ms: Type.Optional(Type.Number({ minimum: 0 })),
-		provider_timeout_ms: Type.Optional(Type.Number({ minimum: 1000, maximum: 3_600_000 })),
-		provider_retries: Type.Optional(Type.Integer({ minimum: 0, maximum: 5 })),
-		decider: Type.Optional(
-			Type.Object(
-				{
-					model: Type.String({ pattern: "^[^/\\s]+/\\S+$" }),
-					threshold: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
-					examples_path: Type.Optional(text),
-				},
-				{ additionalProperties: false },
-			),
-		),
-		tools: Type.Optional(
-			Type.Partial(
-				Type.Object(
-					{
-						send: Type.Boolean(),
-						search: Type.Boolean(),
-						semantic: Type.Boolean(),
-						codemode: Type.Boolean(),
-						sandbox: Type.Boolean(),
-						tasks: Type.Boolean(),
-					},
-					{ additionalProperties: false },
-				),
-			),
-		),
-		sticker_sets: Type.Optional(Type.Array(text)),
-		context_window: Type.Optional(Type.Integer({ minimum: MIN_COMPACTION_RESERVE * 2, maximum: 10_000_000 })),
-		media: Type.Optional(
-			Type.Partial(
-				Type.Object(
-					{
-						mode: Type.Union([Type.Literal("off"), Type.Literal("hybrid")]),
-						max_per_turn: Type.Integer({ minimum: 0, maximum: 16 }),
-						concurrency: Type.Integer({ minimum: 1, maximum: 16 }),
-					},
-					{ additionalProperties: false },
-				),
-			),
-		),
-		sandbox: Type.Optional(
-			Type.Partial(
-				Type.Object(
-					{
-						image: text,
-						docker_host: text,
-						memory: text,
-						cpus: Type.Number({ minimum: 0.1, maximum: 64 }),
-						pids: Type.Integer({ minimum: 16, maximum: 65_536 }),
-						network: Type.Boolean(),
-					},
-					{ additionalProperties: false },
-				),
-			),
-		),
-		tasks: Type.Optional(
-			Type.Object(
-				{
-					workflows: Type.Record(Type.String({ pattern: "^[a-z][a-z0-9_-]{0,31}$" }), text, {
-						minProperties: 1,
-						additionalProperties: false,
-					}),
-					max_running: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
-					timeout_minutes: Type.Optional(Type.Number({ minimum: 1, maximum: 1440 })),
-				},
-				{ additionalProperties: false },
-			),
-		),
-		raw_update_retention_days: Type.Optional(Type.Number({ minimum: 1, maximum: 3650 })),
-		message_event_retention_days: Type.Optional(Type.Number({ minimum: 1, maximum: 3650 })),
-		telegram_admins: Type.Optional(
-			Type.Array(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), { uniqueItems: true }),
-		),
-	},
-	{ additionalProperties: false },
-);
+const text = str({ pattern: "\\S" });
+const positive = num({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
+const reasoning = oneOf(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const workflowsSchema = unsafe<Record<string, string>>({
+	type: "object",
+	propertyNames: str({ pattern: "^[a-z][a-z0-9_-]{0,31}$" }),
+	additionalProperties: text,
+	minProperties: 1,
+});
+export const configSchema = obj({
+	group_peer_id: union([str(), num()]),
+	name: opt(str()),
+	token_env: text,
+	persona_path: text,
+	provider: opt(text),
+	model: opt(text),
+	reasoning_effort: opt(reasoning),
+	cache_retention: opt(oneOf(["none", "short", "long"])),
+	compaction_threshold: opt(positive),
+	compaction_keep_recent: opt(positive),
+	cooldown_ms: opt(num({ minimum: 0 })),
+	provider_timeout_ms: opt(num({ minimum: 1000, maximum: 3_600_000 })),
+	provider_retries: opt(int({ minimum: 0, maximum: 5 })),
+	decider: opt(
+		obj({
+			model: str({ pattern: "^[^/\\s]+/\\S+$" }),
+			threshold: opt(num({ minimum: 0, maximum: 1 })),
+			examples_path: opt(text),
+		}),
+	),
+	tools: opt(
+		obj({
+			send: opt(bool()),
+			search: opt(bool()),
+			semantic: opt(bool()),
+			codemode: opt(bool()),
+			sandbox: opt(bool()),
+			tasks: opt(bool()),
+		}),
+	),
+	sticker_sets: opt(arr(text)),
+	context_window: opt(int({ minimum: MIN_COMPACTION_RESERVE * 2, maximum: 10_000_000 })),
+	media: opt(
+		obj({
+			mode: opt(oneOf(["off", "hybrid"])),
+			max_per_turn: opt(int({ minimum: 0, maximum: 16 })),
+			concurrency: opt(int({ minimum: 1, maximum: 16 })),
+		}),
+	),
+	sandbox: opt(
+		obj({
+			image: opt(text),
+			docker_host: opt(text),
+			memory: opt(text),
+			cpus: opt(num({ minimum: 0.1, maximum: 64 })),
+			pids: opt(int({ minimum: 16, maximum: 65_536 })),
+			network: opt(bool()),
+		}),
+	),
+	tasks: opt(
+		obj({
+			workflows: workflowsSchema,
+			max_running: opt(int({ minimum: 1, maximum: 8 })),
+			timeout_minutes: opt(num({ minimum: 1, maximum: 1440 })),
+		}),
+	),
+	raw_update_retention_days: opt(num({ minimum: 1, maximum: 3650 })),
+	message_event_retention_days: opt(num({ minimum: 1, maximum: 3650 })),
+	telegram_admins: opt(arr(int({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), { uniqueItems: true })),
+});
 const configValidator = compile(configSchema);
 export type TelegramConfigInput = Static<typeof configSchema>;
 export type TelegramAdmin = number;

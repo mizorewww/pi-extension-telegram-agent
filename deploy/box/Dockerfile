@@ -18,7 +18,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Pi executes models on the host. Only its credential-free filesystem/shell daemon runs here.
-RUN npm install -g --ignore-scripts @earendil-works/pi-env@1.5.0 agent-browser@0.41.0 \
+RUN npm install -g --ignore-scripts @earendil-works/pi-env@1.5.2 agent-browser@0.41.0 \
  && node --input-type=module -e 'import { localDaemon } from "/usr/local/lib/node_modules/@earendil-works/pi-env/dist/index.js"; import { copyFileSync, chmodSync } from "node:fs"; copyFileSync(localDaemon(), "/usr/local/bin/pi-env"); chmodSync("/usr/local/bin/pi-env", 0o755)' \
  && chmod +x /usr/local/lib/node_modules/agent-browser/bin/agent-browser-linux-x64 \
  && npm cache clean --force

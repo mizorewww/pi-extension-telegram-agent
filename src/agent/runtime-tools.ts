@@ -1,7 +1,7 @@
 // Telegram tools are ordinary Pi Durable tools; Pi owns validation, code mode and nested-call cleanup.
 import type { Database } from "../db/db.ts";
 import type { Context } from "@earendil-works/chord/context";
-import type { JsonValue } from "@earendil-works/chord";
+import type { JsonValue } from "@earendil-works/chord/json";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
 import {

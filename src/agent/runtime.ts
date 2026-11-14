@@ -306,7 +306,7 @@ export class BotRuntime {
 		return sha256Short(
 			JSON.stringify([
 				CACHE_SCHEMA_VERSION,
-				"pi-1.5.0",
+				"pi-1.5.2",
 				selection.provider,
 				selection.model,
 				selection.reasoningEffort,

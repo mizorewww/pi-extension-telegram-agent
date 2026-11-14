@@ -55,7 +55,7 @@ const png = new Uint8Array(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAf
 assert.ok(await images.prepare(png, "image/png", DEFAULT_IMAGE_LIMITS));
 const harness = await Harness.open(await openNodeSqliteStorage(":memory:"), { models: createModels(), registry: createRegistry() }, BACKGROUND_CONTEXT);
 try { assert.ok(await harness.root(BACKGROUND_CONTEXT)); } finally { await harness.close(BACKGROUND_CONTEXT); }
-assert.match(execFileSync(packagedDaemon({ platform: "linux", arch: "x64" }), ["--version"], { encoding: "utf8" }), /pi-env 1\\.5\\.0/);
+assert.match(execFileSync(packagedDaemon({ platform: "linux", arch: "x64" }), ["--version"], { encoding: "utf8" }), /pi-env 1\\.5\\.2/);
 console.log("PASS: packaged runtime, QuickJS worker/WASM, Photon worker/WASM, SQLite and pi-env");
 `);
 	try {

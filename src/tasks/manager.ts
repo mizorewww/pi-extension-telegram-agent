@@ -19,7 +19,7 @@ import {
 	type ToolTaskResult,
 	UsageDoc,
 } from "@earendil-works/pi-durable";
-import { Type } from "typebox";
+import { obj, oneOf, str } from "@earendil-works/pi-schema";
 
 export interface TasksConfig {
 	workflows: Record<string, string>;
@@ -223,9 +223,9 @@ const reportTool = defineTool({
 	name: "report",
 	description:
 		"Report task progress, a question for the requester, or final results. Include generated file paths. need_input and done end this run.",
-	parameters: Type.Object({
-		kind: Type.Union([Type.Literal("progress"), Type.Literal("need_input"), Type.Literal("done")]),
-		text: Type.String({ minLength: 1, maxLength: 16000 }),
+	parameters: obj({
+		kind: oneOf(["progress", "need_input", "done"]),
+		text: str({ minLength: 1, maxLength: 16000 }),
 	}),
 	callers: ["model"],
 	deferred: true,

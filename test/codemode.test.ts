@@ -5,7 +5,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, defineExtension, defineTool, Harness, MemoryStorage } from "@earendil-works/pi-durable";
-import { Type } from "typebox";
+import { obj } from "@earendil-works/pi-schema";
 import { telegramCodemode } from "../src/agent/extensions/codemode.ts";
 
 async function runScript(code: string) {
@@ -25,7 +25,7 @@ async function runScript(code: string) {
 				defineTool({
 					name: "send",
 					description: "Simulate a send",
-					parameters: Type.Object({}),
+					parameters: obj({}),
 					execute: async () => {
 						sends++;
 						return { output: [{ type: "text", text: "ok" }], control: { terminate: true } };
@@ -34,14 +34,14 @@ async function runScript(code: string) {
 				defineTool({
 					name: "probe",
 					description: "Return pong",
-					parameters: Type.Object({}),
+					parameters: obj({}),
 					callers: ["tools"],
 					execute: async () => ({ output: [{ type: "text", text: "pong" }] }),
 				}),
 				defineTool({
 					name: "private",
 					description: "Never callable by scripts",
-					parameters: Type.Object({}),
+					parameters: obj({}),
 					callers: ["model"],
 					execute: async () => {
 						throw new Error("must not run");

@@ -1,4 +1,4 @@
-import { Marked, type Token, type Tokens } from "@earendil-works/pi-tui";
+import { Marked, type Token, type Tokens } from "marked";
 import { parsePublicHttpUrl } from "../net/public-url.ts";
 
 const MARKED = new Marked();
