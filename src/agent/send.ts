@@ -33,7 +33,6 @@ interface AgentSendContext {
 	/** The bot's work box; `files` are only accepted when it has one. */
 	box: WorkBox | null;
 	triggerMessageId: number | null;
-	recordEvent(kind: string, payload: unknown): void;
 }
 
 interface SendFailure {
@@ -131,7 +130,7 @@ function preflight(
 		);
 	const fileId = fileIdFor(context.db, row.file_unique_id);
 	if (fileId) return { params, stickerFileId: fileId };
-	context.recordEvent("error", { stage: "send", code: "candidate_invariant", sticker: params.sticker });
+	log.info("agent", "error");
 	throw new Error(`candidate invariant violated: sticker ${params.sticker} is not sendable by this bot (no file_id)`);
 }
 
@@ -176,10 +175,10 @@ export async function executeAgentSend(requested: SendParams, context: AgentSend
 				stage: "canonical_persist",
 				category: localFailureCategory(persistFailure),
 			});
-		if (eventKind) context.recordEvent(eventKind, { message_id: messageId });
+		if (eventKind) log.info("agent", eventKind);
 	};
 	const finish = async (outcome: SendDegradedOutcome | null) => {
-		if (outcome == null || sent.length > 0) context.recordEvent("send", { sent, reacted_to: reactedTo });
+		if (outcome == null || sent.length > 0) log.info("agent", "send", { reacted: reactedTo != null });
 		if (outcome == null && failures.length === 0) {
 			log.info("agent_send", "committed", {
 				sent_count: sent.length,
@@ -191,7 +190,7 @@ export async function executeAgentSend(requested: SendParams, context: AgentSend
 		const primary =
 			(degraded === "partial" ? failures.find((failure) => failure.stage === "telegram_create") : undefined) ??
 			failures[0]!;
-		context.recordEvent("send_degraded", { outcome: degraded, sent, failures });
+		log.info("agent", "send_degraded");
 		log.warn("agent_send", "degraded", {
 			outcome: degraded,
 			component: primary.failed_component,
@@ -298,7 +297,6 @@ export async function executeAgentSend(requested: SendParams, context: AgentSend
 				target_message_id: params.reply_to,
 				trigger_message_id: context.triggerMessageId,
 			});
-			context.recordEvent("reaction_failed", { message_id: params.reply_to, category });
 		}
 	}
 	return await finish(null);

@@ -17,8 +17,11 @@ import {
 	parseEnvFile,
 	MIN_COMPACTION_RESERVE,
 } from "../dist/src/config.js";
-import { loadPiModelDefaults } from "../dist/src/agent/model-settings.js";
-import { assertBotModelConfigured, createInstalledPiModelRuntime } from "../dist/src/agent/model-runtime.js";
+import {
+	assertBotModelConfigured,
+	createInstalledPiModelRuntime,
+	loadPiModelDefaults,
+} from "../dist/src/agent/model-runtime.js";
 import { createDecider, DEFAULT_DECIDER_THRESHOLD, GEMINI_DECIDER_PROVIDER } from "../dist/src/agent/decider.js";
 
 const directory = configDirectory(),

@@ -29,7 +29,7 @@ test("search accepts only public HTTP(S) targets and never fetches the rest", as
 		"http://[2002:7f00:0001::1]/",
 		"http://[fe80::1]/",
 	]) {
-		assert.equal((await runTinyFishTool("key", { url }, { fetchPage })).content, "search failed: invalid_url");
+		assert.equal(await runTinyFishTool("key", { url }, { fetchPage }), "search failed: invalid_url");
 	}
 	assert.equal(calls, 0);
 });

@@ -22,6 +22,7 @@ import {
 import type { AppConfig, BotConfig } from "../config.ts";
 import { groupMessage } from "../db/message-events.ts";
 import { fileIdFor, MEDIA_DOWNLOAD_MAX_BYTES } from "../media/local-cache.ts";
+import { log } from "../observability/log.ts";
 import type { WorkBox } from "../sandbox/box.ts";
 import { TaskManager } from "../tasks/manager.ts";
 import type { BotApi } from "../telegram/api.ts";
@@ -55,7 +56,6 @@ export interface BotRuntimeToolHost {
 	allowedReactions(): ReadonlySet<string> | null;
 	currentMessage(api: ToolExecutionApi, context: Context): Promise<number | null>;
 	recordSend(context: Context): Promise<void>;
-	recordEvent(kind: string, payload: unknown): void;
 	resetBox(reason: "tool"): Promise<void>;
 }
 
@@ -94,14 +94,13 @@ async function send(host: BotRuntimeToolHost, params: SendParams, api: ToolExecu
 		allowedReactions: host.allowedReactions(),
 		box: host.box,
 		triggerMessageId: await host.currentMessage(api, context),
-		recordEvent: (kind, payload) => host.recordEvent(kind, payload),
 	});
 	if ("outcome" in result.details || result.details.sent.length) {
 		// A failed local receipt cannot make a committed/unknown Telegram create retryable.
 		try {
 			await host.recordSend(context);
 		} catch {
-			host.recordEvent("send_receipt_failed", { category: "local_failure" });
+			log.warn("agent", "send_receipt_failed", { category: "local_failure" });
 		}
 	}
 	return result;
@@ -143,11 +142,8 @@ export async function buildBotRuntimeTools(
 			defineTool({
 				...TOOL_DEFS[1],
 				replay: "safe",
-				execute: async (args, _api, context) => {
-					const result = await runTinyFishTool(host.config.tinyfishApiKey, args, {}, context.abortSignal);
-					host.recordEvent(result.event.kind, result.event.payload);
-					return { ...output(result.content), details: result.details };
-				},
+				execute: async (args, _api, context) =>
+					output(await runTinyFishTool(host.config.tinyfishApiKey, args, {}, context.abortSignal)),
 			}),
 		);
 	if (host.bot.tools.codemode) {

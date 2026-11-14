@@ -8,12 +8,12 @@ import type {
 } from "../agent/runtime.ts";
 import type { BotConfig, TelegramAdmin } from "../config.ts";
 import { log } from "../observability/log.ts";
-import type { RuntimeControlSnapshot } from "../observability/usage.ts";
-import { renderBotStatus } from "../observability/status.ts";
+import { renderBotStatus, type RuntimeControlSnapshot } from "../observability/status.ts";
 import { updateBotModelConfig } from "../onboarding/config-core.ts";
-import type { InlineKeyboardMarkup } from "./api.ts";
+import type { BotApi, InlineKeyboardMarkup } from "./api.ts";
 import {
 	boundedReply,
+	CONTROL_COMMANDS,
 	type ControlSender,
 	compactFailureText,
 	HELP_TEXT,
@@ -26,7 +26,14 @@ import {
 	type TelegramControlCommandToken,
 	USAGE_TEXT,
 } from "./control-parse.ts";
+import { persistEditedControlMessage } from "./ingest.ts";
 import { modelMenuKey, renderModelMenu } from "./model-menu.ts";
+import {
+	classifyTelegramCreateFailure,
+	localFailureCategory,
+	sendTextAndPersist,
+	SentMessagePersistenceError,
+} from "./send.ts";
 
 export {
 	type ControlSender,
@@ -242,4 +249,92 @@ export function consumedControlMessageIds(db: Database, chatId: number): Set<num
 		message_id: number;
 	}[];
 	return new Set(rows.map((row) => row.message_id));
+}
+
+export class TelegramControlCoordinator {
+	private readonly pending = new Set<Promise<unknown>>();
+
+	constructor(
+		private readonly db: Database,
+		private readonly commands: TelegramControlCommandService,
+		private readonly api: BotApi,
+	) {}
+
+	dispatch(command: ParsedTelegramControlCommand): void {
+		const work = this.handle(command)
+			.catch(() =>
+				log.warn("telegram_control", "operation_failed", { operation: "dispatch", category: "local_failure" }),
+			)
+			.finally(() => this.pending.delete(work));
+		this.pending.add(work);
+	}
+
+	async drain(): Promise<void> {
+		await Promise.allSettled([...this.pending]);
+	}
+
+	private async handle(command: ParsedTelegramControlCommand): Promise<void> {
+		let operation = "command";
+		try {
+			const result = await this.commands.handle(command);
+			if (command.callbackQueryId) {
+				await this.api.answerCallbackQuery(command.callbackQueryId, result.callbackNotice).catch(() =>
+					log.warn("telegram_control", "operation_failed", {
+						operation: "callback_answer",
+						message_id: command.messageId,
+						category: "request_failed",
+					}),
+				);
+			}
+			if (result.text == null) return;
+			if (command.callbackQueryId) {
+				operation = "menu_edit";
+				const raw = await this.api.editMessageText(
+					result.chatId,
+					command.messageId,
+					result.text,
+					result.replyMarkup ?? { inline_keyboard: [] },
+				);
+				persistEditedControlMessage(this.db, raw);
+				return;
+			}
+			operation = "reply";
+			const { canonical } = await sendTextAndPersist(
+				this.db,
+				this.api,
+				result.chatId,
+				result.text,
+				result.replyToMessageId,
+				result.replyMarkup,
+			);
+			try {
+				this.commands.consumeReply(canonical.chat_id, canonical.message_id);
+			} catch (error) {
+				log.warn("telegram_control", "operation_failed", {
+					operation: "reply_marker",
+					message_id: canonical.message_id,
+					category: localFailureCategory(error),
+				});
+			}
+		} catch (error) {
+			const category =
+				error instanceof SentMessagePersistenceError
+					? localFailureCategory(error.cause)
+					: operation === "reply"
+						? classifyTelegramCreateFailure(error).category
+						: "local_failure";
+			log.warn("telegram_control", "operation_failed", { operation, message_id: command.messageId, category });
+			if (operation === "command" && command.callbackQueryId) {
+				await this.api.answerCallbackQuery(command.callbackQueryId, "操作失败，请稍后重试。").catch(() => {});
+			}
+		}
+	}
+}
+
+export async function publishTelegramControlMenu(api: BotApi): Promise<void> {
+	try {
+		await api.setMyCommands(CONTROL_COMMANDS.map(([command, description]) => ({ command, description })));
+	} catch {
+		log.warn("telegram_control", "menu_publish_failed", { category: "request_failed" });
+	}
 }

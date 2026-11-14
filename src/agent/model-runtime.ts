@@ -6,6 +6,20 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 
+export type PiModelDefaults = ReturnType<typeof loadPiModelDefaults>;
+
+/** Read Pi's merged global/project defaults without copying or exposing credential data. */
+export function loadPiModelDefaults(projectRoot: string, agentDir = getAgentDir()) {
+	const settings = SettingsManager.create(projectRoot, agentDir);
+	const loadErrors = settings.drainErrors();
+	if (loadErrors.length > 0) {
+		throw new Error(
+			`Pi settings unavailable (${[...new Set(loadErrors.map((error) => error.scope))].join(",")}). Fix Pi settings, then restart.`,
+		);
+	}
+	return { provider: settings.getDefaultProvider(), model: settings.getDefaultModel() };
+}
+
 /** The subset of Pi's ModelRuntime the daemon reads; Pi always provides all three. */
 export type ConfigurableModelRuntime = Pick<ModelRuntime, "getModel" | "hasConfiguredAuth" | "getProviderAuthStatus">;
 

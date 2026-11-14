@@ -3,6 +3,7 @@
 
 import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { parsePublicHttpUrl } from "../net/public-url.ts";
+import { log } from "../observability/log.ts";
 
 const SEARCH_URL = "https://api.search.tinyfish.ai";
 const FETCH_URL = "https://api.fetch.tinyfish.ai";
@@ -84,15 +85,6 @@ export interface TinyFishToolParams {
 	query?: string;
 	url?: string;
 	offset?: number;
-}
-
-export interface TinyFishToolExecution {
-	content: string;
-	details: Record<string, string | number | boolean>;
-	event: {
-		kind: "tool_search" | "tool_fetch" | "error";
-		payload: Record<string, string | number | boolean>;
-	};
 }
 
 interface TinyFishToolDependencies {
@@ -338,17 +330,11 @@ async function cachedFetch(url: string, fetchPage: (url: string) => Promise<Fetc
 	return page;
 }
 
-function toolFailure(error: unknown, stage: "tool_search" | "tool_fetch", hostname?: string): TinyFishToolExecution {
+function toolFailure(error: unknown, stage: "tool_search" | "tool_fetch"): string {
 	const category =
 		error instanceof TinyFishClientError ? error.category : stage === "tool_fetch" ? "fetch_failed" : "search_network";
-	return {
-		content: `search failed: ${category}`,
-		details: { mode: stage === "tool_fetch" ? "url" : "query", category },
-		event: {
-			kind: "error",
-			payload: { stage, ...(hostname ? { hostname } : {}), category },
-		},
-	};
+	log.info("agent", "error", { stage, category });
+	return `search failed: ${category}`;
 }
 
 export async function runTinyFishTool(
@@ -356,14 +342,13 @@ export async function runTinyFishTool(
 	params: TinyFishToolParams,
 	deps: TinyFishToolDependencies = {},
 	signal?: AbortSignal,
-): Promise<TinyFishToolExecution> {
+): Promise<string> {
 	signal?.throwIfAborted();
 	const queryProvided = Object.hasOwn(params, "query");
 	const urlProvided = Object.hasOwn(params, "url");
 	const query = typeof params.query === "string" ? params.query.trim() : "";
 	const rawUrl = typeof params.url === "string" ? params.url.trim() : "";
 	const offsetProvided = params.offset !== undefined;
-	// Pi validates types and lengths against the tool schema; the pairing rules live here.
 	if (
 		Number(queryProvided) + Number(urlProvided) !== 1 ||
 		(queryProvided && (!query || offsetProvided)) ||
@@ -375,11 +360,8 @@ export async function runTinyFishTool(
 	if (query) {
 		try {
 			const hits = await (deps.search ?? tinyFishSearch)(apiKey, query, { signal });
-			return {
-				content: formatSearchResults(hits),
-				details: { mode: "query", hits: hits.length },
-				event: { kind: "tool_search", payload: { stage: "tool_search", hits: hits.length } },
-			};
+			log.info("agent", "tool_search", { hits: hits.length });
+			return formatSearchResults(hits);
 		} catch (error) {
 			return toolFailure(error, "tool_search");
 		}
@@ -395,30 +377,9 @@ export async function runTinyFishTool(
 		const fetchPage = deps.fetchPage ?? tinyFishFetch;
 		const page = await cachedFetch(validated.url, (url) => fetchPage(apiKey, url, { signal }));
 		const view = formatFetchedPage(page, params.offset ?? 0);
-		const tokens = estimateTextTokens(view.text);
-		const truncated = page.truncated || view.nextOffset !== undefined;
-		const position = {
-			offset: view.offset,
-			end: view.end,
-			total: view.total,
-			...(view.nextOffset !== undefined ? { next_offset: view.nextOffset } : {}),
-		};
-		return {
-			content: view.text,
-			details: { mode: "url", hostname: page.hostname, chars: page.characters, tokens, truncated, ...position },
-			event: {
-				kind: "tool_fetch",
-				payload: {
-					stage: "tool_fetch",
-					hostname: page.hostname,
-					chars: page.characters,
-					tokens,
-					truncated,
-					...position,
-				},
-			},
-		};
+		log.info("agent", "tool_fetch", { chars: page.characters, offset: view.offset });
+		return view.text;
 	} catch (error) {
-		return toolFailure(error, "tool_fetch", validated.hostname);
+		return toolFailure(error, "tool_fetch");
 	}
 }

@@ -7,15 +7,12 @@ import {
 	AssistantEntry,
 	configure,
 	type Conversation,
-	type ConversationHandle,
 	type ConversationId,
 	defineDoc,
 	defineExtension,
 	defineTask,
 	defineTool,
 	type Harness,
-	type SettledSubmissionRecord,
-	type Submission,
 	type TaskId,
 	type ToolExecutionApi,
 	ToolTask,
@@ -77,39 +74,6 @@ const Anchor = defineTask<null, { phase: "done" }, null>({
 	phases: { done: (_task, runtime, context) => runtime.commit(() => finished, context) },
 	abort: (_task, runtime, context) => runtime.commit(() => aborted, context),
 });
-
-function pause(runtime: { setTimer(callback: () => void, delayMs: number): () => void }, ms: number, context: Context) {
-	return new Promise<void>((resolve, reject) => {
-		const signal = context.abortSignal;
-		if (signal?.aborted) return reject(signal.reason);
-		const onAbort = () => {
-			disarm();
-			reject(signal?.reason);
-		};
-		const disarm = runtime.setTimer(() => {
-			signal?.removeEventListener("abort", onAbort);
-			resolve();
-		}, ms);
-		signal?.addEventListener("abort", onAbort, { once: true });
-	});
-}
-
-async function settledOrWithdrawn(
-	submission: Submission,
-	subagent: ConversationHandle,
-	waitPause: () => Promise<void>,
-	context: Context,
-): Promise<SettledSubmissionRecord | undefined> {
-	const settled = submission.wait(context);
-	for (;;) {
-		const idle = subagent.waitForIdle(context).then(() => true);
-		if (!(await Promise.race([settled.then(() => false), idle]))) return settled;
-		if ((await submission.status(context)).status !== "queued") return settled;
-		await waitPause();
-		if ((await submission.status(context)).status !== "queued") return settled;
-		if ((await submission.abort(context)) === "aborted") return undefined;
-	}
-}
 
 function reportInput(id: string, row: TaskInfo, phase: Phase | "progress", text: string, requestId: string) {
 	return {
@@ -176,17 +140,17 @@ const Reporter = defineTask<
 				{ type: "input", content: task.input.content, requestId: `task-input:${task.id}`, whenBusy: "steer" },
 				context,
 			);
-			const result = await settledOrWithdrawn(submission, child, () => pause(runtime, 1_000, context), context);
+			const result = await submission.wait(context);
 			await runtime.commit(async (tx) => {
 				const current = (await tx.doc(Tasks, runtime.conversationId)).items[task.input.id];
 				if (!current || current.phase !== "running" || current.reporter !== task.id) return finished;
 				const answer =
-					result?.status === "done" && result.type === "input"
+					result.status === "done" && result.type === "input"
 						? await tx.entry(AssistantEntry, result.answer)
 						: undefined;
 				const text = answer?.model?.[0]
 					? contentText(answer.model[0].content)
-					: result?.status === "unanswered"
+					: result.status === "unanswered"
 						? result.reason
 						: "No result";
 				return { status: "running", checkpoint: { phase: "report", text, status: answer ? "done" : "failed" } };

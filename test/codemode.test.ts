@@ -87,7 +87,7 @@ test("nested send does not prematurely terminate its code mode script", { timeou
 	assert.equal(result.requests, 2);
 });
 
-test("concurrent code mode scripts queue instead of failing worker limit", { timeout: 30_000 }, async () => {
+test("concurrent code mode scripts succeed within worker limit", { timeout: 30_000 }, async () => {
 	const models = createModels();
 	const faux = fauxProvider({ tokensPerSecond: 100_000 });
 	models.setProvider(faux.provider);

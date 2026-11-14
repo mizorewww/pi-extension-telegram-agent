@@ -3,7 +3,7 @@ import { readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context, type Context } from "@earendil-works/chord/context";
 import { estimateContextTokens, estimateMessageTokens, estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
-import { clampThinkingLevel, contentText, type Message } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, contentText } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
 	Harness,
@@ -15,8 +15,6 @@ import {
 	hook,
 	InboxDoc,
 	LiveDoc,
-	ProviderDoc,
-	UsageDoc,
 	type Conversation,
 	type EntryRecord,
 } from "@earendil-works/pi-durable";
@@ -42,13 +40,12 @@ import { ensureVision, type VisionExecutor } from "../media/vision.ts";
 import type { VisionScheduler } from "../media/vision-scheduler.ts";
 import type { SemanticIndex } from "../tools/semantic.ts";
 import { log } from "../observability/log.ts";
-import type { ContextComposition, RuntimeControlSnapshot } from "../observability/usage.ts";
+import type { ContextComposition, RuntimeControlSnapshot } from "../observability/status.ts";
 import { WorkBox } from "../sandbox/box.ts";
 import type { TaskManager } from "../tasks/manager.ts";
 import { TelegramTypingLease } from "../telegram/activity.ts";
 import { type BotApi, groupReactionAllowlist } from "../telegram/api.ts";
 import { buildSystemPrompt, CACHE_SCHEMA_VERSION, REPLY_RECOVERY_PROMPT, sha256Short } from "./prompt.ts";
-import { PromptCacheWarmer } from "./cache-warmer.ts";
 import { guardModels } from "./provider-guard.ts";
 import { buildBotRuntimeTools } from "./runtime-tools.ts";
 import { boundedText, serializeMessageEvents, serializeMessageSegments, type MessageRow } from "./serialize.ts";
@@ -124,8 +121,6 @@ export class BotRuntime {
 	private harness!: Harness;
 	private conversation!: Conversation;
 	private tasks: TaskManager | null = null;
-	private warmer: PromptCacheWarmer | null = null;
-	private lastRequestMessages: readonly Message[] | null = null;
 	private persona = "";
 	private prompt = "";
 	private toolFingerprint = "";
@@ -183,7 +178,6 @@ export class BotRuntime {
 			allowedReactions: () => this.reactions,
 			currentMessage: (_api, ctx) => this.currentMessage(ctx),
 			recordSend: (ctx) => this.recordSend(ctx),
-			recordEvent: (kind) => log.info("agent", kind),
 			resetBox: (reason) => this.resetBox(reason),
 		});
 		this.tasks = tools.tasks;
@@ -195,38 +189,18 @@ export class BotRuntime {
 					hook(GenerationTask, {
 						beforeRequest: async (request, api, ctx) => {
 							if (api.conversationId !== this.conversation.id) return;
-							this.warmer?.stop();
 							this.typing.start();
 							await this.admitTaskReplies(ctx);
 							const { entries } = await this.conversation.context(ctx);
 							this.requestEstimate = total(this.estimateComposition(entries));
-							const messages = projectStickerNotes(request.messages, entries);
-							this.lastRequestMessages = messages;
-							return { messages };
+							return { messages: projectStickerNotes(request.messages, entries) };
 						},
-						afterResponse: async (message, api, ctx) => {
+						afterResponse: (message, api) => {
 							if (api.conversationId !== this.conversation.id) return;
-							const promptTokens = message.usage.input + message.usage.cacheRead + message.usage.cacheWrite;
-							if (message.stopReason === "error" || message.stopReason === "aborted") {
-								this.typing.stop();
-							} else {
-								if (this.requestEstimate) this.tokenScale = promptTokens / this.requestEstimate;
-								const model = this.models.getModel(message.provider, message.model);
-								if (model && this.lastRequestMessages) {
-									const sessionId = (await this.harness.snapshot(ProviderDoc, this.conversation.id, ctx))?.sessionId;
-									this.warmer?.start({
-										model,
-										messages: this.lastRequestMessages,
-										promptTokens,
-										options: {
-											cacheRetention: this.bot.cacheRetention,
-											timeoutMs: this.bot.providerTimeoutMs,
-											...(this.bot.reasoningEffort === "off" ? {} : { reasoning: this.bot.reasoningEffort }),
-											...(sessionId ? { sessionId } : {}),
-										},
-									});
-								}
-							}
+							if (message.stopReason === "error" || message.stopReason === "aborted") this.typing.stop();
+							else if (this.requestEstimate)
+								this.tokenScale =
+									(message.usage.input + message.usage.cacheRead + message.usage.cacheWrite) / this.requestEstimate;
 							log.info("agent", "response", {
 								outcome: message.stopReason,
 								input_tokens: message.usage.input,
@@ -250,44 +224,13 @@ export class BotRuntime {
 		);
 		const directory = join(this.config.dataDir, "pi");
 		mkdirSync(directory, { recursive: true });
-		const guardedModels = guardModels(this.models, () => ({
-			timeoutMs: this.bot.providerTimeoutMs,
-			contextWindow: this.contextWindow(),
-		}));
-		this.warmer = new PromptCacheWarmer({
-			models: guardedModels,
-			phase: async () => {
-				if (this.stopping || this.changing) return undefined;
-				const live = await this.harness.snapshot(LiveDoc, this.conversation.id, context);
-				if (live?.compactions?.length) return undefined;
-				return live?.run ? "streaming" : "idle";
-			},
-			recordUsage: async (message) => {
-				await this.conversation.commit(async (tx) => {
-					const usage = await tx.doc(UsageDoc, this.conversation.id);
-					const key = `${message.provider}/${message.model}`;
-					const current = usage.models[key];
-					if (!current) {
-						usage.models[key] = { ...message.usage, cost: { ...message.usage.cost } };
-						return;
-					}
-					current.input += message.usage.input;
-					current.output += message.usage.output;
-					current.cacheRead += message.usage.cacheRead;
-					current.cacheWrite += message.usage.cacheWrite;
-					current.totalTokens += message.usage.totalTokens;
-					current.cost.input += message.usage.cost.input;
-					current.cost.output += message.usage.cost.output;
-					current.cost.cacheRead += message.usage.cost.cacheRead;
-					current.cost.cacheWrite += message.usage.cost.cacheWrite;
-					current.cost.total += message.usage.cost.total;
-				}, context);
-			},
-		});
 		this.harness = await Harness.open(
 			await openNodeSqliteStorage(join(directory, "agent.sqlite")),
 			{
-				models: guardedModels,
+				models: guardModels(this.models, () => ({
+					timeoutMs: this.bot.providerTimeoutMs,
+					contextWindow: this.contextWindow(),
+				})),
 				registry,
 				env: () => this.workBox?.env,
 				settings: () => ({
@@ -754,8 +697,6 @@ export class BotRuntime {
 	}
 
 	private async reset(workspace: boolean): Promise<number> {
-		this.warmer?.stop();
-		this.lastRequestMessages = null;
 		await this.conversation.abort(context, { background: true });
 		await this.tasks?.clear();
 		this.typing.stop();
@@ -872,7 +813,6 @@ export class BotRuntime {
 	}
 	async stop(): Promise<void> {
 		this.stopping = true;
-		this.warmer?.stop();
 		this.typing.stop();
 		if (this.cooldownTimer) clearTimeout(this.cooldownTimer);
 		try {

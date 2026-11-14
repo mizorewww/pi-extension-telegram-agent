@@ -2,12 +2,11 @@
 import type { Database } from "../db/db.ts";
 import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { contentText, type AssistantMessage, type ImageContent, type TextContent } from "@earendil-works/pi-ai";
+import { contentText, type ImageContent, type TextContent } from "@earendil-works/pi-ai";
 import type { BotApi } from "../telegram/api.ts";
 import type { BotConfig } from "../config.ts";
 import { classifyPiProviderFailure, type PiProviderFailureCategory } from "../agent/model-runtime.ts";
 import { appendMediaUpdateEvents } from "../db/message-events.ts";
-import { log } from "../observability/log.ts";
 import { dedupeInFlight, isVideoMedia, isVisionMedia } from "./local-cache.ts";
 import {
 	prepareMediaImages,
@@ -34,21 +33,6 @@ export type VisionOutcome =
 	| "media_download_aborted"
 	| Exclude<PrepareMediaImagesFailure, "aborted">
 	| PiProviderFailureCategory;
-export interface VisionTelemetry {
-	kind: VisionKind;
-	latencyMs: number;
-	inputTokens: number;
-	outputTokens: number;
-	reasoningTokens: number;
-	cost: number;
-	outcome: VisionOutcome;
-	frames?: number;
-	providerCalled?: boolean;
-}
-export interface VisionDescriptionResult {
-	text: string | null;
-	telemetry: VisionTelemetry;
-}
 export interface VisionDescribeInput {
 	kind: VisionKind;
 	images: PreparedImage[];
@@ -57,28 +41,12 @@ export interface VisionDescribeInput {
 export interface VisionExecutor {
 	/** `provider/model` that writes descriptions now; recorded with each cached one. */
 	model(): string;
-	describe(input: VisionDescribeInput): Promise<VisionDescriptionResult>;
+	describe(input: VisionDescribeInput): Promise<{ text: string | null; outcome: VisionOutcome }>;
 }
 export interface EnsureVisionOptions extends PrepareMediaImagesOptions {
-	onTelemetry?: (telemetry: VisionTelemetry) => void;
 	scheduler?: VisionScheduler;
 }
-function telemetry(
-	kind: VisionKind,
-	started: number,
-	outcome: VisionOutcome,
-	message?: AssistantMessage,
-): VisionTelemetry {
-	return {
-		kind,
-		latencyMs: Math.round(performance.now() - started),
-		outcome,
-		inputTokens: message?.usage.input ?? 0,
-		outputTokens: message?.usage.output ?? 0,
-		reasoningTokens: message?.usage.reasoning ?? 0,
-		cost: message?.usage.cost.total ?? 0,
-	};
-}
+
 /** Describes media with the bot's current chat model, which hybrid mode requires to accept images. */
 export function createPiVisionExecutor(
 	runtime: Pick<ModelRuntime, "getModel" | "completeSimple">,
@@ -89,7 +57,6 @@ export function createPiVisionExecutor(
 		async describe(input) {
 			const model = runtime.getModel(bot.provider, bot.model)!;
 			const effort = bot.reasoningEffort;
-			const started = performance.now();
 			const prompt =
 				input.kind === "video"
 					? input.videoSticker
@@ -107,11 +74,9 @@ export function createPiVisionExecutor(
 					});
 				content.push({ type: "image", data: Buffer.from(image.bytes).toString("base64"), mimeType: image.mimeType });
 			}
-			let message: AssistantMessage | undefined;
-			let outcome: VisionOutcome;
-			let text: string | null = null;
+			const signal = AbortSignal.timeout(VISION_TIMEOUT_MS);
 			try {
-				message = await deadline((signal) =>
+				const message = await awaitWithContext(
 					runtime.completeSimple(
 						model,
 						{ messages: [{ role: "user", content, timestamp: Date.now() }] },
@@ -124,31 +89,21 @@ export function createPiVisionExecutor(
 							signal,
 						},
 					),
+					withAbortSignal(signal, BACKGROUND_CONTEXT),
 				);
-				if (message.stopReason === "error" || message.stopReason === "aborted")
-					outcome = classifyPiProviderFailure(new Error(message.errorMessage ?? message.stopReason));
-				else {
-					text = contentText(message.content).trim() || null;
-					outcome = text ? "ok" : "empty_response";
+				if (message.stopReason === "error" || message.stopReason === "aborted") {
+					return {
+						text: null,
+						outcome: classifyPiProviderFailure(new Error(message.errorMessage ?? message.stopReason)),
+					};
 				}
+				const text = contentText(message.content).trim() || null;
+				return { text, outcome: text ? "ok" : "empty_response" };
 			} catch (error) {
-				outcome = classifyPiProviderFailure(error);
+				return { text: null, outcome: classifyPiProviderFailure(error) };
 			}
-			return {
-				text,
-				telemetry: {
-					...telemetry(input.kind, started, outcome, message),
-					frames: input.images.length,
-					providerCalled: true,
-				},
-			};
 		},
 	};
-}
-/** A provider that ignores its timeout still releases the shared vision slot. */
-function deadline<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
-	const signal = AbortSignal.timeout(VISION_TIMEOUT_MS);
-	return awaitWithContext(work(signal), withAbortSignal(signal, BACKGROUND_CONTEXT));
 }
 
 const inFlight = new Map<string, Promise<string | null>>();
@@ -171,7 +126,6 @@ export function ensureVision(
 				? "sticker"
 				: "photo";
 		const run = async () => {
-			const started = performance.now();
 			const prepared = await prepareMediaImages(db, api, fileUniqueId, options);
 			const result = prepared.ok
 				? await executor.describe({
@@ -181,29 +135,20 @@ export function ensureVision(
 					})
 				: {
 						text: null,
-						telemetry: telemetry(
-							kind,
-							started,
-							prepared.outcome === "aborted" ? "media_download_aborted" : prepared.outcome,
-						),
+						outcome: prepared.outcome === "aborted" ? ("media_download_aborted" as const) : prepared.outcome,
 					};
-			if (result.text || result.telemetry.outcome === "unsupported_format") {
+			if (result.text || result.outcome === "unsupported_format") {
 				db.prepare("UPDATE media SET vision = ? WHERE file_unique_id = ?").run(
 					JSON.stringify({
 						model: executor.model(),
 						kind,
 						text: result.text,
-						outcome: result.telemetry.outcome,
+						outcome: result.outcome,
 						at: Date.now(),
 					}),
 					fileUniqueId,
 				);
 				if (result.text) appendMediaUpdateEvents(db, fileUniqueId, result.text);
-			}
-			try {
-				options.onTelemetry?.(result.telemetry);
-			} catch {
-				log.error("vision", "telemetry_sink_failed", { category: "observer_failed" });
 			}
 			return result.text;
 		};

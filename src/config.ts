@@ -23,7 +23,7 @@ import {
 import type { ModelThinkingLevel as ThinkingLevel } from "@earendil-works/pi-ai";
 import type { BoxConfig } from "./sandbox/box.ts";
 import type { TasksConfig } from "./tasks/manager.ts";
-import { loadPiModelDefaults, type PiModelDefaults } from "./agent/model-settings.ts";
+import { loadPiModelDefaults, type PiModelDefaults } from "./agent/model-runtime.ts";
 import { DEFAULT_DECIDER_THRESHOLD, GEMINI_DECIDER_PROVIDER } from "./agent/decider.ts";
 
 /** Pi keeps this much room for the next response; compaction_threshold must leave it free. */

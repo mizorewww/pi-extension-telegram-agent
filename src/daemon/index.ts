@@ -14,7 +14,6 @@ import { MessageRouter } from "../agent/router.ts";
 import { BotRuntime } from "../agent/runtime.ts";
 import type { MessageRow } from "../agent/serialize.ts";
 import { loadConfig } from "../config.ts";
-import { configureHttpDispatcher } from "../net/http.ts";
 import { getDaemonState, openDb, setDaemonState } from "../db/db.ts";
 import { applyRetention } from "../db/retention.ts";
 import { pruneMediaCache } from "../media/lifecycle.ts";
@@ -28,15 +27,15 @@ import { BotApi } from "../telegram/api.ts";
 import {
 	parseTelegramControlCallback,
 	parseTelegramControlCommand,
+	publishTelegramControlMenu,
 	TelegramControlCommandService,
+	TelegramControlCoordinator,
 } from "../telegram/control-command.ts";
-import { publishTelegramControlMenu, TelegramControlCoordinator } from "../telegram/control-integration.ts";
 import type { IngestResult } from "../telegram/ingest.ts";
 import { Poller } from "../telegram/poller.ts";
 
 // systemd is the only supervisor and keeps a single copy of this process.
 const config = loadConfig();
-configureHttpDispatcher(config.bot.providerTimeoutMs);
 const videoTranscoder = inspectVideoTranscoder();
 // Frame sampling feeds video descriptions.
 const mediaNeedsFrames = config.media.mode !== "off";
