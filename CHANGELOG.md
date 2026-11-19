@@ -1,3 +1,7 @@
+# v1.1.13
+
+- 新增 `compaction_model`（`provider/model`）：上下文压缩可以用和聊天模型不同的模型写摘要，不写则仍用聊天模型。启动时和聊天模型一样校验模型目录与 Pi 认证；只替换压缩摘要这一次调用，Pi 原生的摘要提示词、重试与持久化检查点不变，cache-visible 协议不变。
+
 # v1.1.12
 
 - 新增 `cron` 工具（模型与 Code Mode 均可调用）：支持相对时长（`15m`/`2h`/`1d`）、带时区 ISO 时间（单次提醒）与 5 段 cron 表达式（按服务时区周期触发），持久化在 `daemon_state` 中跨重启与 `/new` 保留；`/task` 与 `/task cancel cN` 同步支持查看与管理员取消。cache schema 升到 58。
