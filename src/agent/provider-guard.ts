@@ -63,8 +63,15 @@ export function guardProviderCall(
 	);
 }
 
-/** Guard both generation and native compaction while keeping Pi's catalog, auth and routing untouched. */
-export function guardModels(models: Models, getOptions: () => { timeoutMs: number; contextWindow?: number }): Models {
+/**
+ * Guard both generation and native compaction while keeping Pi's catalog, auth and routing untouched. Generation
+ * streams; Pi's compaction summarizer is the harness's only `completeSimple` caller, so `summaryModel` replaces the
+ * chat model there and nowhere else.
+ */
+export function guardModels(
+	models: Models,
+	getOptions: () => { timeoutMs: number; contextWindow?: number; summaryModel?: Model<Api> },
+): Models {
 	const stream: Models["streamSimple"] = (model, context, options) =>
 		guardProviderCall(
 			(signal) => models.streamSimple(model, context, { ...options, signal }),
@@ -81,7 +88,9 @@ export function guardModels(models: Models, getOptions: () => { timeoutMs: numbe
 					return model && limit != null ? { ...model, contextWindow: Math.min(model.contextWindow, limit) } : model;
 				};
 			if (property === "streamSimple") return stream;
-			if (property === "completeSimple") return (...args: Parameters<typeof stream>) => stream(...args).result();
+			if (property === "completeSimple")
+				return (...[model, ...rest]: Parameters<typeof stream>) =>
+					stream(getOptions().summaryModel ?? model, ...rest).result();
 			const value = Reflect.get(target, property, target);
 			return typeof value === "function" ? value.bind(target) : value;
 		},

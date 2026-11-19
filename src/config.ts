@@ -53,6 +53,7 @@ export const configSchema = obj({
 	cache_retention: opt(oneOf(["none", "short", "long"])),
 	compaction_threshold: opt(positive),
 	compaction_keep_recent: opt(positive),
+	compaction_model: opt(str({ pattern: "^[^/\\s]+/\\S+$" })),
 	cooldown_ms: opt(num({ minimum: 0 })),
 	provider_timeout_ms: opt(num({ minimum: 1000, maximum: 3_600_000 })),
 	provider_retries: opt(int({ minimum: 0, maximum: 5 })),
@@ -129,6 +130,8 @@ export interface BotConfig {
 	reasoningEffort: ThinkingLevel;
 	compactionThreshold: number;
 	compactionKeepRecent: number;
+	/** Writes compaction summaries instead of the chat model; null: the chat model does. */
+	compactionModel: { provider: string; model: string } | null;
 	cacheRetention: CacheRetention;
 	providerTimeoutMs: number;
 	providerRetries: number;
@@ -307,6 +310,7 @@ export function loadConfig(rootDir = configDirectory(), options: LoadConfigOptio
 		);
 	const tools = raw.tools ?? {};
 	const deciderSlash = raw.decider?.model.indexOf("/") ?? -1;
+	const compactionSlash = raw.compaction_model?.indexOf("/") ?? -1;
 	const bot: BotConfig = {
 		name: str(raw.name) || "bot",
 		token: identityOnly ? "" : (env[raw.token_env] ?? ""),
@@ -325,6 +329,12 @@ export function loadConfig(rootDir = configDirectory(), options: LoadConfigOptio
 		reasoningEffort: raw.reasoning_effort ?? "off",
 		compactionThreshold,
 		compactionKeepRecent: raw.compaction_keep_recent ?? 20_000,
+		compactionModel: raw.compaction_model
+			? {
+					provider: raw.compaction_model.slice(0, compactionSlash),
+					model: raw.compaction_model.slice(compactionSlash + 1),
+				}
+			: null,
 		cacheRetention: raw.cache_retention ?? "short",
 		providerTimeoutMs: raw.provider_timeout_ms ?? 300_000,
 		providerRetries: raw.provider_retries ?? 2,

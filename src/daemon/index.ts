@@ -49,8 +49,10 @@ if (mediaNeedsFrames && !videoTranscoder) {
 }
 const { bot } = config;
 const chatModel = { provider: bot.provider, model: bot.model, thinkingLevel: bot.reasoningEffort, purpose: "bot" };
-const sharedModelRuntime = await createSharedModelRuntime([chatModel], () =>
-	createInstalledPiModelRuntime({ cwd: config.configDir }),
+const compactionModel = bot.compactionModel ? { ...bot.compactionModel, purpose: "compaction" } : null;
+const sharedModelRuntime = await createSharedModelRuntime(
+	[chatModel, ...(compactionModel ? [compactionModel] : [])],
+	() => createInstalledPiModelRuntime({ cwd: config.configDir }),
 );
 if (config.media.mode === "hybrid") {
 	// Hybrid descriptions send images to the chat model; one without image input would
@@ -68,6 +70,7 @@ log.info("daemon", "bot_configured", {
 	reasoning: bot.reasoningEffort,
 	auth: piAuthSource(sharedModelRuntime, bot.provider),
 	decider: bot.decider ? `${bot.decider.provider}/${bot.decider.model}` : null,
+	compaction: compactionModel ? `${compactionModel.provider}/${compactionModel.model}` : null,
 });
 // The bot's identity recognizes its own messages and mentions; it also owns the archive's file_ids.
 const api = new BotApi(bot.token);

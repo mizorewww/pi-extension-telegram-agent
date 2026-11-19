@@ -232,6 +232,9 @@ export class BotRuntime {
 				models: guardModels(this.models, () => ({
 					timeoutMs: this.bot.providerTimeoutMs,
 					contextWindow: this.contextWindow(),
+					summaryModel: this.bot.compactionModel
+						? this.models.getModel(this.bot.compactionModel.provider, this.bot.compactionModel.model)
+						: undefined,
 				})),
 				registry,
 				env: () => this.workBox?.env,

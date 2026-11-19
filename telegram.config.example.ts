@@ -44,6 +44,9 @@ export default {
 	compaction_threshold: 32_768,
 	// Recent tokens kept verbatim after a summary (about 1-2 turns at 20K).
 	compaction_keep_recent: 20_000,
+	// provider/model that writes the summaries; defaults to the chat model. Needs Pi auth, and a
+	// context window larger than compaction_threshold.
+	// compaction_model: "devin/swe-2",
 	// Quiet time after a turn before unaddressed messages are judged again.
 	cooldown_ms: 2_000,
 	// Per-attempt provider timeout and extra retries (backoff 10s/20s/40s ...).
