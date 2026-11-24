@@ -12,7 +12,7 @@ name: CI heal
 
 on:
   workflow_run:
-    workflows: ["Core CI"]
+    workflows: ["Core CI", "Release"]
     types: [completed]
 
 permissions:
@@ -46,6 +46,7 @@ jobs:
           CI_WORKFLOWS: "Core CI"
           PORT_WORKFLOW: ""
           PORT_BRANCH_INPUT: "false"
+          RELEASE_WORKFLOW: "Release"
 
   fix:
     needs: triage

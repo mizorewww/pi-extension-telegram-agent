@@ -161,3 +161,4 @@ personas/*.md
 
 # pi-subagents run artifacts
 .pi/subagents/
+__pycache__/
