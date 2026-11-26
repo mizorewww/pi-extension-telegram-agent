@@ -33,7 +33,7 @@ curl -fsSL https://github.com/mizorewww/pi-extension-telegram-agent/releases/lat
 
 Pi Telegram Agent 把一个带有人设的 AI 成员放进 Telegram 群，一次部署对应一个 bot。群友通过 @、回复或名称邀请 bot 回应；其余消息（包括其他 bot 的发言）交给一个小型判断模型决定要不要接话，它只读最近几行消息，不进入 bot 的上下文；没有配置判断模型时每条都接。
 
-判断模型默认用 `google/gemini-decision-1`（Gemini Decisions API，用 `.env` 的 `gemini_api_key`），它还会看最近几条消息里的图片、sticker 和视频截帧；也可以换成任一 Pi classifier，例如 `openrouter/perplexity/pplx-decider-v1.3`；Pi 目录里还没有的 classifier，在 Pi `models.json` 对应 provider 的 `models` 里加一条 `"type": "classifier"` 条目即可。标注好的判断示例属于部署数据，不进代码库：把 markdown 文件放进配置目录，用 `decider.examples_path` 指向它，仓库已在 `.gitignore` 忽略 `decider-examples*.md`。[示例 gist](https://gist.github.com/mizorewww/1dc8c6d7f2e5e563e79ed910c009bae9) 里有一套为 pplx-decider 调过的示例；在真实群聊上实测，Gemini 不带示例效果最好。
+判断模型默认用 `google/gemini-decision-1`（Gemini Decisions API，用 `.env` 的 `gemini_api_key`），它还会看最近几条消息里的图片、sticker 和视频截帧；也可以换成任一 Pi classifier，例如 `openrouter/~perplexity/pplx-decider-latest`（OpenRouter 别名，始终指向最新的 Decider；Pi 1.5.2 的 `models.json` 不能新增 classifier，只能用 Pi 目录里已有的 id）。标注好的判断示例属于部署数据，不进代码库：把 markdown 文件放进配置目录，用 `decider.examples_path` 指向它，仓库已在 `.gitignore` 忽略 `decider-examples*.md`。[示例 gist](https://gist.github.com/mizorewww/1dc8c6d7f2e5e563e79ed910c009bae9) 里有一套为 pplx-decider 调过的示例；在真实群聊上实测，Gemini 不带示例效果最好。
 
 | 能力 | 使用方式 |
 |---|---|
