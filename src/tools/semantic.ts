@@ -1,23 +1,28 @@
 // Semantic recall over the group archive. Consecutive messages are cut into closed conversation
-// windows (deterministic, no LLM), embedded once with Gemini, and ranked in memory by cosine
+// windows (deterministic, no LLM), embedded once through OpenRouter, and ranked in memory by cosine
 // similarity. Only window text leaves the host; logs carry counts and categories, never content.
 
 import { setImmediate, setTimeout as sleep } from "node:timers/promises";
 import { transaction, type Database } from "../db/db.ts";
 import { errorCategory, log } from "../observability/log.ts";
 
-export const EMBEDDING_MODEL = "gemini-embedding-2";
+export const EMBEDDING_MODEL = "qwen/qwen3-embedding-8b";
+/** Pi provider whose stored credential pays for embeddings. */
+export const EMBEDDING_PROVIDER = "openrouter";
+// Qwen3 embeddings are Matryoshka-trained: the first 768 of 4096 dimensions, renormalized, are a valid
+// embedding. Upstreams that ignore `dimensions` are truncated the same way.
 const DIMENSIONS = 768;
-const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:batchEmbedContents`;
+const ENDPOINT = "https://openrouter.ai/api/v1/embeddings";
+// Qwen3-Embedding takes an instruction on queries only; documents are embedded as-is.
+const QUERY_INSTRUCT =
+	"Instruct: Given a description of something said in a group chat, retrieve the chat snippets where it was discussed\nQuery:";
 /** A window closes after this much silence; open windows are not indexed yet. */
 export const WINDOW_GAP_SEC = 30 * 60;
 // Measured on the production archive: 800-char windows (~20 messages) ranked better than 1500 or 3000.
 const WINDOW_MAX_CHARS = 800;
 const WINDOW_MAX_MESSAGES = 40;
 const LINE_MAX_CHARS = 500;
-const BATCH_SIZE = 100; // API maximum per batchEmbedContents request
-// The embed quota (~1M tokens/min at ~0.62 tokens/char) is shared with queries; backfill leaves half of it.
-const INDEX_CHARS_PER_MIN = 800_000;
+const BATCH_SIZE = 100;
 const DEFAULT_RETRY_MS = 60_000;
 const SCAN_PAGE = 2_000;
 const INDEX_INTERVAL_MS = 5 * 60_000;
@@ -151,21 +156,14 @@ export async function embedTexts(
 	task: "document" | "query",
 	signal?: AbortSignal,
 ): Promise<Float32Array[]> {
-	// gemini-embedding-2 takes its retrieval task as an input prefix, not a taskType field.
-	const requests = texts.map((text) => ({
-		model: `models/${EMBEDDING_MODEL}`,
-		content: {
-			parts: [{ text: task === "query" ? `task: search result | query: ${text}` : `title: none | text: ${text}` }],
-		},
-		outputDimensionality: DIMENSIONS,
-	}));
+	const input = task === "query" ? texts.map((text) => QUERY_INSTRUCT + text) : texts;
 	const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
 	let response: Response;
 	try {
 		response = await fetch(ENDPOINT, {
 			method: "POST",
-			headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
-			body: JSON.stringify({ requests }),
+			headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+			body: JSON.stringify({ model: EMBEDDING_MODEL, input, dimensions: DIMENSIONS, encoding_format: "float" }),
 			signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
 		});
 	} catch (error) {
@@ -173,22 +171,23 @@ export async function embedTexts(
 		throw new SemanticError(timeout.aborted ? "timeout" : "network");
 	}
 	if (response.status === 429) {
-		const body = (await response.json().catch(() => null)) as {
-			error?: { details?: { retryDelay?: unknown }[] };
-		} | null;
-		const delay = body?.error?.details?.find((d) => typeof d.retryDelay === "string")?.retryDelay as string | undefined;
-		const seconds = delay ? Number.parseFloat(delay) : Number.NaN;
+		await response.body?.cancel();
+		const seconds = Number.parseFloat(response.headers.get("retry-after") ?? "");
 		throw new SemanticError("http_429", Number.isFinite(seconds) ? Math.ceil(seconds * 1000) : undefined);
 	}
 	if (!response.ok) {
 		await response.body?.cancel();
 		throw new SemanticError(response.status >= 500 ? "http_5xx" : "http_4xx");
 	}
-	const body = (await response.json().catch(() => null)) as { embeddings?: { values?: unknown }[] } | null;
-	const vectors = body?.embeddings?.map(({ values }) =>
-		Array.isArray(values) && values.length === DIMENSIONS ? Float32Array.from(values as number[]) : null,
-	);
-	if (!vectors || vectors.length !== texts.length || vectors.some((v) => v == null))
+	const body = (await response.json().catch(() => null)) as {
+		data?: { index?: unknown; embedding?: unknown }[];
+	} | null;
+	const vectors: (Float32Array | undefined)[] = new Array(texts.length);
+	for (const { index, embedding } of body?.data ?? []) {
+		if (typeof index !== "number" || !Array.isArray(embedding) || embedding.length < DIMENSIONS) continue;
+		vectors[index] = Float32Array.from((embedding as number[]).slice(0, DIMENSIONS));
+	}
+	if (body?.data?.length !== texts.length || vectors.some((v) => v == null))
 		throw new SemanticError("invalid_response");
 	return vectors.map((v) => normalize(v!));
 }
@@ -215,7 +214,8 @@ export class SemanticIndex {
 	constructor(
 		private readonly db: Database,
 		private readonly chatId: number,
-		private readonly apiKey: string,
+		/** Read per request so a credential rotated in Pi's auth store takes effect without a restart. */
+		private readonly apiKey: () => Promise<string>,
 	) {}
 
 	start(): void {
@@ -249,7 +249,7 @@ export class SemanticIndex {
 		candidate: ((firstId: number, lastId: number) => boolean) | null,
 		signal?: AbortSignal,
 	): Promise<SemanticMatch[]> {
-		const [q] = await embedTexts(this.apiKey, [query], "query", signal);
+		const [q] = await embedTexts(await this.apiKey(), [query], "query", signal);
 		this.load();
 		const scored: SemanticMatch[] = [];
 		for (let i = 0; i < this.firstIds.length; i++) {
@@ -311,10 +311,9 @@ export class SemanticIndex {
 			const windows = closedWindows(this.db, this.chatId, this.indexedThrough() ?? 0, now, BATCH_SIZE);
 			if (windows.length === 0) break;
 			const texts = windows.map((w) => w.text);
-			const started = Date.now();
 			let vectors: Float32Array[];
 			try {
-				vectors = await embedTexts(this.apiKey, texts, "document", this.stopper.signal);
+				vectors = await embedTexts(await this.apiKey(), texts, "document", this.stopper.signal);
 			} catch (error) {
 				if (!(error instanceof SemanticError && error.category === "http_429")) throw error;
 				const wait = error.retryAfterMs ?? DEFAULT_RETRY_MS;
@@ -328,10 +327,7 @@ export class SemanticIndex {
 			});
 			this.append(windows.map((w, i) => ({ firstId: w.firstId, lastId: w.lastId, vector: vectors[i]! })));
 			total += windows.length;
-			const chars = texts.reduce((sum, text) => sum + text.length, 0);
-			const paced = (chars / INDEX_CHARS_PER_MIN) * 60_000 - (Date.now() - started);
-			if (paced > 0) await sleep(paced, undefined, { signal: this.stopper.signal });
-			else await setImmediate();
+			await setImmediate();
 		}
 		if (total > 0)
 			log.info("semantic_index", "windows_indexed", { windows: total, indexed_windows: this.firstIds.length });

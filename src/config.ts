@@ -352,8 +352,6 @@ export function loadConfig(rootDir = configDirectory(), options: LoadConfigOptio
 	if (!identityOnly && !tinyfishApiKey && bot.tools.search)
 		errors.push('[config] tools.search: needs "tiny_fish_api_key" in .env');
 	const geminiApiKey = env.gemini_api_key ?? "";
-	if (!identityOnly && !geminiApiKey && bot.tools.semantic)
-		errors.push('[config] tools.semantic: needs "gemini_api_key" in .env');
 	if (!identityOnly && !geminiApiKey && bot.decider?.provider === GEMINI_DECIDER_PROVIDER)
 		errors.push('[config] decider: google models need "gemini_api_key" in .env');
 	if (bot.tools.semantic && !bot.tools.codemode)

@@ -22,7 +22,7 @@ import { createPiVisionExecutor } from "../media/vision.ts";
 import { VisionScheduler } from "../media/vision-scheduler.ts";
 import { errorCategory, log } from "../observability/log.ts";
 import { BOX_RESET_CHECK_MS, runWeeklyBoxReset } from "../sandbox/schedule.ts";
-import { SemanticIndex } from "../tools/semantic.ts";
+import { EMBEDDING_PROVIDER, SemanticError, SemanticIndex } from "../tools/semantic.ts";
 import { BotApi } from "../telegram/api.ts";
 import {
 	parseTelegramControlCallback,
@@ -62,6 +62,8 @@ if (config.media.mode === "hybrid") {
 		throw new PiModelConfigurationError("image_input_unsupported", bot.provider, bot.model, "bot");
 }
 const sharedVisionExecutor = config.media.mode === "hybrid" ? createPiVisionExecutor(sharedModelRuntime, bot) : null;
+if (bot.tools.semantic && !sharedModelRuntime.hasConfiguredAuth(EMBEDDING_PROVIDER))
+	throw new Error(`tools.semantic: Pi provider ${EMBEDDING_PROVIDER} is not authenticated`);
 const decider = bot.decider ? createDecider(sharedModelRuntime, bot.decider, bot.name, config.geminiApiKey) : null;
 const visionScheduler = sharedVisionExecutor ? new VisionScheduler(config.media.concurrency) : null;
 log.info("daemon", "bot_configured", {
@@ -85,7 +87,13 @@ setDaemonState(db, "bot_username", me.username);
 const identity = { userId: me.id, username: me.username, name: bot.name };
 log.info("daemon", "bot_identity_ready", { telegram_user_id: me.id, username: me.username });
 const mediaDir = join(config.dataDir, "media");
-const semantic = bot.tools.semantic ? new SemanticIndex(db, config.groupChatId, config.geminiApiKey) : null;
+const semantic = bot.tools.semantic
+	? new SemanticIndex(db, config.groupChatId, async () => {
+			const auth = await sharedModelRuntime.getAuth(EMBEDDING_PROVIDER);
+			if (!auth?.auth.apiKey) throw new SemanticError("http_4xx");
+			return auth.auth.apiKey;
+		})
+	: null;
 const runtime = new BotRuntime(db, bot, config, sharedModelRuntime, {
 	api,
 	decider,

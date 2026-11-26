@@ -1,3 +1,7 @@
+# v1.1.14
+
+- 群历史语义搜索改用 OpenRouter `qwen/qwen3-embedding-8b`（768 维，Matryoshka 截断），凭证取自 Pi 的 `openrouter` 认证，不再需要 `.env` 的 `gemini_api_key`；未认证时启动失败。升级后旧的 `gemini-embedding-2` 向量会被丢弃并自动重建索引（约 1.6 万段，成本约 $0.1），重建期间语义检索只覆盖已完成的部分。
+
 # v1.1.13
 
 - 新增 `compaction_model`（`provider/model`）：上下文压缩可以用和聊天模型不同的模型写摘要，不写则仍用聊天模型。启动时和聊天模型一样校验模型目录与 Pi 认证；只替换压缩摘要这一次调用，Pi 原生的摘要提示词、重试与持久化检查点不变，cache-visible 协议不变。
